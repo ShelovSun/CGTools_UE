@@ -1,0 +1,171 @@
+QTabBar::tab {
+    color: #b1b1b1;
+    border: 1px solid #444;
+    border-bottom-style: none;
+    background-color: #323232;
+    padding-left: 10px;
+    padding-right: 10px;
+    padding-top: 3px;
+    padding-bottom: 2px;
+    margin-right: -1px;
+}
+
+QTabWidget::pane {
+    border: 1px solid #444;
+    top: 1px;
+}
+
+QTabBar::tab:last
+{
+    margin-right: 0;
+    border-top-right-radius: 3px;
+}
+
+QTabBar::tab:first:!selected
+{
+    margin-left: 0px;
+    border-top-left-radius: 3px;
+}
+
+QTabBar::tab:!selected
+{
+    color: #b1b1b1;
+    border-bottom-style: solid;
+    margin-top: 3px;
+    background-color: QLinearGradient(x1:0, y1:0, x2:0, y2:1, stop:1 #212121, stop:.4 #343434);
+}
+
+QTabBar::tab:selected
+{
+    border-top-left-radius: 3px;
+    border-top-right-radius: 3px;
+    margin-bottom: 0px;
+}
+
+QTabBar::tab:!selected:hover
+{
+    border-top-left-radius: 3px;
+    border-top-right-radius: 3px;
+    background-color: QLinearGradient(x1:0, y1:0, x2:0, y2:1, stop:1 #212121, stop:0.4 #343434, stop:0.2 #343434, stop:0.1 #ffaa00);
+}
+QWidget#Form
+{
+	background-color: rgb(60, 60, 60);
+	color: rgb(200, 200, 200);
+}
+QWidget::disabled
+{
+    color: rgb(90, 90, 90);
+}
+
+QWidget
+{
+    background-color: rgb(43, 43, 43);
+    color: rgb(230, 230, 230)
+}
+QWidget:item
+{
+    background-color: rgb(43, 43, 43);
+    color: rgb(230, 230, 230)
+}
+QDialog
+{
+	background-color: rgb(60, 60, 60);
+	color: rgb(200, 200, 200);
+}
+
+QComboBox
+{
+	background-color: rgb(43, 43, 43);
+	color: rgb(200, 200, 200);
+}
+
+QToolTip
+{
+     border: 1px solid black;
+     background-color: #ffa02f;
+     padding: 1px;
+     border-radius: 3px;
+     opacity: 100;
+}
+
+QPushButton
+{	
+	background-color: rgb(80, 80, 80);
+	color: rgb(200, 200, 200);
+}
+QLabel
+{	
+	color: rgb(200, 200, 200);
+}
+QCheckBox
+{
+	color: rgb(200, 200, 200);
+}
+QRadioButton
+{
+	color: rgb(200, 200, 200);
+}
+QListWidget
+{
+	background-color: rgb(33, 33, 33);
+	color: rgb(200, 200, 200);
+}
+QListWidget:item
+{
+    background-color: rgb(0, 53, 0);
+    border: 1px solid #7d7d7d;
+    color: rgb(243, 0, 0)
+}
+QTreeWidget
+{
+	background-color: rgb(43, 43, 43);
+	color: rgb(200, 200, 200);
+}
+QLineEdit
+{
+    background-color: rgb(20, 20, 20);
+	color: rgb(200, 200, 200);
+    padding: 1px;
+    border-style: solid;
+    border: 1px solid #1e1e1e;
+    border-radius: 5;
+}
+
+QScrollBar:vertical {
+        width: 20px;
+        background: transparent;
+        margin-left: 3px;
+        margin-right: 3px;
+}
+QScrollBar::handle:vertical {
+        width: 20px;
+        min-height: 30px;
+        background: rgb(68, 69, 73);
+        margin-top: 15px;
+        margin-bottom: 15px;
+}
+QScrollBar::handle:vertical:hover {
+        background: rgb(80, 80, 80);
+}
+QScrollBar::sub-line:vertical {
+        height: 15px;
+        background: transparent;
+        image: url(:/Black/arrowTop);
+        subcontrol-position: top;
+}
+QScrollBar::add-line:vertical {
+        height: 15px;
+        background: transparent;
+        image: url(:/Black/arrowBottom);
+        subcontrol-position: bottom;
+}
+QScrollBar::sub-line:vertical:hover {
+        background: rgb(68, 69, 73);
+}
+QScrollBar::add-line:vertical:hover {
+        background: rgb(68, 69, 73);
+}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+        background: transparent;
+}

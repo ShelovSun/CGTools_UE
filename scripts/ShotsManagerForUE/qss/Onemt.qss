@@ -1,0 +1,5 @@
+QLabel#TitleImage
+{
+    background: url(:/icon/colt_logo.png);
+	background-color: rgb(200, 200, 200);
+}

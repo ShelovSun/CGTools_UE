@@ -1,0 +1,615 @@
+//defaultPrefix_LipsUpperUp_L_new_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_LipsUpperUp_L_Ctr.translateY defaultFaceBlendShape.LipsUpperUp_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipsUpperUp_L_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.LipsUpperUp_L_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_LipsUpperUp_L_Ctr.translateY defaultFaceBlendShape.LipsUpperUp_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipsUpperUp_L_Ctr.translateY" 0;
+
+
+
+//defaultPrefix_LipsLowerDown_L_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_LipsLowerDown_L_Ctr.translateY defaultFaceBlendShape.LipsLowerDown_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipsLowerDown_L_Ctr.translateY" -1;
+setAttr "defaultFaceBlendShape.LipsLowerDown_L_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_LipsLowerDown_L_Ctr.translateY defaultFaceBlendShape.LipsLowerDown_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipsLowerDown_L_Ctr.translateY" 0;
+
+
+
+//defaultPrefix_LipsUpperOpen_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_LipsUpperOpen_Ctr.translateY defaultFaceBlendShape.LipsUpperOpen_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipsUpperOpen_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.LipsUpperOpen_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_LipsUpperOpen_Ctr.translateY defaultFaceBlendShape.LipsUpperOpen_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipsUpperOpen_Ctr.translateY" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_LipsUpperOpen_Ctr.translateY defaultFaceBlendShape.LipsUpperClose_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipsUpperOpen_Ctr.translateY" -1;
+setAttr "defaultFaceBlendShape.LipsUpperClose_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_LipsUpperOpen_Ctr.translateY defaultFaceBlendShape.LipsUpperClose_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipsUpperOpen_Ctr.translateY" 0;
+
+
+
+//defaultPrefix_LipsLowerOpen_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_LipsLowerOpen_Ctr.translateY defaultFaceBlendShape.LipsLowerOpen_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipsLowerOpen_Ctr.translateY" -1;
+setAttr "defaultFaceBlendShape.LipsLowerOpen_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_LipsLowerOpen_Ctr.translateY defaultFaceBlendShape.LipsLowerOpen_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipsLowerOpen_Ctr.translateY" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_LipsLowerOpen_Ctr.translateY defaultFaceBlendShape.LipsLowerClose_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipsLowerOpen_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.LipsLowerClose_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_LipsLowerOpen_Ctr.translateY defaultFaceBlendShape.LipsLowerClose_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipsLowerOpen_Ctr.translateY" 0;
+
+
+
+//defaultPrefix_LipsUpperUp_R_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_LipsUpperUp_R_Ctr.translateY defaultFaceBlendShape.LipsUpperUp_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipsUpperUp_R_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.LipsUpperUp_R_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_LipsUpperUp_R_Ctr.translateY defaultFaceBlendShape.LipsUpperUp_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipsUpperUp_R_Ctr.translateY" 0;
+
+
+//defaultPrefix_LipsLowerDown_R_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_LipsLowerDown_R_Ctr.translateY defaultFaceBlendShape.LipsLowerDown_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipsLowerDown_R_Ctr.translateY" -1;
+setAttr "defaultFaceBlendShape.LipsLowerDown_R_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_LipsLowerDown_R_Ctr.translateY defaultFaceBlendShape.LipsLowerDown_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipsLowerDown_R_Ctr.translateY" 0;
+
+
+//defaultPrefix_Mouth_Move_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_Mouth_Move_Ctr.translateY defaultFaceBlendShape.MouthUp_new;
+// Result: 1 // 
+setAttr "defaultPrefix_Mouth_Move_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.MouthUp_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_Mouth_Move_Ctr.translateY defaultFaceBlendShape.MouthUp_new;
+// Result: 1 // 
+setAttr "defaultPrefix_Mouth_Move_Ctr.translateY" 0;
+
+setDrivenKeyframe -currentDriver defaultPrefix_Mouth_Move_Ctr.translateY defaultFaceBlendShape.MouthDown_new;
+// Result: 1 // 
+setAttr "defaultPrefix_Mouth_Move_Ctr.translateY" -1;
+setAttr "defaultFaceBlendShape.MouthDown_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_Mouth_Move_Ctr.translateY defaultFaceBlendShape.MouthDown_new;
+// Result: 1 // 
+setAttr "defaultPrefix_Mouth_Move_Ctr.translateY" 0;
+
+setDrivenKeyframe -currentDriver defaultPrefix_Mouth_Move_Ctr.translateX defaultFaceBlendShape.MouthLeft_new;
+// Result: 1 // 
+setAttr "defaultPrefix_Mouth_Move_Ctr.translateX" 1;
+setAttr "defaultFaceBlendShape.MouthLeft_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_Mouth_Move_Ctr.translateX defaultFaceBlendShape.MouthLeft_new;
+// Result: 1 // 
+setAttr "defaultPrefix_Mouth_Move_Ctr.translateX" 0;
+
+setDrivenKeyframe -currentDriver defaultPrefix_Mouth_Move_Ctr.translateX defaultFaceBlendShape.MouthRight_new;
+// Result: 1 // 
+setAttr "defaultPrefix_Mouth_Move_Ctr.translateX" -1;
+setAttr "defaultFaceBlendShape.MouthRight_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_Mouth_Move_Ctr.translateX defaultFaceBlendShape.MouthRight_new;
+// Result: 1 // 
+setAttr "defaultPrefix_Mouth_Move_Ctr.translateX" 0;
+
+
+
+//defaultPrefix_MouthDimple_L_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_MouthDimple_L_Ctr.translateX defaultFaceBlendShape.MouthDimple_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_MouthDimple_L_Ctr.translateX" 1;
+setAttr "defaultFaceBlendShape.MouthDimple_L_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_MouthDimple_L_Ctr.translateX defaultFaceBlendShape.MouthDimple_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_MouthDimple_L_Ctr.translateX" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_MouthDimple_L_Ctr.translateY defaultFaceBlendShape.MouthPress_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_MouthDimple_L_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.MouthPress_L_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_MouthDimple_L_Ctr.translateY defaultFaceBlendShape.MouthPress_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_MouthDimple_L_Ctr.translateY" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_MouthDimple_L_Ctr.translateY defaultFaceBlendShape.MouthFrown_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_MouthDimple_L_Ctr.translateY" -1;
+setAttr "defaultFaceBlendShape.MouthFrown_L_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_MouthDimple_L_Ctr.translateY defaultFaceBlendShape.MouthFrown_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_MouthDimple_L_Ctr.translateY" 0;
+
+
+
+//defaultPrefix_MouthDimple_R_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_MouthDimple_R_Ctr.translateX defaultFaceBlendShape.MouthDimple_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_MouthDimple_R_Ctr.translateX" -1;
+setAttr "defaultFaceBlendShape.MouthDimple_R_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_MouthDimple_R_Ctr.translateX defaultFaceBlendShape.MouthDimple_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_MouthDimple_R_Ctr.translateX" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_MouthDimple_R_Ctr.translateY defaultFaceBlendShape.MouthPress_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_MouthDimple_R_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.MouthPress_R_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_MouthDimple_R_Ctr.translateY defaultFaceBlendShape.MouthPress_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_MouthDimple_R_Ctr.translateY" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_MouthDimple_R_Ctr.translateY defaultFaceBlendShape.MouthFrown_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_MouthDimple_R_Ctr.translateY" -1;
+setAttr "defaultFaceBlendShape.MouthFrown_R_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_MouthDimple_R_Ctr.translateY defaultFaceBlendShape.MouthFrown_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_MouthDimple_R_Ctr.translateY" 0;
+
+
+
+
+//defaultPrefix_ChinLowerRaise_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_ChinLowerRaise_Ctr.translateY defaultFaceBlendShape.ChinLowerRaise_new;
+// Result: 1 // 
+setAttr "defaultPrefix_ChinLowerRaise_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.ChinLowerRaise_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_ChinLowerRaise_Ctr.translateY defaultFaceBlendShape.ChinLowerRaise_new;
+// Result: 1 // 
+setAttr "defaultPrefix_ChinLowerRaise_Ctr.translateY" 0;
+
+
+//defaultPrefix_ChinUpperRaise_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_ChinUpperRaise_Ctr.translateY defaultFaceBlendShape.ChinUpperRaise_new;
+// Result: 1 // 
+setAttr "defaultPrefix_ChinUpperRaise_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.ChinUpperRaise_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_ChinUpperRaise_Ctr.translateY defaultFaceBlendShape.ChinUpperRaise_new;
+// Result: 1 // 
+setAttr "defaultPrefix_ChinUpperRaise_Ctr.translateY" 0;
+
+
+
+//defaultPrefix_JawMo_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_JawMo_Ctr.translateY defaultFaceBlendShape.JawOpen_new;
+// Result: 1 // 
+setAttr "defaultPrefix_JawMo_Ctr.translateY" -1;
+setAttr "defaultFaceBlendShape.JawOpen_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_JawMo_Ctr.translateY defaultFaceBlendShape.JawOpen_new;
+// Result: 1 // 
+setAttr "defaultPrefix_JawMo_Ctr.translateY" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_JawMo_Ctr.translateX defaultFaceBlendShape.JawLeft_new;
+// Result: 1 // 
+setAttr "defaultPrefix_JawMo_Ctr.translateX" 1;
+setAttr "defaultFaceBlendShape.JawLeft_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_JawMo_Ctr.translateX defaultFaceBlendShape.JawLeft_new;
+// Result: 1 // 
+setAttr "defaultPrefix_JawMo_Ctr.translateX" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_JawMo_Ctr.translateX defaultFaceBlendShape.JawRight_new;
+// Result: 1 // 
+setAttr "defaultPrefix_JawMo_Ctr.translateX" -1;
+setAttr "defaultFaceBlendShape.JawRight_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_JawMo_Ctr.translateX defaultFaceBlendShape.JawRight_new;
+// Result: 1 // 
+setAttr "defaultPrefix_JawMo_Ctr.translateX" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_JawMo_Ctr.translateZ defaultFaceBlendShape.JawFwd_new;
+// Result: 1 // 
+setAttr "defaultPrefix_JawMo_Ctr.translateZ" 1;
+setAttr "defaultFaceBlendShape.JawFwd_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_JawMo_Ctr.translateZ defaultFaceBlendShape.JawFwd_new;
+// Result: 1 // 
+setAttr "defaultPrefix_JawMo_Ctr.translateZ" 0;
+
+
+
+//defaultPrefix_MouthSmile_L_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_MouthSmile_L_Ctr.translateY defaultFaceBlendShape.MouthSmile_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_MouthSmile_L_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.MouthSmile_L_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_MouthSmile_L_Ctr.translateY defaultFaceBlendShape.MouthSmile_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_MouthSmile_L_Ctr.translateY" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_MouthSmile_L_Ctr.translateY defaultFaceBlendShape.LipsStretch_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_MouthSmile_L_Ctr.translateY" -1;
+setAttr "defaultFaceBlendShape.LipsStretch_L_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_MouthSmile_L_Ctr.translateY defaultFaceBlendShape.LipsStretch_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_MouthSmile_L_Ctr.translateY" 0;
+
+
+//defaultPrefix_MouthSmile_R_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_MouthSmile_R_Ctr.translateY defaultFaceBlendShape.MouthSmile_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_MouthSmile_R_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.MouthSmile_R_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_MouthSmile_R_Ctr.translateY defaultFaceBlendShape.MouthSmile_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_MouthSmile_R_Ctr.translateY" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_MouthSmile_R_Ctr.translateY defaultFaceBlendShape.LipsStretch_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_MouthSmile_R_Ctr.translateY" -1;
+setAttr "defaultFaceBlendShape.LipsStretch_R_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_MouthSmile_R_Ctr.translateY defaultFaceBlendShape.LipsStretch_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_MouthSmile_R_Ctr.translateY" 0;
+
+
+
+//defaultPrefix_Sneer_L_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_Sneer_L_Ctr.translateY defaultFaceBlendShape.Sneer_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_Sneer_L_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.Sneer_L_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_Sneer_L_Ctr.translateY defaultFaceBlendShape.Sneer_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_Sneer_L_Ctr.translateY" 0;
+
+
+//defaultPrefix_Sneer_R_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_Sneer_R_Ctr.translateY defaultFaceBlendShape.Sneer_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_Sneer_R_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.Sneer_R_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_Sneer_R_Ctr.translateY defaultFaceBlendShape.Sneer_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_Sneer_R_Ctr.translateY" 0;
+
+
+//defaultPrefix_Nose_M_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_Nose_M_Ctr.translateY defaultFaceBlendShape.NostrilDepress_new;
+// Result: 1 // 
+setAttr "defaultPrefix_Nose_M_Ctr.translateY" -1;
+setAttr "defaultFaceBlendShape.NostrilDepress_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_Nose_M_Ctr.translateY defaultFaceBlendShape.NostrilDepress_new;
+// Result: 1 // 
+setAttr "defaultPrefix_Nose_M_Ctr.translateY" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_Nose_M_Ctr.translateX defaultFaceBlendShape.NostrilDilator_new;
+// Result: 1 // 
+setAttr "defaultPrefix_Nose_M_Ctr.translateX" 1;
+setAttr "defaultFaceBlendShape.NostrilDilator_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_Nose_M_Ctr.translateX defaultFaceBlendShape.NostrilDilator_new;
+// Result: 1 // 
+setAttr "defaultPrefix_Nose_M_Ctr.translateX" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_Nose_M_Ctr.translateX defaultFaceBlendShape.NostrilContractor_new;
+// Result: 1 // 
+setAttr "defaultPrefix_Nose_M_Ctr.translateX" -1;
+setAttr "defaultFaceBlendShape.NostrilContractor_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_Nose_M_Ctr.translateX defaultFaceBlendShape.NostrilContractor_new;
+// Result: 1 // 
+setAttr "defaultPrefix_Nose_M_Ctr.translateX" 0;
+
+
+
+//defaultPrefix_CheekSquint_L_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_CheekSquint_L_Ctr.translateY defaultFaceBlendShape.CheekSquint_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_CheekSquint_L_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.CheekSquint_L_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_CheekSquint_L_Ctr.translateY defaultFaceBlendShape.CheekSquint_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_CheekSquint_L_Ctr.translateY" 0;
+
+
+//defaultPrefix_CheekSquint_R_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_CheekSquint_R_Ctr.translateY defaultFaceBlendShape.CheekSquint_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_CheekSquint_R_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.CheekSquint_R_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_CheekSquint_R_Ctr.translateY defaultFaceBlendShape.CheekSquint_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_CheekSquint_R_Ctr.translateY" 0;
+
+
+//defaultPrefix_BrowsD_L_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_BrowsD_L_Ctr.translateY defaultFaceBlendShape.BrowsD_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_BrowsD_L_Ctr.translateY" -1;
+setAttr "defaultFaceBlendShape.BrowsD_L_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_BrowsD_L_Ctr.translateY defaultFaceBlendShape.BrowsD_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_BrowsD_L_Ctr.translateY" 0;
+
+
+//defaultPrefix_BrowsD_R_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_BrowsD_R_Ctr.translateY defaultFaceBlendShape.BrowsD_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_BrowsD_R_Ctr.translateY" -1;
+setAttr "defaultFaceBlendShape.BrowsD_R_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_BrowsD_R_Ctr.translateY defaultFaceBlendShape.BrowsD_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_BrowsD_R_Ctr.translateY" 0;
+
+
+//defaultPrefix_BrowsU_L_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_BrowsU_L_Ctr.translateY defaultFaceBlendShape.BrowsU_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_BrowsU_L_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.BrowsU_L_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_BrowsU_L_Ctr.translateY defaultFaceBlendShape.BrowsU_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_BrowsU_L_Ctr.translateY" 0;
+
+
+//defaultPrefix_BrowsU_R_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_BrowsU_R_Ctr.translateY defaultFaceBlendShape.BrowsU_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_BrowsU_R_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.BrowsU_R_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_BrowsU_R_Ctr.translateY defaultFaceBlendShape.BrowsU_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_BrowsU_R_Ctr.translateY" 0;
+
+
+//defaultPrefix_BrowsU_C_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_BrowsU_C_Ctr.translateY defaultFaceBlendShape.BrowsU_C_new;
+// Result: 1 // 
+setAttr "defaultPrefix_BrowsU_C_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.BrowsU_C_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_BrowsU_C_Ctr.translateY defaultFaceBlendShape.BrowsU_C_new;
+// Result: 1 // 
+setAttr "defaultPrefix_BrowsU_C_Ctr.translateY" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_BrowsU_C_Ctr.translateY defaultFaceBlendShape.BrowsSqueeze_new;
+// Result: 1 // 
+setAttr "defaultPrefix_BrowsU_C_Ctr.translateY" -1;
+setAttr "defaultFaceBlendShape.BrowsSqueeze_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_BrowsU_C_Ctr.translateY defaultFaceBlendShape.BrowsSqueeze_new;
+// Result: 1 // 
+setAttr "defaultPrefix_BrowsU_C_Ctr.translateY" 0;
+
+
+//defaultPrefix_EyeMove_L_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_EyeMove_L_Ctr.translateY defaultFaceBlendShape.EyeUp_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeMove_L_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.EyeUp_L_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_EyeMove_L_Ctr.translateY defaultFaceBlendShape.EyeUp_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeMove_L_Ctr.translateY" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_EyeMove_L_Ctr.translateY defaultFaceBlendShape.EyeDown_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeMove_L_Ctr.translateY" -1;
+setAttr "defaultFaceBlendShape.EyeDown_L_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_EyeMove_L_Ctr.translateY defaultFaceBlendShape.EyeDown_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeMove_L_Ctr.translateY" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_EyeMove_L_Ctr.translateX defaultFaceBlendShape.EyeIn_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeMove_L_Ctr.translateX" -1;
+setAttr "defaultFaceBlendShape.EyeIn_L_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_EyeMove_L_Ctr.translateX defaultFaceBlendShape.EyeIn_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeMove_L_Ctr.translateX" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_EyeMove_L_Ctr.translateX defaultFaceBlendShape.EyeOut_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeMove_L_Ctr.translateX" 1;
+setAttr "defaultFaceBlendShape.EyeOut_L_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_EyeMove_L_Ctr.translateX defaultFaceBlendShape.EyeOut_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeMove_L_Ctr.translateX" 0;
+
+
+
+//defaultPrefix_EyeMove_R_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_EyeMove_R_Ctr.translateY defaultFaceBlendShape.EyeUp_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeMove_R_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.EyeUp_R_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_EyeMove_R_Ctr.translateY defaultFaceBlendShape.EyeUp_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeMove_R_Ctr.translateY" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_EyeMove_R_Ctr.translateY defaultFaceBlendShape.EyeDown_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeMove_R_Ctr.translateY" -1;
+setAttr "defaultFaceBlendShape.EyeDown_R_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_EyeMove_R_Ctr.translateY defaultFaceBlendShape.EyeDown_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeMove_R_Ctr.translateY" 0;
+
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_EyeMove_R_Ctr.translateX defaultFaceBlendShape.EyeIn_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeMove_R_Ctr.translateX" 1;
+setAttr "defaultFaceBlendShape.EyeIn_R_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_EyeMove_R_Ctr.translateX defaultFaceBlendShape.EyeIn_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeMove_R_Ctr.translateX" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_EyeMove_R_Ctr.translateX defaultFaceBlendShape.EyeOut_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeMove_R_Ctr.translateX" -1;
+setAttr "defaultFaceBlendShape.EyeOut_R_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_EyeMove_R_Ctr.translateX defaultFaceBlendShape.EyeOut_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeMove_R_Ctr.translateX" 0;
+
+
+//defaultPrefix_EyeSquint_L_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_EyeSquint_L_Ctr.translateY defaultFaceBlendShape.EyeSquint_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeSquint_L_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.EyeSquint_L_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_EyeSquint_L_Ctr.translateY defaultFaceBlendShape.EyeSquint_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeSquint_L_Ctr.translateY" 0;
+
+
+
+
+//defaultPrefix_EyeSquint_R_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_EyeSquint_R_Ctr.translateY defaultFaceBlendShape.EyeSquint_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeSquint_R_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.EyeSquint_R_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_EyeSquint_R_Ctr.translateY defaultFaceBlendShape.EyeSquint_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeSquint_R_Ctr.translateY" 0;
+
+
+//defaultPrefix_EyeOpenClose_L_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_EyeOpenClose_L_Ctr.translateY defaultFaceBlendShape.EyeOpen_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeOpenClose_L_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.EyeOpen_L_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_EyeOpenClose_L_Ctr.translateY defaultFaceBlendShape.EyeOpen_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeOpenClose_L_Ctr.translateY" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_EyeOpenClose_L_Ctr.translateY defaultFaceBlendShape.EyeBlink_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeOpenClose_L_Ctr.translateY" -1;
+setAttr "defaultFaceBlendShape.EyeBlink_L_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_EyeOpenClose_L_Ctr.translateY defaultFaceBlendShape.EyeBlink_L_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeOpenClose_L_Ctr.translateY" 0;
+
+
+
+
+//defaultPrefix_EyeOpenClose_R_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_EyeOpenClose_R_Ctr.translateY defaultFaceBlendShape.EyeOpen_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeOpenClose_R_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.EyeOpen_R_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_EyeOpenClose_R_Ctr.translateY defaultFaceBlendShape.EyeOpen_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeOpenClose_R_Ctr.translateY" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_EyeOpenClose_R_Ctr.translateY defaultFaceBlendShape.EyeBlink_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeOpenClose_R_Ctr.translateY" -1;
+setAttr "defaultFaceBlendShape.EyeBlink_R_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_EyeOpenClose_R_Ctr.translateY defaultFaceBlendShape.EyeBlink_R_new;
+// Result: 1 // 
+setAttr "defaultPrefix_EyeOpenClose_R_Ctr.translateY" 0;
+
+
+
+//defaultPrefix_SuckPuff_L_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_SuckPuff_L_Ctr.translateX defaultFaceBlendShape.Suck_new;
+// Result: 1 // 
+setAttr "defaultPrefix_SuckPuff_L_Ctr.translateX" -1;
+setAttr "defaultFaceBlendShape.Suck_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_SuckPuff_L_Ctr.translateX defaultFaceBlendShape.Suck_new;
+// Result: 1 // 
+setAttr "defaultPrefix_SuckPuff_L_Ctr.translateX" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_SuckPuff_R_Ctr.translateX defaultFaceBlendShape.Suck_new;
+// Result: 1 // 
+setAttr "defaultPrefix_SuckPuff_R_Ctr.translateX" 1;
+setAttr "defaultFaceBlendShape.Suck_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_SuckPuff_R_Ctr.translateX defaultFaceBlendShape.Suck_new;
+// Result: 1 // 
+setAttr "defaultPrefix_SuckPuff_R_Ctr.translateX" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_SuckPuff_L_Ctr.translateX defaultFaceBlendShape.Puff_new;
+// Result: 1 // 
+setAttr "defaultPrefix_SuckPuff_L_Ctr.translateX" 1;
+setAttr "defaultFaceBlendShape.Puff_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_SuckPuff_L_Ctr.translateX defaultFaceBlendShape.Puff_new;
+// Result: 1 // 
+setAttr "defaultPrefix_SuckPuff_L_Ctr.translateX" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_SuckPuff_R_Ctr.translateX defaultFaceBlendShape.Puff_new;
+// Result: 1 // 
+setAttr "defaultPrefix_SuckPuff_R_Ctr.translateX" -1;
+setAttr "defaultFaceBlendShape.Puff_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_SuckPuff_R_Ctr.translateX defaultFaceBlendShape.Puff_new;
+// Result: 1 // 
+setAttr "defaultPrefix_SuckPuff_R_Ctr.translateX" 0;
+
+
+
+
+//defaultPrefix_LipCurl_Ctr
+setDrivenKeyframe -currentDriver defaultPrefix_LipCurl_Ctr.translateY defaultFaceBlendShape.MouthSharpCornerPull_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipCurl_Ctr.translateY" 1;
+setAttr "defaultFaceBlendShape.MouthSharpCornerPull_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_LipCurl_Ctr.translateY defaultFaceBlendShape.MouthSharpCornerPull_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipCurl_Ctr.translateY" 0;
+
+setDrivenKeyframe -currentDriver defaultPrefix_LipCurl_Ctr.translateY defaultFaceBlendShape.LipsFunnel_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipCurl_Ctr.translateY" -1;
+setAttr "defaultFaceBlendShape.LipsFunnel_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_LipCurl_Ctr.translateY defaultFaceBlendShape.LipsFunnel_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipCurl_Ctr.translateY" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_LipCurl_Ctr.translateX defaultFaceBlendShape.LipsPucker_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipCurl_Ctr.translateX" -1;
+setAttr "defaultFaceBlendShape.LipsPucker_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_LipCurl_Ctr.translateX defaultFaceBlendShape.LipsPucker_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipCurl_Ctr.translateX" 0;
+
+
+setDrivenKeyframe -currentDriver defaultPrefix_LipCurl_Ctr.translateX defaultFaceBlendShape.LipsTowards_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipCurl_Ctr.translateX" 1;
+setAttr "defaultFaceBlendShape.LipsTowards_new" 1;
+setDrivenKeyframe -currentDriver defaultPrefix_LipCurl_Ctr.translateX defaultFaceBlendShape.LipsTowards_new;
+// Result: 1 // 
+setAttr "defaultPrefix_LipCurl_Ctr.translateX" 0;
+

@@ -1,0 +1,17 @@
+{
+  "CharacterName":
+  {
+    "Man": ["Abdul", "Armeen", "Amir", "Nasser", "Gamal", "Hassan", "Laden", "Saleh", "Sayed", "Sheikh", "Mohammed"],
+    "Woman": ["Avin", "Janan", "Pantea", "Rozhan", "Maneil", "Taim"]
+  },
+  "ModGroup":
+  {
+    "Body": ["Head", "Body", "Leg", "Arm", "Hand", "Foot", "EyeballRight", "EyeballLeft", "EyelashRight", "EyelashLeft", "Eyebag","Tear", "Pupil", "Lentil", "Teeth", "Tongue"],
+    "Cloth": ["Pants", "Trousers", "Shoes", "Coat", "Jacket", "Cloak", "Manteau", "Tshirt", "Skirt", "Lap", "Hem"],
+    "HairColl": ["Head", "Garments"],
+    "HairDesc": ["HeadHair", "Eyelash", "Eyebrow", "Braid", "Beard", "Ponytail"],
+    "HairScalp": ["HeadHair", "Eyelash", "Eyebrow", "Braid", "Beard", "Ponytail"],
+    "Ornaments": ["Jade", "Crown", "Weapon", "Earring", "Bun", "Rivet"]
+  }
+
+}

@@ -1,0 +1,13 @@
+{
+	"RemapUnityFiles": 
+	{
+		"Module.GetRGB.cpp.obj": [
+			"GetRGB.cpp.obj",
+			"GetRGBBPLibrary.cpp.obj"
+		],
+		"Module.GetRGB.gen.cpp.obj": [
+			"GetRGB.init.gen.cpp.obj",
+			"GetRGBBPLibrary.gen.cpp.obj"
+		]
+	}
+}

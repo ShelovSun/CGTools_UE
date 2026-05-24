@@ -1,0 +1,6 @@
+E:\UE4Test\RGBTest\Plugins\GetRGB\Intermediate\Build\Win64\UE4Editor\Development\GetRGB\Definitions.GetRGB.h
+E:/UE4Test/RGBTest/Plugins/GetRGB/Source/GetRGB/Private/GetRGB.cpp
+E:\UE4Test\RGBTest\Plugins\GetRGB\Source\GetRGB\Public\GetRGB.h
+E:/UE4Test/RGBTest/Plugins/GetRGB/Source/GetRGB/Private/GetRGBBPLibrary.cpp
+E:\UE4Test\RGBTest\Plugins\GetRGB\Source\GetRGB\Public\GetRGBBPLibrary.h
+E:\UE4Test\RGBTest\Plugins\GetRGB\Intermediate\Build\Win64\UE4Editor\Inc\GetRGB\GetRGBBPLibrary.generated.h

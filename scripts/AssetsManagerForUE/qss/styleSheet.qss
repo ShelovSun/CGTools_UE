@@ -1,0 +1,212 @@
+QDialog
+{
+    background-color:rgb(58,58,58);
+    font-family:Calibri;
+
+}
+
+QPushButton
+{
+    background-color:rgb(48,48,48);
+    color:rgb(255,255,255);
+    font-family:Calibri;
+    border: 1px solid gray;
+    padding: 1px 1px 1px 1px;
+    /*min-width: 6em;*/
+    border-radius:6px;
+    border-color:rgb(0,0,0);
+    /*width:120px;*/
+    height:22px;
+
+}
+
+QPushButton::hover
+{
+  border-color:rgb(158,158,158);
+}
+
+
+QPushButton:pressed
+{
+    background-color:rgb(80,80,80);
+    color:rgb(255,255,255);
+    font-family:Calibri;
+    border-radius:10px;
+
+}
+
+
+QComboBox
+{
+    background-color:rgb(48,48,48);
+    color:rgb(255,255,255);
+    font-family:Calibri;
+    border: 1px solid gray;
+    border-color:rgb(0,0,0);
+    border-radius: 3px;
+    min-width: 6em;
+}
+
+
+QComboBox::hover
+{
+  border-color:rgb(158,158,158);
+}
+
+QComboBox::drop-down {
+     subcontrol-origin: padding;
+     subcontrol-position: top right;
+     width: 15px;
+     border-left-width: 1px;
+     border-left-color: 32435E;
+     border-left-style: solid; /* just a single line */
+     border-top-right-radius: 3px; /* same radius as the QComboBox */
+     border-bottom-right-radius: 3px;
+}
+
+QComboBox QAbstractItemView {
+     border: 2px solid #32435E;
+     selection-background-color:rgb(58,58,58);
+     background: rgb(58,58,58);
+     color:rgb(255,255,255);
+}
+
+
+QFrame
+{
+    background-color:rgb(48,48,48);
+}
+
+QGroupBox {
+    background-color: rgb(48,48,48);
+    color:rgb(255,255,255);
+    border: 1px solid gray;
+    border-radius: 5px;
+    border-color:rgb(0,0,0);
+    margin-top: 1ex; /* leave space at the top for the title */
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top center; /* position at the top center */
+    padding: 0 3px;
+    background-color: rgb(48,48,48);
+    color:rgb(255,255,255);
+}
+
+
+QListWidget
+{
+    background-color:rgb(48,48,48);
+    color:rgb(255,255,255);
+    font-family:Calibri;
+    border: 1px solid gray;
+    border-radius:5px;
+    border-color:rgb(0,0,0);
+}
+
+/*QListWidget::item
+{
+    height:14px;
+}*/
+
+QListWidget::item:hover
+{
+    show-decoration-selected:5;
+    background:rgb(18,18,18);
+}
+
+QListWidget::item:selected
+{
+    background:rgb(18,18,18);
+    padding:0px;
+    margin:0px;
+
+    /*color:red;*/
+}
+
+/*上次选择后保留的状态，鼠标离开后显示*/
+QListWidget::item:selected:!active
+{
+    border-width:0px;
+    background:rgb(8,8,8);
+}
+
+QLabel
+{
+    color:rgb(255,255,255);
+    font-family:Calibri;
+
+}
+
+/*垂直滚动条整体*/
+QScrollBar:vertical
+{
+    width:12px;
+    background:rgb(0,0,0,0%);
+    margin:0px,0px,0px,0px;
+    padding-top:12px;   /*上预留位置*/
+    padding-bottom:12px;    /*下预留位置*/
+}
+
+/*滚动条中滑块的样式*/
+QScrollBar::handle:vertical
+{
+    width:8px;
+    background:rgb(0,0,0,25%);
+    border-radius:4px;
+    min-height:20px;
+}
+
+/*鼠标触及滑块样式*/
+QScrollBar::handle:vertical:hover
+{
+    width:9px;
+    background:rgb(0,0,0,50%);
+    border-radius:4px;
+    min-height:20;
+}
+
+/*设置下箭头*/
+QScrollBar::add-line:vertical
+{
+    height:12px;
+    width:10px;
+    border-image:url(:/selectfile/scroll/3.png);
+    subcontrol-position:bottom;
+}
+
+/*设置上箭头*/
+QScrollBar::sub-line:vertical
+{
+    height:12px;
+    width:10px;
+    border-image:url(:/selectfile/scroll/1.png);
+    subcontrol-position:top;
+}
+
+/*设置下箭头:悬浮状态*/
+QScrollBar::add-line:vertical:hover
+{
+    height:12px;
+    width:10px;
+    border-image:url(:/selectfile/scroll/4.png);
+    subcontrol-position:bottom;
+}
+
+/*设置上箭头：悬浮状态*/
+QScrollBar::sub-line:vertical:hover
+{
+    height:12px;
+    width:10px;
+    border-image:url(:/selectfile/scroll/2.png);
+    subcontrol-position:top;
+}
+
+/*当滚动条滚动的时候，上面的部分和下面的部分*/
+QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical
+{
+    background:rgb(0,0,0,10%);
+    border-radius:4px;
+}
+

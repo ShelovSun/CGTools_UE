@@ -1,0 +1,14 @@
+/NOLOGO
+/errorReport:prompt
+/MACHINE:x64
+/SUBSYSTEM:WINDOWS
+/DEF
+/NAME:"UE4Editor-GetRGB.dll"
+/IGNORE:4221
+/NODEFAULTLIB
+"E:\UE4Test\RGBTest\Intermediate\Build\Win64\RGBTestEditor\Development\Engine\SharedPCH.Engine.ShadowErrors.h.obj"
+"E:\UE4Test\RGBTest\Plugins\GetRGB\Intermediate\Build\Win64\UE4Editor\Development\GetRGB\Module.GetRGB.cpp.obj"
+"E:\UE4Test\RGBTest\Plugins\GetRGB\Intermediate\Build\Win64\UE4Editor\Development\GetRGB\Module.GetRGB.gen.cpp.obj"
+"E:\UE4Test\RGBTest\Plugins\GetRGB\Intermediate\Build\Win64\UE4Editor\Development\GetRGB\Default.rc2.res"
+/OUT:"E:\UE4Test\RGBTest\Plugins\GetRGB\Intermediate\Build\Win64\UE4Editor\Development\GetRGB\UE4Editor-GetRGB.lib"
+/INCLUDE:IMPLEMENT_MODULE_GetRGB
