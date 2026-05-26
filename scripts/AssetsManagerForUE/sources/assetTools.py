@@ -9,7 +9,13 @@ import time
 import unreal
 import psycopg2
 
-from PySide2 import QtWidgets, QtUiTools, QtCore, QtGui
+# 添加venv路径，确保UE能找到PySide6
+scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/')
+venv_path = os.path.join(os.path.dirname(scriptsPath), '..', '..', 'venv', 'Lib', 'site-packages').replace('\\', '/')
+if venv_path not in sys.path:
+    sys.path.insert(0, venv_path)
+
+from PySide6 import QtWidgets, QtUiTools, QtCore, QtGui
 
 from functools import partial
 from utils import jsonHelper, assetFunctions, messageBox, myWidget

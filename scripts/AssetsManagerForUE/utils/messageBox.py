@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # sceneTools_Maya Created: 9/5/2021 by Sunxh<175702994@qq.com>
 import os,unreal
-from PySide2 import QtGui, QtWidgets
+from PySide6 import QtGui, QtWidgets
 
 
 def show_msg(msg_icon, icon, msg_tex, tex):

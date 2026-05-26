@@ -2,9 +2,9 @@
 # Created: 9/5/2021 by Sunxh<175702994@qq.com>
 
 import os, re
-from PySide2 import QtGui
-from PySide2 import QtCore
-from PySide2 import QtWidgets
+from PySide6 import QtGui
+from PySide6 import QtCore
+from PySide6 import QtWidgets
 
 
 class Player():

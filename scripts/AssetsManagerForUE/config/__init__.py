@@ -5,7 +5,7 @@ import os
 import json
 import configparser
 
-from PySide2 import QtCore
+from PySide6 import QtCore
 
 scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/')
 

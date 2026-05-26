@@ -1,0 +1,8 @@
+**/__pycache__/
+*.py[cod]
+*.exe
+*.pkg
+*.log
+scripts/assetManager/
+venv/
+.venv/

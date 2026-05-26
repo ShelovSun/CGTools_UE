@@ -7,7 +7,7 @@ import os
 import shutil
 import logging
 
-from PySide2 import QtWidgets
+from PySide6 import QtWidgets
 
 # import utils
 # import utils.gui

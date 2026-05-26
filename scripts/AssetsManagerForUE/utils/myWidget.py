@@ -6,9 +6,9 @@ import os
 import math
 from . import imagesequence
 from my_vendor import six
-from PySide2 import QtGui
-from PySide2 import QtCore
-from PySide2 import QtWidgets
+from PySide6 import QtGui
+from PySide6 import QtCore
+from PySide6 import QtWidgets
 
 scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/').replace('widgets', '')
 tempPath = "{}/AssetsManagerIconTemp".format(os.environ.get('TEMP'))

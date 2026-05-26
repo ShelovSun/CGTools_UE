@@ -7,7 +7,7 @@ import os
 from utils import jsonHelper
 # import cgtw2
 
-from PySide2 import QtCore
+from PySide6 import QtCore
 
 
 # reload(item)

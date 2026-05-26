@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-from PySide2 import QtUiTools, QtWidgets, QtCore, QtGui
+from PySide6 import QtUiTools, QtWidgets, QtCore, QtGui
 import os
 
 DEF_SPACING = 8

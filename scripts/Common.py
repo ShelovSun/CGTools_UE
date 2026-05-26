@@ -26,10 +26,13 @@ def projectSetting():
                       u'ShotsManager': {
                           u'command': u"import ShotsManagerForUE.ShotsManager_UE as SM;SM.showWin()",
                           u'section': u'pipeline', u'type': u'PYTHON', u'label': u'ShotsManager'},
+                      u'Blueprint': {
+                          u'command': u"import ShotsManagerForUE.ShotsManager_UE as SM;SM.showWin()",
+                          u'section': u'Bp', u'type': u'PYTHON', u'label': u'蓝图加载工具'},
                       u'AnimSP': {
                           u'command': u"import Common as I;I.run_utilityWidget(content_widget_path='/Engine/Python/scripts/动画样条K帧/样条线交互工具_WBG')",
                           u'section': u'Anim', u'type': u'PYTHON', u'label': u'动画样条线工具'},},
-            u'section': {u'Assets': u'流程:', u'pipeline': u'', u'Anim': u'动画：', u'Render': u'渲染:', u'Other': u'其他:',
+            u'section': {u'Assets': u'流程:', u'pipeline': u'', u'Anim': u'动画：', u'Bp': u'蓝图：', u'Render': u'渲染:', u'Other': u'其他:',
                          u'Help': u''}}
     return data
 

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Created: 9/5/2021 by Sunxh<175702994@qq.com>
 
-from PySide2 import QtWidgets, QtGui
+from PySide6 import QtWidgets, QtGui
 
 class Player():
     def __init__(self):

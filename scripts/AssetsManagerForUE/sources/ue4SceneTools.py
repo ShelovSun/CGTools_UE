@@ -6,19 +6,18 @@
 
 
 import os, sys, unreal, subprocess
-sys.path.append('Y:\\Onemt\\Marketing\\Shared\\Plug-in\\Unreal\\Python27\\Lib\\site-packages')
-from PySide import QtGui, QtUiTools, QtCore
+from PySide6 import QtWidgets, QtUiTools, QtCore, QtGui
 from functools import partial
 from utils import jsonHelper, exportFunctions
 from imp import reload
 # reload(exportFunctions)
 WINDOW_NAME = 'UE4 Scene Tools'
 
-class UE4SceneToolsUI(QtGui.QWidget):
+class UE4SceneToolsUI(QtWidgets.QWidget):
 
     def __init__(self):
         super(UE4SceneToolsUI, self).__init__()
-        self.setLayout(QtGui.QHBoxLayout())
+        self.setLayout(QtWidgets.QHBoxLayout())
         self.layout().setContentsMargins(2, 2, 2, 2)
         self.init_ui()
 
@@ -75,18 +74,18 @@ class UE4SceneToolsUI(QtGui.QWidget):
         os.environ['PATH'] = 'C:/Program Files/Autodesk/Maya2019/bin;' + os.environ['PATH']
         subprocess.check_call('mayapy -c "import maya.standalone;maya.standalone.initialize();import sys;sys.path.append(r\'%s\');import standaloneMayapy;reload(standaloneMayapy); standaloneMayapy.importFBX(\'%s\'); standaloneMayapy.exportGPU(\'%s\', \'%s\')"' % (utils_dir, fbx_path, gpu_dir[0], gpu_name), shell=True)
         os.remove(fbx_path)
-        print 'Success'
-        QtGui.QMessageBox.information(self, '提示', '导出成功')
+        print('Success')
+        QtWidgets.QMessageBox.information(self, '提示', '导出成功')
 
     def getSceneExportPath(self):
         file_type = 'Alembic (*.abc);;All Files (*.*)'
-        exportScenePath = QtGui.QFileDialog.getSaveFileName(filter=file_type)[0]
+        exportScenePath = QtWidgets.QFileDialog.getSaveFileName(filter=file_type)[0]
         self.ui.exportScenePath_line.setText(str(exportScenePath))
 
 
 APP = None
-if not QtGui.QApplication.instance():
-    APP = QtGui.QApplication(sys.argv)
+if not QtWidgets.QApplication.instance():
+    APP = QtWidgets.QApplication(sys.argv)
 
 def showWindow():
     global win

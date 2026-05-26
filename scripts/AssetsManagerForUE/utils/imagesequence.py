@@ -6,8 +6,8 @@
 import re
 import os
 
-from PySide2 import QtGui
-from PySide2 import QtCore
+from PySide6 import QtGui
+from PySide6 import QtCore
 
 
 __all__ = ['ImageSequence', 'ImageSequenceWidget']
