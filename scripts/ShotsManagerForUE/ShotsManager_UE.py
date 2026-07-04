@@ -6,33 +6,34 @@
 
 import os, sys, shutil,re,shutil,time,getpass,unreal
 scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/')
-sys.path.append('Y:\\ACTools\\LGTSet_UE\\UE4.26.1\\venv\\Lib\\site-packages')
+# 添加venv路径，确保UE能找到PySide6
+sys.path.insert(0, r'Y:\MCCTools\src\venv\Lib\site-packages')
 sys.path.append('%s/uti/'% scriptsPath)
 # import Common
-from PySide2 import QtUiTools, QtWidgets, QtCore, QtGui
+from PySide6 import QtUiTools, QtWidgets, QtCore, QtGui
 from functools import partial
 from .uti import jsonHelper, assetFunctions, sequenceFunctions
-import imp
-imp.reload(sequenceFunctions)
+# import imp
+# imp.reload(sequenceFunctions)
 # imp.reload(jsonHelper)
-imp.reload(assetFunctions)
+# imp.reload(assetFunctions)
 SYSTEMP = os.environ['TMP'].replace('\\', '/')+'/'
 
-sys.path.append('C:\\CgTeamWork_v6.2\\bin\\base')
-try:
-    import cgtw2
-    t_tw = cgtw2.tw()
-    login = t_tw.login.is_login()
-    if login != True:
-        msg = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Information, u"提示：", u"<h3>请先登入CGTeamWork !</h3>")
-        msg.setStandardButtons(QtWidgets.QMessageBox.Cancel)
-        msg.setDefaultButton(QtWidgets.QMessageBox.Cancel)
-        msg.exec_()
-except:
-    msg = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Information, u"提示：", u"<h3>请先登入CGTeamWork !  并且安装在C盘标准目录下!</h3>")
-    msg.setStandardButtons(QtWidgets.QMessageBox.Cancel)
-    msg.setDefaultButton(QtWidgets.QMessageBox.Cancel)
-    msg.exec_()
+# sys.path.append('C:\\CgTeamWork_v6.2\\bin\\base')
+# try:
+#     import cgtw2
+#     t_tw = cgtw2.tw()
+#     login = t_tw.login.is_login()
+#     if login != True:
+#         msg = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Information, u"提示：", u"<h3>请先登入CGTeamWork !</h3>")
+#         msg.setStandardButtons(QtWidgets.QMessageBox.Cancel)
+#         msg.setDefaultButton(QtWidgets.QMessageBox.Cancel)
+#         msg.exec_()
+# except:
+#     msg = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Information, u"提示：", u"<h3>请先登入CGTeamWork !  并且安装在C盘标准目录下!</h3>")
+#     msg.setStandardButtons(QtWidgets.QMessageBox.Cancel)
+#     msg.setDefaultButton(QtWidgets.QMessageBox.Cancel)
+#     msg.exec_()
 
 class CGPipelineToolUEUI(QtWidgets.QWidget):
     def __init__(self):
@@ -62,7 +63,7 @@ class CGPipelineToolUEUI(QtWidgets.QWidget):
             self.ui.Project_ComboBox.setCurrentIndex(proj)
         else:
             self.ui.Project_ComboBox.setCurrentIndex(0)
-        self.getIdea_TW()
+        # self.getIdea_TW()
         if eps is not None:
             self.ui.ani_idea_listWgt.setCurrentRow(eps)
         else:
@@ -288,26 +289,26 @@ class CGPipelineToolUEUI(QtWidgets.QWidget):
 
         self.ui.ani_idea_listWgt.setCurrentRow(0)
     
-    def getIdea_TW(self):
-        '''
-        根据CGT和项目获得创意显示
-        '''
-        current_project = self.ui.Project_ComboBox.currentText()
-        keyword = self.ui.ani_idea_line.text()
-        TW_proj = self.projectSetting()['projectdiction'][current_project]
-        t_eps_ids = t_tw.info.get_id(TW_proj, 'chuangyi', [])
-        eps = t_tw.info.get(TW_proj, 'chuangyi', t_eps_ids, ['chuangyi.creatdate','chuangyi.entity','chuangyi.chname'])
-        epslist = []
-        for info in eps :
-            aa = "{0}_{1}".format(info['chuangyi.creatdate'],info['chuangyi.entity'])+'   /   '+info['chuangyi.chname']
-            epslist.append(aa)
-        epslist.sort(reverse=True)
-        self.ui.ani_idea_listWgt.clear()
-        for i in epslist:
-            if i.lower().find(keyword.lower()) != -1:
-                item = QtWidgets.QListWidgetItem()
-                item.setText(i)
-                self.ui.ani_idea_listWgt.addItem(item)
+    # def getIdea_TW(self):
+    #     '''
+    #     根据CGT和项目获得创意显示
+    #     '''
+    #     current_project = self.ui.Project_ComboBox.currentText()
+    #     keyword = self.ui.ani_idea_line.text()
+    #     TW_proj = self.projectSetting()['projectdiction'][current_project]
+    #     t_eps_ids = t_tw.info.get_id(TW_proj, 'chuangyi', [])
+    #     eps = t_tw.info.get(TW_proj, 'chuangyi', t_eps_ids, ['chuangyi.creatdate','chuangyi.entity','chuangyi.chname'])
+    #     epslist = []
+    #     for info in eps :
+    #         aa = "{0}_{1}".format(info['chuangyi.creatdate'],info['chuangyi.entity'])+'   /   '+info['chuangyi.chname']
+    #         epslist.append(aa)
+    #     epslist.sort(reverse=True)
+    #     self.ui.ani_idea_listWgt.clear()
+    #     for i in epslist:
+    #         if i.lower().find(keyword.lower()) != -1:
+    #             item = QtWidgets.QListWidgetItem()
+    #             item.setText(i)
+    #             self.ui.ani_idea_listWgt.addItem(item)
         # RootPath,current_project,current_idea,current_idea_en,current_idea_ch,current_stage,current_shot,current_fbxfile = self._get_current_data()
         # #current_idea = self.get_current_idea()
         # IdeaPaths = RootPath + '/'+current_project + '/Projects/'
@@ -742,17 +743,22 @@ app = None
 if not QtWidgets.QApplication.instance():
     app = QtWidgets.QApplication(sys.argv)
 
+win = None
+
+
 def showWin():
+    """浮于 UE 之上、随 UE 最小化/还原；挂接与事件驱动封装在共享模块 ue_qt_host。"""
     global win
     try:
         win.close()
-    except:
+    except Exception:
         pass
 
     win = CGPipelineToolUEUI()
     win.setAttribute(QtCore.Qt.WA_DeleteOnClose)
-    # win.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint) #总在全部软件最前，总在UE最前未解决
-    win.show()
+
+    import ue_qt_host
+    ue_qt_host.host_window(win, app=QtWidgets.QApplication.instance())
     
     
     

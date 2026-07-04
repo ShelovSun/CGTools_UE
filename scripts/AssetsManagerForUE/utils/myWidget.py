@@ -49,6 +49,7 @@ class MyDelegate(QtWidgets.QStyledItemDelegate):
 
 class WorkerSignals(QtCore.QObject):
     triggered = QtCore.Signal(object)
+    skipped = QtCore.Signal()  # worker 开跑前判定 item 已不可视 -> 跳过本次加载
 
 
 class ImageWorker(QtCore.QRunnable):
@@ -58,7 +59,13 @@ class ImageWorker(QtCore.QRunnable):
         QtCore.QRunnable.__init__(self, *args)
 
         self._path = None
+        self._size = 256  # 缩放上限（缩略图无需全分辨率，参考独立版 assetManager）
+        self._shouldLoad = None  # 开跑前的可视性回调：返回 False 则跳过，把线程让给当前可见 item
         self.signals = WorkerSignals()
+
+    def setShouldLoad(self, fn):
+        """设置"是否仍需加载"的回调（通常为 lambda: item 仍在可视区）。"""
+        self._shouldLoad = fn
 
     def setPath(self, path):
         """
@@ -68,14 +75,33 @@ class ImageWorker(QtCore.QRunnable):
         """
         self._path = path
 
+    def setSize(self, size):
+        """目标缩放尺寸（像素）。"""
+        self._size = size
+
     def run(self):
-        """The starting point for the thread."""
+        """The starting point for the thread - 在工作线程里就把大图缩小。"""
         try:
-            if self._path:
-                image = QtGui.QImage(six.text_type(self._path))
-                self.signals.triggered.emit(image)
+            # 优先级关键：真正读图前再判一次该 item 是否仍需加载（仍在可视区）。
+            # 快速滚动时，队列里目标已被划走的任务在此立即跳过，把有限线程让给当前可见区 -> 新区域优先刷新。
+            shouldLoad = self._shouldLoad
+            if shouldLoad is not None and not shouldLoad():
+                self.signals.skipped.emit()
+                return
+            if not self._path or not os.path.exists(six.text_type(self._path)):
+                self.signals.triggered.emit(None)
+                return
+            image = QtGui.QImage(six.text_type(self._path))
+            # 优化：过大的图在后台线程缩小，主线程不再处理全分辨率大图（这是卡顿主因）
+            if not image.isNull() and (image.width() > self._size * 2 or
+                                       image.height() > self._size * 2):
+                image = image.scaled(self._size * 2, self._size * 2,
+                                     QtCore.Qt.KeepAspectRatio,
+                                     QtCore.Qt.SmoothTransformation)
+            self.signals.triggered.emit(image)
         except Exception as error:
             print("Cannot load thumbnail image:%s" % error)
+            self.signals.triggered.emit(None)
 
 
 class Pixmap(QtGui.QPixmap):
@@ -107,6 +133,7 @@ class GlobalSignals(QtCore.QObject):
 class WorkerSignals(QtCore.QObject):
     """"""
     triggered = QtCore.Signal(object)
+    skipped = QtCore.Signal()  # worker 开跑前判定 item 已不可视 -> 跳过本次加载（运行时实际使用的是这个类）
 
 
 class PreviewLabel(QtWidgets.QLabel):
@@ -334,6 +361,74 @@ class MainQListWiget(QtWidgets.QListWidget):
         self._delegate.setItemsWidget(self)
         self.setItemDelegate(self._delegate)
 
+        # 视口懒加载：滚动时优先加载"当前可见区"，而不是永远从上往下加载
+        self.verticalScrollBar().valueChanged.connect(self._onScroll)
+        self.horizontalScrollBar().valueChanged.connect(self._onScroll)
+        self._scrollTimer = QtCore.QTimer()
+        self._scrollTimer.setSingleShot(True)
+        self._scrollTimer.timeout.connect(self._updateVisibleItems)
+
+    def _onScroll(self, value=None):
+        """滚动事件：50ms 防抖，把一次连续滚动合并成一次可见区刷新。"""
+        self._scrollTimer.stop()
+        self._scrollTimer.start(50)
+
+    def _updateVisibleItems(self):
+        """
+        计算当前可见区并按优先级触发缩略图加载 —— 解决"永远从上往下加载"的核心方法。
+        优先级：① 真正可见的 item ② 下方预取带 ③ 上方预取带。
+        快速滚动到新区域后新区域优先刷新；已划走的排队任务会在 worker 开跑前自动跳过。
+        列表模式不画缩略图，直接跳过。
+        """
+        if self.isList():
+            return
+        count = self.count()
+        if count == 0:
+            return
+
+        viewportRect = self.viewport().rect()
+
+        # 定位真正可见的区块 [first_visible, last_visible]（item 顺序自上而下）
+        firstVisible = -1
+        lastVisible = -1
+        for i in range(count):
+            itemRect = self.visualItemRect(self.item(i))
+            if viewportRect.intersects(itemRect):
+                if firstVisible == -1:
+                    firstVisible = i
+                lastVisible = i
+            elif firstVisible != -1:
+                break  # 已越过可见区域，提前结束扫描
+
+        if firstVisible == -1:
+            return
+
+        # 预取带：可视区上下各扩展约半屏
+        span = lastVisible - firstVisible + 1
+        pad = max(1, span // 2)
+        lo = max(0, firstVisible - pad)
+        hi = min(count - 1, lastVisible + pad)
+
+        # 先统一标记可视状态（autoload=False：此刻不排活，下面按优先级统一排）
+        for i in range(count):
+            item = self.item(i)
+            if item is not None:
+                item.setVisibleInViewport(lo <= i <= hi, autoload=False)
+
+        # 按优先级排活：① 真正可见 ② 下方预取 ③ 上方预取
+        def _req(i):
+            it = self.item(i)
+            if it is not None:
+                it.requestThumbnailLoad()
+        for i in range(firstVisible, lastVisible + 1):
+            _req(i)
+        for i in range(lastVisible + 1, hi + 1):
+            _req(i)
+        for i in range(lo, firstVisible):
+            _req(i)
+
+        self.viewport().update()
+
     def dragLeaveEvent(self, e):
         self.dragSignal.emit()
 
@@ -423,13 +518,47 @@ class MainQListWiget(QtWidgets.QListWidget):
         Add the given items to this widget.
         :type keyWords: str
         """
-        for item in self._itemsDict:
-            _item = Item()
-            if item[1].lower().find(keyWords.lower()) != -1 or (item[2] and item[2].find(keyWords) != -1):
-                _item.setItemData(item)
-                _item.setItemsWidget(self)
-                _item.setText(item[1])
-                self.addItem(_item)
+        # 批量添加期间关闭刷新，减少逐个 addItem 触发的重绘
+        self.setUpdatesEnabled(False)
+        try:
+            for item in self._itemsDict:
+                _item = Item()
+                if item[1].lower().find(keyWords.lower()) != -1 or (item[2] and item[2].find(keyWords) != -1):
+                    _item.setItemData(item)
+                    _item.setItemsWidget(self)
+                    _item.setText(item[1])
+                    self.addItem(_item)
+        finally:
+            self.setUpdatesEnabled(True)
+
+        # 添加完成后立即按可见区优先级触发加载（首屏就从可见区开始，而非全表）
+        self._updateVisibleItems()
+
+    def clear(self):
+        """
+        重写 clear：清空前把所有 item 标记为不可视，使线程池中尚未执行的加载任务
+        在排到时立即跳过（见 ImageWorker.run），避免旧数据的解码拖慢新数据。
+        """
+        for i in range(self.count()):
+            try:
+                item = self.item(i)
+                if item is not None:
+                    item.setVisibleInViewport(False, autoload=False)
+            except Exception:
+                pass
+        if getattr(self, "_scrollTimer", None) is not None:
+            self._scrollTimer.stop()
+        super(MainQListWiget, self).clear()
+
+    def resizeEvent(self, event):
+        """窗口尺寸变化：重新计算可见区（换行后可见 item 集合会变）。"""
+        super(MainQListWiget, self).resizeEvent(event)
+        self._updateVisibleItems()
+
+    def showEvent(self, event):
+        """首次显示：触发一次可见区加载。"""
+        super(MainQListWiget, self).showEvent(event)
+        self._updateVisibleItems()
 
 
 class Item(QtWidgets.QListWidgetItem):
@@ -441,6 +570,9 @@ class Item(QtWidgets.QListWidgetItem):
     TYPE_ICON_PATH = None
 
     ThreadPool = QtCore.QThreadPool()
+    # 缩略图多来自磁盘/网络盘，瓶颈是 I/O 等待而非 CPU，适当提高并发可更快铺满可见区；
+    # 配合 worker 的"开跑前判可视"，被快速滚动划走的旧任务会立即跳过，不会把线程占死。
+    ThreadPool.setMaxThreadCount(8)
     THUMBNAIL_PATH = ""
 
     MAX_ICON_SIZE = 256
@@ -458,6 +590,7 @@ class Item(QtWidgets.QListWidgetItem):
     PAINT_SLIDER = False
 
     _TYPE_PIXMAP_CACHE = {}
+    _PLACEHOLDER_PIXMAP = None  # 首屏/解码中显示的占位图，类级共享，仅构建一次
 
     _globalSignals = GlobalSignals()
     sliderChanged = _globalSignals.sliderChanged
@@ -481,6 +614,12 @@ class Item(QtWidgets.QListWidgetItem):
         self._pixmap = {}
         self._pixmapRect = None
         self._pixmapScaled = None
+        self._pixmapScaledKey = None  # 缩放缓存对应的源帧内容标识(pixmap.cacheKey())，帧变化时自动重缩
+
+        self._srcPixmap = None        # 缓存的原始缩略图 pixmap，非悬停态复用，避免每次重绘从磁盘解码（滚动收益最大）
+        self._srcPixmapPath = None    # _srcPixmap 对应的磁盘路径，路径变化时才重新解码
+        self._curFramePixmap = None   # 悬停播放时的当前帧 pixmap，updateFrame 解码一次供 paintIcon 复用
+        self._lastFrameNumber = -1    # 上一次已渲染的帧号，用于跳过重复帧
 
         self._iconPath = None
         self._typePixmap = None
@@ -512,10 +651,16 @@ class Item(QtWidgets.QListWidgetItem):
         self._sliderPosition = None
         self._sliderEnabled = False
 
+        self._isVisibleInViewport = False  # 懒加载：item 是否在可视区/预取带内（worker 开跑前据此判定是否跳过）
+
         self._worker = ImageWorker()
         self._worker.setAutoDelete(False)
         self._worker.signals.triggered.connect(self._thumbnailFromImage)
+        self._worker.setShouldLoad(lambda: self._isVisibleInViewport)
+        self._worker.signals.skipped.connect(self._thumbnailLoadSkipped)
         self._workerStarted = False
+        self._thumbnailLoading = False    # 缩略图是否正在后台解码，避免每次重绘重复入队
+        self._pendingThumbnailPath = None  # 当前后台正在解码的路径，回调时据此写回 _srcPixmapPath
 
     def __eq__(self, other):
         return id(other) == id(self)
@@ -631,6 +776,8 @@ class Item(QtWidgets.QListWidgetItem):
         :rtype: None
         """
         self._itemData = data
+        self._srcPixmap = None       # 数据变了：作废缓存的原图，让下次绘制按新路径重新加载
+        self._srcPixmapPath = None
         self.setImageSequencePath()
 
     def itemData(self):
@@ -661,6 +808,8 @@ class Item(QtWidgets.QListWidgetItem):
 
         :rtype: None
         """
+        self._srcPixmap = None       # 主动刷新：丢弃缓存原图，按最新磁盘内容重新加载
+        self._srcPixmapPath = None
         self.updateIcon()
         self.updateFrame()
 
@@ -674,12 +823,84 @@ class Item(QtWidgets.QListWidgetItem):
 
     def clearCache(self):
         """
-        清理 thumbnail cache.
+        清理 thumbnail cache（只清派生的缩放缓存，不清原图 _srcPixmap）。
+        注意：
+        - 不清 _curFramePixmap —— updateFrame 先写它再触发本方法，清了会导致 paintIcon 又去解码。
+        - 不清 _srcPixmap —— 本方法在播放时每帧都被 setIcon 调用，清了会导致每次悬停结束都重新异步解码闪占位图。
+          原图失效改在真正的刷新点（update / setItemData）处理。
         """
         self._pixmap = {}
         self._pixmapRect = None
         self._pixmapScaled = None
+        self._pixmapScaledKey = None
         self._thumbnailIcon = None
+
+    def repaintItem(self):
+        """
+        只重绘本 item 所在的可视区域，避免刷新整个视口。
+        """
+        widget = self.itemsWidget()
+        if not widget:
+            return
+        rect = widget.visualItemRect(self)
+        if rect.isValid():
+            widget.viewport().update(rect)
+
+    def requestThumbnailLoad(self):
+        """
+        请求后台加载缩略图（进入可视区/预取或绘制时调用）。幂等：已缓存或正在加载则直接返回。
+        仅当 item 在可视区(_isVisibleInViewport)时才真正排活；worker 开跑前会再判一次可视性，
+        被快速滚动划走的任务会立即跳过，把线程让给当前可见区 -> 滚动到的新区域优先加载。
+        """
+        if not self.ENABLE_THUMBNAIL_THREAD or self._thumbnailLoading:
+            return
+        if not self._isVisibleInViewport:
+            return
+        thumbnailPath = self.itemData()[7]
+        if not thumbnailPath:
+            return
+        if self._srcPixmap is not None and self._srcPixmapPath == thumbnailPath:
+            return  # 已缓存该路径原图，无需再加载
+        self._thumbnailLoading = True
+        self._pendingThumbnailPath = thumbnailPath
+        self._worker.setPath(thumbnailPath)
+        self._worker.setSize(self.MAX_ICON_SIZE)
+        self.ThreadPool.start(self._worker)
+
+    def setVisibleInViewport(self, visible, autoload=True):
+        """
+        标记 item 是否在可视区/预取带内，用于懒加载与优先级控制。
+        autoload=True 时一进入可视区就请求加载；批量标记可传 False，由调用方按优先级统一排活。
+        """
+        was = self._isVisibleInViewport
+        self._isVisibleInViewport = visible
+        if autoload and visible and not was:
+            self.requestThumbnailLoad()
+
+    def _thumbnailLoadSkipped(self):
+        """
+        worker 排到执行时该 item 已被滚出可视区 -> 本次跳过并复位加载标志；
+        若期间又滚回可视区则重新排活。（skipped 信号经队列连接在主线程执行）
+        """
+        self._thumbnailLoading = False
+        if self._isVisibleInViewport:
+            self.requestThumbnailLoad()
+
+    def _placeholderPixmap(self):
+        """
+        列表首屏/解码进行中显示的占位图（类级共享，仅构建一次）。
+        icon 目录在 AssetsManagerForUE 根下，而 scriptsPath 可能指向其下的 utils，故按存在性尝试多个候选，
+        兼容不同运行环境下 scriptsPath 的解析差异；都找不到则用空 pixmap，paintIcon 会跳过绘制（空白格）。
+        """
+        if Item._PLACEHOLDER_PIXMAP is None:
+            for base in (os.path.dirname(self.scriptsPath), self.scriptsPath):
+                path = "%s/icon/Default.png" % base
+                if base and os.path.exists(path):
+                    Item._PLACEHOLDER_PIXMAP = QtGui.QPixmap(path)
+                    break
+            if Item._PLACEHOLDER_PIXMAP is None:
+                Item._PLACEHOLDER_PIXMAP = QtGui.QPixmap()
+        return Item._PLACEHOLDER_PIXMAP
 
     def dpi(self):
         """
@@ -769,20 +990,27 @@ class Item(QtWidgets.QListWidgetItem):
 
     def _thumbnailFromImage(self, image):
         """
-        Called after the given image object has finished loading.
-        当 image 结束 loading 后调用：清理 -> 设置新的 icon
+        后台线程解码完成后在主线程回调（QImage 已在子线程降采样）。
+        写入 _srcPixmap 供 paintIcon 复用，并只重绘本 item。
         :type image: QtGui.QImage
         :rtype: None
         """
-        self.clearCache()  # 清理pixmap
+        self._thumbnailLoading = False
+        self.clearCache()  # 作废旧的缩放缓存，让新原图按当前 rect 重新缩放
 
-        pixmap = QtGui.QPixmap()
-        pixmap.convertFromImage(image)
-        icon = QtGui.QIcon(pixmap)
+        if image is None or image.isNull():
+            # 文件缺失/解码失败：缓存占位图并记住路径，避免每次重绘都反复入队解码
+            self._srcPixmap = self._placeholderPixmap()
+        else:
+            pixmap = QtGui.QPixmap()
+            pixmap.convertFromImage(image)
+            self._srcPixmap = pixmap
+            self._thumbnailIcon = QtGui.QIcon(pixmap)
 
-        self._thumbnailIcon = icon
+        self._srcPixmapPath = self._pendingThumbnailPath  # 记录实际解码的路径，路径若已变会自动重新加载
+
         if self.itemsWidget():
-            self.itemsWidget().update()
+            self.repaintItem()  # 只刷新本 item，避免后台缩略图回调触发整个视口重绘
 
     def defaultThumbnailPath(self):
         """
@@ -812,6 +1040,7 @@ class Item(QtWidgets.QListWidgetItem):
             if self.ENABLE_THUMBNAIL_THREAD and not self._workerStarted:  #
                 self._workerStarted = True
                 self._worker.setPath(thumbnailPath)
+                self._worker.setSize(self.MAX_ICON_SIZE)  # 后台缩放到该尺寸上限
                 self.ThreadPool.start(self._worker)  # 开始进程池 ImageWorker
                 self._thumbnailIcon = self.defaultThumbnailIcon()
             else:
@@ -1137,30 +1366,20 @@ class Item(QtWidgets.QListWidgetItem):
     def iconRect(self, option):
         """
         Return the icon rect for the item.
-
+        图标只占单元格顶部的方形区域（高度=itemSize），底部 40px 留给文字，
+        避免竖构图缩略图被拉高、盖住下面的文字栏。
         :type option: QtWidgets.QStyleOptionViewItem
         :rtype: QtCore.QRect
         """
         padding = self.padding()
-        rect = self.visualRect(option)
-        width = rect.width()
-        height = rect.height()
+        cell = self.visualRect(option)
+        iconSize = self.itemsWidget().itemSize()  # 顶部方形区边长，与 iconPercent/sizeHint 的划分保持一致
 
-        width -= padding
-        height -= padding
-
-        rect.setWidth(width)
-        rect.setHeight(height)
-
-        x = 0
-        x += float(padding) / 2
-        x += float((width - rect.width())) / 2
-
-        y = float((height - rect.height())) / 2
-        y += float(padding) / 2
-
-        rect.translate(x, y)
-        return rect
+        x = int(cell.x() + padding / 2.0)
+        y = int(cell.y() + padding / 2.0)
+        width = int(cell.width() - padding)
+        height = int(iconSize - padding)
+        return QtCore.QRect(x, y, width, height)
 
     def scalePixmap(self, pixmap, rect):
         """
@@ -1168,19 +1387,18 @@ class Item(QtWidgets.QListWidgetItem):
 
         This method will cache the scaled pixmap if called with the same size.
 
+        缓存键 = (源帧内容 cacheKey, rect 宽高)：同一帧同尺寸重绘直接命中；帧变化时 cacheKey
+        变化自动触发重缩，因此播放期间不再需要每帧 clearCache（消除每帧的 SmoothTransformation）。
         :type pixmap: QtGui.QPixmap
         :type rect: QtCore.QRect
         :rtype: QtGui.QPixmap
         """
-        rectChanged = True
+        key = pixmap.cacheKey()
+        rectChanged = (self._pixmapRect is None
+                       or self._pixmapRect.width() != rect.width()
+                       or self._pixmapRect.height() != rect.height())
 
-        if self._pixmapRect:
-            widthChanged = self._pixmapRect.width() != rect.width()
-            heightChanged = self._pixmapRect.height() != rect.height()
-
-            rectChanged = widthChanged or heightChanged
-
-        if not self._pixmapScaled or rectChanged:
+        if self._pixmapScaled is None or rectChanged or self._pixmapScaledKey != key:
             self._pixmapScaled = pixmap.scaled(
                 rect.width(),
                 rect.height(),
@@ -1189,6 +1407,7 @@ class Item(QtWidgets.QListWidgetItem):
             )
 
             self._pixmapRect = rect
+            self._pixmapScaledKey = key
 
         return self._pixmapScaled
 
@@ -1203,9 +1422,28 @@ class Item(QtWidgets.QListWidgetItem):
         if self.itemsWidget().isList():
             pass
         else:
-            pixmap = QtGui.QPixmap(self.itemData()[7])
             if self.imageSequence() and self.underMouse():
-                pixmap = self.imageSequence().currentPixmap()
+                # 悬停播放：复用 updateFrame 已解码好的当前帧，避免在绘制里再次从磁盘解码
+                pixmap = self._curFramePixmap
+                if not pixmap:
+                    pixmap = self.imageSequence().currentPixmap()
+                    self._curFramePixmap = pixmap
+            else:
+                thumbnailPath = self.itemData()[7]
+                if self._srcPixmap is not None and self._srcPixmapPath == thumbnailPath:
+                    # 已缓存原图：直接复用，路径不变不再解码（滚动/重绘收益最大）
+                    pixmap = self._srcPixmap
+                elif self.ENABLE_THUMBNAIL_THREAD:
+                    # 尚未缓存：丢到后台线程解码，首屏不再在主线程一次性解一堆 JPEG 造成卡顿；
+                    # 本次绘制先用占位图，解码完成后回调只重绘本 item。
+                    self._isVisibleInViewport = True  # 正在绘制 = 确实可见
+                    self.requestThumbnailLoad()
+                    pixmap = self._placeholderPixmap()
+                else:
+                    # 关闭后台线程时的同步回退（保留原行为）
+                    pixmap = QtGui.QPixmap(thumbnailPath)
+                    self._srcPixmap = pixmap
+                    self._srcPixmapPath = thumbnailPath
 
             if not pixmap:
                 return
@@ -1216,11 +1454,7 @@ class Item(QtWidgets.QListWidgetItem):
             pixmapRect = QtCore.QRect(rect)
             pixmapRect.setWidth(pixmap.width())
             pixmapRect.setHeight(pixmap.height())
-
-            align = QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter
-
-            x, y = 0, 0
-            pixmapRect.translate(x, y)
+            pixmapRect.moveCenter(rect.center())  # 在图标区域内居中，避免左上角对齐导致偏移
             painter.drawPixmap(pixmapRect, pixmap)
 
     def drawIconBorder(self, painter, option):
@@ -1491,6 +1725,8 @@ class Item(QtWidgets.QListWidgetItem):
         """Start playing the image sequence movie."""
         # print("Play Animation")
         self.resetImageSequence()
+        self._curFramePixmap = None   # 重置帧缓存，避免复用上一次悬停的旧帧
+        self._lastFrameNumber = -1
         path = self.imageSequencePath() or self.thumbnailPath()
         # print("path:", path)
         movie = None
@@ -1512,10 +1748,20 @@ class Item(QtWidgets.QListWidgetItem):
     def updateFrame(self):
         """
         Triggered when the movie object updates the current frame.
+        每帧只从磁盘解码一次并缓存到 _curFramePixmap 供 paintIcon 复用；帧号未变则整体跳过。
         """
-        if self.imageSequence():
-            pixmap = self.imageSequence().currentPixmap()
-            self.setIcon(QtGui.QIcon(pixmap))
+        seq = self.imageSequence()
+        if not seq:
+            return
+
+        frameNumber = seq.currentFrameNumber()
+        # 鼠标 scrub 时相邻位置常落在同一帧，重复帧直接跳过，省一次解码+重绘
+        if frameNumber == self._lastFrameNumber and self._curFramePixmap:
+            return
+        self._lastFrameNumber = frameNumber
+
+        self._curFramePixmap = seq.currentPixmap()
+        self.repaintItem()  # 只重绘本 item；不再 setIcon → 不再每帧 clearCache，scalePixmap 缓存得以生效
 
     def playheadColor(self):
         """

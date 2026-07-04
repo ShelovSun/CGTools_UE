@@ -16,6 +16,7 @@ __all__ = ['ImageSequence', 'ImageSequenceWidget']
 class ImageSequence(QtCore.QObject): #序列图展示的QObject, 被item，sequencewidget 调用
 
     DEFAULT_FPS = 30
+    MAX_CACHE_FRAMES = 500  # 已解码帧缓存上限，防止超长序列占用过多内存
 
     frameChanged = QtCore.Signal(int)
 
@@ -26,6 +27,7 @@ class ImageSequence(QtCore.QObject): #序列图展示的QObject, 被item，seque
         self._timer = None
         self._frame = 0
         self._frames = []
+        self._pixmapCache = {}  # {frameIndex: QPixmap} 已解码帧缓存，循环播放第二圈起零磁盘 IO
         self._dirname = None
         self._paused = False
 
@@ -48,6 +50,7 @@ class ImageSequence(QtCore.QObject): #序列图展示的QObject, 被item，seque
         
         :type path: str
         """
+        self._pixmapCache = {}  # 换序列：作废旧的帧缓存
         if os.path.isfile(path):
             self._frame = 0
             self._frames = [path]
@@ -70,6 +73,7 @@ class ImageSequence(QtCore.QObject): #序列图展示的QObject, 被item，seque
             items.sort(key=alphanum_key)
 
         self._dirname = dirname
+        self._pixmapCache = {}  # 换目录：作废旧的帧缓存
         if os.path.isdir(dirname):
             self._frames = [dirname + "/" + filename for filename in os.listdir(dirname)]
             naturalSortItems(self._frames)
@@ -132,7 +136,7 @@ class ImageSequence(QtCore.QObject): #序列图展示的QObject, 被item，seque
         """
         self.reset()
         if self._timer:
-            self._timer.start(1000.0 / self._fps)
+            self._timer.start(int(1000 / self._fps))  # QTimer 间隔须为整数毫秒
 
     def frames(self):
         """
@@ -186,10 +190,16 @@ class ImageSequence(QtCore.QObject): #序列图展示的QObject, 被item，seque
     def currentPixmap(self):
         """
         Return the current frame as a QPixmap.
-
+        已解码帧会缓存，循环到第二圈起零磁盘 IO（超出 MAX_CACHE_FRAMES 的帧不缓存，仍即时解码）。
         :rtype: QtGui.QPixmap
         """
-        return QtGui.QPixmap(self.currentFilename())
+        index = self.currentFrameNumber()
+        pixmap = self._pixmapCache.get(index)
+        if pixmap is None:
+            pixmap = QtGui.QPixmap(self.currentFilename())
+            if len(self._pixmapCache) < self.MAX_CACHE_FRAMES:
+                self._pixmapCache[index] = pixmap
+        return pixmap
 
     def currentFilename(self):
         """

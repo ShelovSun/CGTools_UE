@@ -116,16 +116,28 @@ class UELoaderUI(object):
             AF.executeImportTasks([animation_mesh_task])
 
 
+win = None
+
+
 def showWin():
+    """浮于 UE 之上、随 UE 最小化/还原；挂接与事件驱动封装在共享模块 ue_qt_host。"""
+    global win
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
-    form = QWidget()
-    w = UELoaderUI()
-    w.setupUi(form)
-    form.setWindowFlags(Qt.WindowStaysOnTopHint)
-    form.show()
-    sys.exit(app.exec_())
+    try:
+        win.close()
+    except Exception:
+        pass
+
+    win = QWidget()
+    win.setAttribute(Qt.WA_DeleteOnClose)
+    ui = UELoaderUI()
+    ui.setupUi(win)
+    win._ui = ui  # 保活，避免 UI 对象被回收
+
+    import ue_qt_host
+    ue_qt_host.host_window(win, app=app)
 
 def loadEnginePlugin(pluginpath):
     # pluginpath='Y:/Onemt/Marketing/Shared/Plug-in/LGTSet_UE/Plugins/GetRGB'

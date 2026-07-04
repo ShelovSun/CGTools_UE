@@ -6,17 +6,28 @@ import os
 import sys
 import json
 
-# 添加venv路径，确保UE能找到PySide6
+# 1. 清除所有NAS/Y盘相关的路径（避免使用错误的venv）
+sys.path[:] = [p for p in sys.path if not any(x in p for x in [
+    r"Y:\ACTools\Python\UE5.03",
+    r"fznas.diandian.info",
+    r"\\fznas",
+    r"\\AC\ACTools\Python",
+    r"E:\CGTools_for_UE\UE574\Python\venv"
+])]
+
+# 2. 添加venv路径（最前面）
 scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/')
-venv_path = os.path.join(os.path.dirname(scriptsPath), '..', 'venv', 'Lib', 'site-packages').replace('\\', '/')
+venv_path = r"Y:/MCCTools/src/venv/Lib/site-packages"
 if venv_path not in sys.path:
     sys.path.insert(0, venv_path)
 
+# 3. 先导入PySide6验证路径正确
 from PySide6 import QtWidgets, QtUiTools, QtCore, QtGui
 
 if scriptsPath not in sys.path:
     sys.path.append(scriptsPath)
 
+# 4. 导入子模块
 from .sources import assetTools, sceneTools, actionTools, ShotsManager_UE
 from .utils import jsonHelper
 from .config import SMConfig
@@ -129,7 +140,29 @@ class AssetsManagerUI(QtWidgets.QWidget):
         return pos, size, tab
 
     def closeEvent(self, event):
+        # 先停掉各 tab 子界面里残留的 QThread，避免重开时线程/旧窗口累积
+        # （以及“QThread: Destroyed while thread is still running”崩溃）。
+        self._stop_child_threads()
         self.rememberSettings()
+
+    def _stop_child_threads(self):
+        """停止各 tab 子界面持有的 QThread（MyThread 等），让旧窗口能被回收。"""
+        for name in ('asset_page', 'scene_page', 'action_page', 'animation_page'):
+            page = getattr(self.ui, name, None)
+            layout = page.layout() if page is not None else None
+            if layout is None:
+                continue
+            for i in range(layout.count()):
+                w = layout.itemAt(i).widget()
+                if w is None:
+                    continue
+                for v in list(vars(w).values()):
+                    if isinstance(v, QtCore.QThread):
+                        try:
+                            v.quit()
+                            v.wait(500)
+                        except Exception:
+                            pass
 
     def tabChange(self):
         """
@@ -219,17 +252,23 @@ APP = None
 if not QtWidgets.QApplication.instance():
     APP = QtWidgets.QApplication(sys.argv)
 
+win = None
+
 
 def showWindow():
+    """在 UE 中以“浮于 UE 之上、随 UE 最小化/还原”的方式显示 Assets Manager。
+
+    具体的窗口挂接（parent_external_window_to_slate）与事件驱动
+    （register_slate_post_tick_callback）封装在共享模块 ue_qt_host 中。
+    """
     global win
     try:
         win.close()
-    except:
+    except Exception:
         pass
 
     win = AssetsManagerUI()
     win.setAttribute(QtCore.Qt.WA_DeleteOnClose)
-    # win.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint) # 始终前置
-    # self.setWindowFlags(QtCore.Qt.Popup) # 只要组件设置了 Popup 标记，组件会自动变成没有窗口边框的模式，并且点击组件外部会自动消失
-    # self.setWindowFlags(QtCore.Qt.FramelessWindowHint) # 无边框
-    win.show()
+
+    import ue_qt_host
+    ue_qt_host.host_window(win, app=QtWidgets.QApplication.instance())

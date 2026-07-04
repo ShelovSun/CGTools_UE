@@ -15,27 +15,38 @@ AssetsManagerForUE 初始化模块
 import sys
 import os
 
-# 获取当前文件路径
-current_file = os.path.abspath(__file__)
-scripts_dir = os.path.dirname(current_file)
-project_root = os.path.dirname(scripts_dir)
+# 本地venv路径
+LOCAL_VENV = r"Y:\MCCTools\src\venv\Lib\site-packages"
+LOCAL_SCRIPTS = r"E:\CGTools_for_UE\UE574\Python\scripts"
 
-# 添加venv的site-packages到sys.path（最前面）
-venv_site_packages = os.path.join(project_root, 'venv', 'Lib', 'site-packages')
-if os.path.exists(venv_site_packages):
-    if venv_site_packages not in sys.path:
-        sys.path.insert(0, venv_site_packages)
-        # print(f"[AssetsManager] 已添加venv路径: {venv_site_packages}")
+# 1. 先移除所有NAS/Y盘相关的路径（避免冲突）
+sys.path[:] = [p for p in sys.path if not any(x in p for x in [
+    r"Y:\ACTools\Python\UE5.03",
+    r"fznas.diandian.info",
+    r"\\fznas",
+    r"\\AC\ACTools\Python",
+    r"E:\CGTools_for_UE\UE574\Python\venv"
+])]
+
+# 2. 将本地venv插入到最前面（确保优先级最高）
+if os.path.exists(LOCAL_VENV):
+    if LOCAL_VENV in sys.path:
+        sys.path.remove(LOCAL_VENV)
+    sys.path.insert(0, LOCAL_VENV)
+    print(f"[AssetsManager] 已设置本地venv: {LOCAL_VENV}")
 else:
-    print(f"[AssetsManager] 警告: 找不到venv路径: {venv_site_packages}")
+    print(f"[AssetsManager] 警告: 找不到本地venv: {LOCAL_VENV}")
 
-# 添加scripts目录到sys.path
-if scripts_dir not in sys.path:
-    sys.path.insert(0, scripts_dir)
+# 3. 添加本地scripts目录
+if os.path.exists(LOCAL_SCRIPTS):
+    if LOCAL_SCRIPTS in sys.path:
+        sys.path.remove(LOCAL_SCRIPTS)
+    sys.path.insert(0, LOCAL_SCRIPTS)
 
-# 尝试导入并打印版本信息
+# 4. 验证PySide6导入
 try:
     from PySide6 import QtCore
-    # print(f"[AssetsManager] PySide6 版本: {QtCore.__version__}")
+    print(f"[AssetsManager] PySide6 版本: {QtCore.__version__}")
 except ImportError as e:
     print(f"[AssetsManager] 错误: 无法导入PySide6: {e}")
+    print(f"[AssetsManager] 当前sys.path前3项: {sys.path[:3]}")

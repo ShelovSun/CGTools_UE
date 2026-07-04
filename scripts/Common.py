@@ -11,29 +11,67 @@ scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/')
 
 
 def projectSetting():
-    data = {u'menu': {u'LGT_Set 2.0.2': {u'command': "import Common as I;I.run_utilityWidget()", u'section': u'Render',
-                                         u'type': u'PYTHON', u'label': u'灯光分层工具'},
-                      u'UE_dir': {u'command': "import Common as I;I.find_ue_dir()", u'section': u'Render',
-                                         u'type': u'PYTHON', u'label': u'Deadline提交路径'},
-                      u'Document': {
-                          u'command': u"import webbrowser;webbrowser.open_new_tab('https://space.bilibili.com/475139733')",
-                          u'section': u'Help', u'type': u'PYTHON', u'label': u'Help'},
-                      u'UELoader': {u'command': u"import UELoader.UELoader as LOAD;LOAD.showWin()",
-                                    u'section': u'Other', u'type': u'PYTHON', u'label': u'UELoader'},
-                      u'AssetsManager': {
+    data = {u'menu': {u'AssetsManager': {
                           u'command': u"import AssetsManagerForUE.AssetsManagerForUE as AM;AM.showWindow()",
-                          u'section': u'Assets', u'type': u'PYTHON', u'label': u'AssetsManager'},
+                          u'section': u'pipeline', 
+                          u'type': u'PYTHON', 
+                          u'label': u'AssetsManager'},
+                      # 原生可停靠(UMG)版暂时下线；文件保留，需要时取消注释即可恢复菜单项
+                      # u'AssetsManagerNative': {
+                      #     u'command': u"import Common as I;I.run_utilityWidget(content_widget_path='/Engine/Python/scripts/AssetsManagerForUE/AssetsManager_WBG')",
+                      #     u'section': u'Assets', 
+                      #     u'type': u'PYTHON', 
+                      #     u'label': u'AssetsManager(原生可停靠)'},
                       u'ShotsManager': {
                           u'command': u"import ShotsManagerForUE.ShotsManager_UE as SM;SM.showWin()",
-                          u'section': u'pipeline', u'type': u'PYTHON', u'label': u'ShotsManager'},
-                      u'Blueprint': {
-                          u'command': u"import ShotsManagerForUE.ShotsManager_UE as SM;SM.showWin()",
-                          u'section': u'Bp', u'type': u'PYTHON', u'label': u'蓝图加载工具'},
+                          u'section': u'Pipeline', 
+                          u'type': u'PYTHON', 
+                          u'label': u'ShotsManager'},
+                      u'ExtContentBrowser': {
+                          u'command': u"import unreal;unreal.UAssetBrowserLibrary.open_browser()",
+                          u'section': u'Pipeline', 
+                          u'type': u'PYTHON', 
+                          u'label': u'ExtContentBrowser'},
                       u'AnimSP': {
                           u'command': u"import Common as I;I.run_utilityWidget(content_widget_path='/Engine/Python/scripts/动画样条K帧/样条线交互工具_WBG')",
-                          u'section': u'Anim', u'type': u'PYTHON', u'label': u'动画样条线工具'},},
-            u'section': {u'Assets': u'流程:', u'pipeline': u'', u'Anim': u'动画：', u'Bp': u'蓝图：', u'Render': u'渲染:', u'Other': u'其他:',
-                         u'Help': u''}}
+                          u'section': u'Anim', 
+                          u'type': u'PYTHON', 
+                          u'label': u'动画样条线工具'},
+                      u'AnimLP': {
+                          u'command': u"import Common as I;I.run_utilityWidget(content_widget_path='/Engine/Python/scripts/动画样条K帧/样条线锁帧工具_WBG')",
+                          u'section': u'Anim', 
+                          u'type': u'PYTHON', 
+                          u'label': u'样条线锁帧工具'},
+                      u'Blueprint': {
+                          u'command': u"",
+                          u'section': u'Bp', 
+                          u'type': u'PYTHON', 
+                          u'label': u'蓝图加载工具'},
+                      u'LGT_Set 2.0.2': {
+                          u'command': "import Common as I;I.run_utilityWidget()", 
+                          u'section': u'Render',
+                          u'type': u'PYTHON', 
+                          u'label': u'灯光分层工具'},
+                      u'UE_dir': {
+                          u'command': "import Common as I;I.find_ue_dir()", 
+                          u'section': u'Render',
+                          u'type': u'PYTHON', 
+                          u'label': u'渲染农场提交路径'},
+                      u'UELoader': {
+                          u'command': u"import UELoader.UELoader as LOAD;LOAD.showWin()",
+                          u'section': u'Other', 
+                          u'type': u'PYTHON', 
+                          u'label': u'UELoader'},
+                      u'Document': {
+                          u'command': u"import webbrowser;webbrowser.open_new_tab('https://space.bilibili.com/475139733')",
+                          u'section': u'Other', 
+                          u'type': u'PYTHON', 
+                          u'label': u'帮助'},},
+            u'section': {u'Pipeline': u'流程:', 
+                         u'Anim': u'动画：', 
+                         u'Bp': u'蓝图：', 
+                         u'Render': u'渲染:', 
+                         u'Other': u'其他:',}}
     return data
 
 
@@ -107,6 +145,13 @@ def create_menu():
         entry = unreal.ToolMenuEntry(name=menu, type=unreal.MultiBlockType.MENU_ENTRY,
                                      insert_position=unreal.ToolMenuInsert('', unreal.ToolMenuInsertType.FIRST))
         entry.set_label(data.get('label', 'untitle'))
+        icon = data.get('icon')
+        if icon:
+            # icon 可以是字符串(图标名)或 (style_set, style_name) 元组
+            if isinstance(icon, (list, tuple)):
+                entry.set_icon(*icon)
+            else:
+                entry.set_icon('EditorStyle', icon)
         command = data.get('command', '')
         entry.set_string_command(type_map[data.get('type', 0)], '', string=command)
         script_menu.add_menu_entry(data.get('section', ''), entry)

@@ -11,7 +11,7 @@ import psycopg2
 
 # 添加venv路径，确保UE能找到PySide6
 scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/')
-venv_path = os.path.join(os.path.dirname(scriptsPath), '..', '..', 'venv', 'Lib', 'site-packages').replace('\\', '/')
+venv_path = r"Y:/MCCTools/src/venv/Lib/site-packages"
 if venv_path not in sys.path:
     sys.path.insert(0, venv_path)
 
