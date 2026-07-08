@@ -357,6 +357,7 @@ class MainQListWiget(QtWidgets.QListWidget):
         self.setResizeMode(QtWidgets.QListView.Adjust)
         self.setTextElideMode(QtCore.Qt.ElideNone)
         self.setMouseTracking(True)
+        self.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)  # 按像素平滑滚动(配合 wheelEvent 加速)
         self._delegate = MyDelegate()
         self._delegate.setItemsWidget(self)
         self.setItemDelegate(self._delegate)
@@ -367,6 +368,20 @@ class MainQListWiget(QtWidgets.QListWidget):
         self._scrollTimer = QtCore.QTimer()
         self._scrollTimer.setSingleShot(True)
         self._scrollTimer.timeout.connect(self._updateVisibleItems)
+
+    def wheelEvent(self, event):
+        """
+        图标模式下默认滚轮太慢（大图标时一格滚轮只挪一点）：改为每格滚轮滚动约一个图标行高。
+        列表模式保持默认。
+        """
+        if self.isList():
+            super(MainQListWiget, self).wheelEvent(event)
+            return
+        bar = self.verticalScrollBar()
+        steps = event.angleDelta().y() / 120.0  # 一格标准滚轮 = 120
+        rowHeight = self._itemSize + self.DEF_SPACING + 40  # 一个网格行高(图标+间隙+文字)
+        bar.setValue(bar.value() - int(steps * rowHeight))
+        event.accept()
 
     def _onScroll(self, value=None):
         """滚动事件：50ms 防抖，把一次连续滚动合并成一次可见区刷新。"""
@@ -838,11 +853,16 @@ class Item(QtWidgets.QListWidgetItem):
     def repaintItem(self):
         """
         只重绘本 item 所在的可视区域，避免刷新整个视口。
+        异步回调期间列表可能已被 clear/重排 -> 本 item 的 C++ 对象已销毁，
+        此时 visualItemRect(self) 会抛 RuntimeError，捕获后安全放弃。
         """
         widget = self.itemsWidget()
         if not widget:
             return
-        rect = widget.visualItemRect(self)
+        try:
+            rect = widget.visualItemRect(self)
+        except RuntimeError:
+            return  # Internal C++ object (Item) already deleted
         if rect.isValid():
             widget.viewport().update(rect)
 
@@ -996,6 +1016,12 @@ class Item(QtWidgets.QListWidgetItem):
         :rtype: None
         """
         self._thumbnailLoading = False
+        # 异步回调期间列表可能已被 clear/重排 -> 本 item 的 C++ 对象已销毁；
+        # 用一次 C++ 方法探测（Python 属性访问探测不到），已删则整段放弃，避免 use-after-delete。
+        try:
+            self.listWidget()
+        except RuntimeError:
+            return
         self.clearCache()  # 作废旧的缩放缓存，让新原图按当前 rect 重新缩放
 
         if image is None or image.isNull():

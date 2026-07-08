@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # <AssetsManager_UE>Created: 19/10/2020 by Sunxh<175702994@qq.com>
+# UI 已由 .ui + QUiLoader 改为纯 Python 代码搭建（build_ui），彻底绕开 QtUiTools 冷启动。
 
 import os
 import sys
-import threading
 import time
 import unreal
 import psycopg2
@@ -15,14 +15,14 @@ venv_path = r"Y:/MCCTools/src/venv/Lib/site-packages"
 if venv_path not in sys.path:
     sys.path.insert(0, venv_path)
 
-from PySide6 import QtWidgets, QtUiTools, QtCore, QtGui
+from PySide6 import QtWidgets, QtCore, QtGui
 
 from functools import partial
 from utils import jsonHelper, assetFunctions, messageBox, myWidget
+from utils.fbxpreview.am_previewGLWidget import PreviewGLWidget
+from utils.fbxpreview.am_actionWidget import AssetActionWidget
 
-
-# from imp import reload
-# reload(myWidget)
+_FLAT = "border-style: flat; background: transparent;"
 
 
 class AssetToolsUI(QtWidgets.QWidget):
@@ -39,95 +39,162 @@ class AssetToolsUI(QtWidgets.QWidget):
         self.host = "10.0.203.34"
         self.user = user
         self.password = password
-
-        self.setLayout(QtWidgets.QHBoxLayout())
-        self.layout().setContentsMargins(2, 2, 2, 2)
         self.tempPath = "{}/AssetsManagerIconTemp".format(os.environ.get('TEMP'))
-        f = QtCore.QFile('%s/ui/assetTools.ui' % self.scriptsPath)
-        f.open(QtCore.QFile.ReadOnly)
-        loader = QtUiTools.QUiLoader().load(f)
-        self.ui = loader
-        f.close()
 
         self.isList = False
-        self.isAction = False
+        self._current_sort = (0, True)  # 默认排序：按日期(列0)降序(reverse=True)，最新在前
 
-        self.__fileTypeFolderDict = {'mod': 'Mod',
-                                     'render': 'Render',
-                                     'all_rig': 'Rig',
-                                     'hi_rig': 'Rig',
-                                     'low_rig': 'Rig',
-                                     'xgen': 'xgenFile',
-                                     'AD': 'Assembly',
-                                     'OAT': 'Rig'}
-        self.currentAssetData = {}
         self.update_asset_thread = myWidget.MyThread()
         self.update_asset_thread.signal.connect(lambda: self.listWidgetAddItems())
-        self.update_action_thread = myWidget.MyThread()
-        self.update_action_thread.signal.connect(lambda: self.listWidgetAddActionItems())
 
+        # 同步搭建界面（纯控件、无 I/O，秒级）→ 窗口一显示即最终布局，不闪。
+        self.build_ui()
+        # 填充项目/类型并恢复上次选择（build_ui 已连信号，这里在 firstView 内屏蔽选择信号，避免触发 DB 查询）。
         self.firstView()
+        # 数据加载(含 DB 查询，可能较慢)延迟到窗口显示后执行，避免卡住启动。
         self.init_ui_thread = myWidget.MyThread()
-        self.init_ui_thread.signal.connect(self.init_ui)
+        self.init_ui_thread.signal.connect(lambda: self.listWidgetAddItems(self.getItemsFromSQL()))
         self.init_ui_thread.start()
-        self.init_ui_thread.finished.connect(lambda: self.listWidgetAddItems(self.getItemsFromSQL()))
 
-    def init_ui(self):
-        self.layout().addWidget(self.ui)
-        # self.getStyleSheet()
+    # ------------------------------------------------------------------ UI 搭建
+    def build_ui(self):
+        """纯代码搭建界面：左(项目下拉+类型列表) | 中(工具栏+缩略图列表) | 右(FBX预览+动作库+Import) + 底部状态栏。"""
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(2, 2, 2, 2)
+        root.setSpacing(2)
 
-        '''左侧边栏'''
-        self.ui.project_comb.currentIndexChanged.connect(self.projectChanged)
-        self.ui.type_listWgt.itemSelectionChanged.connect(self.typeChanged)
+        self.mainWindow_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.mainWindow_splitter.setHandleWidth(3)
+        self.mainWindow_splitter.setChildrenCollapsible(False)
+        root.addWidget(self.mainWindow_splitter, 1)
 
-        '''上侧小按钮栏'''
-        self.ui.back_bttn.setIcon(QtGui.QIcon('%s/icon/back.png' % self.scriptsPath))
-        self.ui.back_bttn.clicked.connect(self.backToMainWgt)
-        self.ui.back_bttn.setStyleSheet("border-style: flat; background: transparent;")
-        self.ui.displayThumb_bttn.setIcon(QtGui.QIcon('%s/icon/display_list.png' % self.scriptsPath))
-        self.ui.displayThumb_bttn.clicked.connect(self.viewThumbnailChange)
-        self.ui.displayThumb_bttn.setStyleSheet("border-style: flat; background: transparent;")
-        self.ui.itemSize_Slider.valueChanged.connect(self.itemSizeSliderChanged)
-        self.ui.itemSize_Slider.sliderReleased.connect(self.itemSizeSliderReleased)
-        self.ui.download_Bttn.setIcon(QtGui.QPixmap('%s/icon/download.png' % self.scriptsPath))
-        self.ui.download_Bttn.clicked.connect(self.download_CGTicon_to_localTemp)
-        self.ui.download_Bttn.setStyleSheet("border-style: flat; background: transparent;")
-        self.ui.refresh_Bttn.setIcon(QtGui.QPixmap('%s/icon/refresh.png' % self.scriptsPath))
-        self.ui.refresh_Bttn.clicked.connect(self.refresh_asset)
-        self.ui.refresh_Bttn.setStyleSheet("border-style: flat; background: transparent;")
-        self.ui.key_line.returnPressed.connect(self.search_asset)
-        self.ui.key_line.addAction(QtGui.QIcon('%s/icon/search.png' % self.scriptsPath),
-                                   QtWidgets.QLineEdit.LeadingPosition)
+        # ---- 左栏 ----
+        left = QtWidgets.QWidget()
+        leftV = QtWidgets.QVBoxLayout(left)
+        leftV.setContentsMargins(0, 0, 0, 0)
+        leftV.setSpacing(2)
+        projRow = QtWidgets.QHBoxLayout()
+        projRow.addWidget(QtWidgets.QLabel(u"项目:"))
+        self.project_comb = QtWidgets.QComboBox()
+        self.project_comb.setMinimumWidth(50)
+        projRow.addWidget(self.project_comb, 1)
+        leftV.addLayout(projRow)
+        self.type_listWgt = QtWidgets.QListWidget()
+        self.type_listWgt.setSortingEnabled(False)
+        self.type_listWgt.setSpacing(3)
+        leftV.addWidget(self.type_listWgt, 1)
+        self.mainWindow_splitter.addWidget(left)
 
-        '''主界面栏'''
-        self.ui.main_listWgt = myWidget.MainQListWiget()
+        # ---- 中栏 ----
+        mid = QtWidgets.QWidget()
+        midV = QtWidgets.QVBoxLayout(mid)
+        midV.setContentsMargins(0, 0, 0, 0)
+        midV.setSpacing(3)
+        tool = QtWidgets.QHBoxLayout()
+        tool.setSpacing(2)
 
-        self.ui.main_listWgt.itemSelectionChanged.connect(self.listWidgetItemChanged)
-        self.ui.main_listWgt.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
-        self.ui.main_listWgt.customContextMenuRequested.connect(self.show_menu)
+        self.back_bttn = self._toolBtn('back.png', u"后退")
+        self.back_bttn.setEnabled(False)
+        tool.addWidget(self.back_bttn)
+        self.displayThumb_bttn = self._toolBtn('display_list.png', u"表单显示")
+        tool.addWidget(self.displayThumb_bttn)
 
-        self.ui.verticalLayout_3.addWidget(self.ui.main_listWgt)
-        self.ui.mainWindow_splitter.setSizes([120, 500, 300])
-        self.ui.mainWindow_splitter.setStretchFactor(0, False)
-        self.ui.mainWindow_splitter.setStretchFactor(1, True)
-        self.ui.mainWindow_splitter.setStretchFactor(2, False)
+        self.itemSize_Slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.itemSize_Slider.setMinimum(10)
+        self.itemSize_Slider.setMaximum(200)
+        self.itemSize_Slider.setValue(120)
+        self.itemSize_Slider.setMaximumWidth(250)
+        self.itemSize_Slider.setToolTip(u"缩放图标")
+        tool.addWidget(self.itemSize_Slider)
 
-        '''右侧属性栏'''
-        self.ui.arrow_Bttn.setStyleSheet("border-style: flat; background: transparent;")
-        self.ui.tag_bttn.setStyleSheet("border-style: flat; background: transparent;")
-        self.ui.favor_bttn.setStyleSheet("border-style: flat; background: transparent;")
+        self.download_Bttn = self._toolBtn('download.png', u"下载资产到本地")
+        tool.addWidget(self.download_Bttn)
+        self.refresh_Bttn = self._toolBtn('refresh.png', u"刷新")
+        tool.addWidget(self.refresh_Bttn)
 
-        self.ui.Preview_label = myWidget.PreviewLabel(self.ui.frams_lineEdit)
-        self.ui.verticalLayout_Preview.addWidget(self.ui.Preview_label)
-        self.playerSet()
-        self.ui.import_bttn.clicked.connect(self.importFile)
+        self.sort_bttn = QtWidgets.QToolButton()
+        self.sort_bttn.setIcon(QtGui.QIcon('%s/icon/sort.png' % self.scriptsPath))
+        self.sort_bttn.setToolTip(u"排序")
+        self.sort_bttn.setStyleSheet(_FLAT)
+        tool.addWidget(self.sort_bttn)
 
-    def getStyleSheet(self):
-        style_sheet_path = '%s/qss/UE5.qss' % self.scriptsPath
-        with open(style_sheet_path) as (file):
-            str = file.read()
-        self.setStyleSheet(str)
+        self.key_line = QtWidgets.QLineEdit()
+        self.key_line.setClearButtonEnabled(True)
+        self.key_line.setPlaceholderText(u"Search...")
+        self.key_line.addAction(QtGui.QIcon('%s/icon/search.png' % self.scriptsPath),
+                                QtWidgets.QLineEdit.LeadingPosition)
+        tool.addWidget(self.key_line, 1)
 
+        midV.addLayout(tool)
+        self.main_listWgt = myWidget.MainQListWiget()
+        # 关掉 Qt 按 item 文字(资产名)的自动排序，否则会覆盖排序菜单选择的自定义顺序(日期/状态等)
+        self.main_listWgt.setSortingEnabled(False)
+        midV.addWidget(self.main_listWgt, 1)
+        self.mainWindow_splitter.addWidget(mid)
+
+        # ---- 右栏：FBX 三维预览 + 动作库 + 底部 Import ----
+        right = QtWidgets.QWidget()
+        rightV = QtWidgets.QVBoxLayout(right)
+        rightV.setContentsMargins(0, 0, 0, 0)
+        rightV.setSpacing(2)
+        self.preview_wgt = PreviewGLWidget(isPlayer=False)
+        self.preview_wgt.setMinimumHeight(350)
+        rightV.addWidget(self.preview_wgt)
+        self.action_wgt = AssetActionWidget()
+        self.action_wgt.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        rightV.addWidget(self.action_wgt, 1)
+        self.import_bttn = QtWidgets.QPushButton("Import")
+        self.import_bttn.setMinimumHeight(30)
+        rightV.addWidget(self.import_bttn)
+        self.mainWindow_splitter.addWidget(right)
+
+        self.mainWindow_splitter.setSizes([120, 500, 350])
+        self.mainWindow_splitter.setStretchFactor(0, 0)
+        self.mainWindow_splitter.setStretchFactor(1, 1)
+        self.mainWindow_splitter.setStretchFactor(2, 0)
+
+        # ---- 底部状态栏 ----
+        msgRow = QtWidgets.QHBoxLayout()
+        msgRow.setSpacing(10)
+        self.msg_icon_label = QtWidgets.QLabel()
+        self.msg_icon_label.setFixedSize(15, 15)
+        self.msg_icon_label.setScaledContents(True)
+        msgRow.addWidget(self.msg_icon_label)
+        self.msg_label = QtWidgets.QLabel()
+        self.msg_label.setMaximumHeight(15)
+        msgRow.addWidget(self.msg_label, 1)
+        msgRow.addStretch(0)
+        root.addLayout(msgRow)
+
+        # ---- 信号连接 ----
+        self.project_comb.currentIndexChanged.connect(self.projectChanged)
+        self.type_listWgt.itemSelectionChanged.connect(self.typeChanged)
+        self.back_bttn.clicked.connect(self.backToMainWgt)
+        self.displayThumb_bttn.clicked.connect(self.viewThumbnailChange)
+        self.itemSize_Slider.valueChanged.connect(self.itemSizeSliderChanged)
+        self.itemSize_Slider.sliderReleased.connect(self.itemSizeSliderReleased)
+        self.download_Bttn.clicked.connect(self.download_CGTicon_to_localTemp)
+        self.refresh_Bttn.clicked.connect(self.refresh_asset)
+        self.sort_bttn.clicked.connect(self.sort_asset_ui)
+        self.key_line.returnPressed.connect(self.search_asset)
+        self.main_listWgt.itemSelectionChanged.connect(self.listWidgetItemChanged)
+        self.main_listWgt.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.main_listWgt.customContextMenuRequested.connect(self.show_menu)
+        self.action_wgt.actionActivated.connect(self.on_action_selected)
+        self.action_wgt.importActionRequested.connect(self.importActionFile)  # 右键"导入动作"
+        self.import_bttn.clicked.connect(self.importFile)
+
+    def _toolBtn(self, icon_name, tip):
+        """工具栏小按钮：25x25、扁平透明、22 图标。"""
+        b = QtWidgets.QPushButton()
+        b.setFixedSize(25, 25)
+        b.setIconSize(QtCore.QSize(22, 22))
+        b.setIcon(QtGui.QIcon('%s/icon/%s' % (self.scriptsPath, icon_name)))
+        b.setToolTip(tip)
+        b.setStyleSheet(_FLAT)
+        return b
+
+    # ------------------------------------------------------------------ 数据/逻辑
     def projectSetting(self):
         data = jsonHelper.readDictFromFile('%s/config/projectSetting.json' % self.jsonPath)
         return data
@@ -135,9 +202,9 @@ class AssetToolsUI(QtWidgets.QWidget):
     def rememberSettings(self):
         settings = QtCore.QSettings('AssetsUE', 'AssetsUESettings')
         settings.setValue('isList', self.isList)
-        settings.setValue('thumbSize', self.ui.itemSize_Slider.value())
-        settings.setValue('project', self.ui.project_comb.currentIndex())
-        settings.setValue('typ', self.ui.type_listWgt.currentRow())
+        settings.setValue('thumbSize', self.itemSize_Slider.value())
+        settings.setValue('project', self.project_comb.currentIndex())
+        settings.setValue('typ', self.type_listWgt.currentRow())
 
     def readSettings(self):
         settings = QtCore.QSettings('AssetsUE', 'AssetsUESettings')
@@ -155,22 +222,24 @@ class AssetToolsUI(QtWidgets.QWidget):
         return thumbSize, project, typ
 
     def firstView(self):
-        """ 初显示 """
-        self.update_project()
-        self.update_type()
-
-        thumbSize, project, typ = self.readSettings()
-        if thumbSize is not None:
-            self.ui.itemSize_Slider.setValue(thumbSize)
-        if project is not None:
-            self.ui.project_comb.setCurrentIndex(project)
-        if typ is not None:
-            self.ui.type_listWgt.setCurrentRow(typ)
-        else:
-            self.ui.type_listWgt.setCurrentRow(0)
+        """ 初显示：填充项目/类型并恢复上次选择。屏蔽选择信号，避免启动时同步触发 DB 查询。"""
+        self.project_comb.blockSignals(True)
+        self.type_listWgt.blockSignals(True)
+        try:
+            self.update_project()
+            self.update_type()
+            thumbSize, project, typ = self.readSettings()
+            if thumbSize is not None:
+                self.itemSize_Slider.setValue(int(thumbSize))
+            if project is not None:
+                self.project_comb.setCurrentIndex(int(project))
+            self.type_listWgt.setCurrentRow(int(typ) if typ is not None else 0)
+        finally:
+            self.project_comb.blockSignals(False)
+            self.type_listWgt.blockSignals(False)
 
     def update_project(self):
-        self.ui.project_comb.addItems(self.projectSetting()['projects'])
+        self.project_comb.addItems(self.projectSetting()['projects'])
 
     def update_type(self):
         """
@@ -184,7 +253,7 @@ class AssetToolsUI(QtWidgets.QWidget):
             pixmap.setColor(QtGui.QColor("#b3b3b3"))
             icon.addPixmap(pixmap, QtGui.QIcon.Normal, QtGui.QIcon.Off)
             item.setIcon(icon)
-            self.ui.type_listWgt.addItem(item)
+            self.type_listWgt.addItem(item)
 
     def projectChanged(self):
         self.rememberSettings()
@@ -193,18 +262,6 @@ class AssetToolsUI(QtWidgets.QWidget):
     def typeChanged(self):
         self.rememberSettings()
         self.listWidgetAddItems(self.getItemsFromSQL())
-
-    def getCurrentItemsData(self):
-        """
-        获取当前图标信息
-        :return:__item, __fileType, __folder
-        """
-        __item = self.ui.main_listWgt.selectedItems()
-        __fileType = self.ui.fileType_bttnGroup.checkedButton().text()
-        __folder = self.__fileTypeFolderDict[__fileType]
-        if not __item:
-            return
-        return __item, __fileType, __folder
 
     def openDir(self, dir_path):
         """
@@ -221,58 +278,45 @@ class AssetToolsUI(QtWidgets.QWidget):
         displayThumb_bttn  的初显示状态
         """
         if self.isList:
-            self.ui.displayThumb_bttn.setIcon(QtGui.QIcon('%s/icon/display_icon.png' % self.scriptsPath))
-            self.ui.displayThumb_bttn.setToolTip("缩略图显示")
+            self.displayThumb_bttn.setIcon(QtGui.QIcon('%s/icon/display_icon.png' % self.scriptsPath))
+            self.displayThumb_bttn.setToolTip("缩略图显示")
         else:
-            self.ui.displayThumb_bttn.setIcon(QtGui.QIcon('%s/icon/display_list.png' % self.scriptsPath))
-            self.ui.displayThumb_bttn.setToolTip("表单显示")
+            self.displayThumb_bttn.setIcon(QtGui.QIcon('%s/icon/display_list.png' % self.scriptsPath))
+            self.displayThumb_bttn.setToolTip("表单显示")
 
     def backToMainWgt(self):
         """返回主面板"""
-        self.ui.Preview_label.clear()
-        self.ui.Play_toolBttn.setEnabled(False)
-        self.ui.firstFrame_toolBttn.setEnabled(False)
-        self.ui.prevFrame_toolBttn.setEnabled(False)
-        self.ui.nextFrame_toolBttn.setEnabled(False)
-        self.ui.lastFrame_toolBttn.setEnabled(False)
+        self.preview_wgt.clear()
         self.update_asset()
 
     def viewThumbnailChange(self):
         """ 切换  缩略图/表单  显示 """
-        isAction = self.isAction
         if self.isList:
-            '''如果list则切换icon显示'''
-            self.ui.displayThumb_bttn.setIcon(QtGui.QIcon('%s/icon/display_list.png' % self.scriptsPath))
-            self.ui.displayThumb_bttn.setToolTip("表单显示")
+            self.displayThumb_bttn.setIcon(QtGui.QIcon('%s/icon/display_list.png' % self.scriptsPath))
+            self.displayThumb_bttn.setToolTip("表单显示")
             self.isList = False
-            self.ui.main_listWgt.setIsList(self.isList)
-            self.ui.main_listWgt.setIconMode()
-            if not isAction:
-                self.update_asset()
-            else:
-                self.update_action()
+            self.main_listWgt.setIsList(self.isList)
+            self.main_listWgt.setIconMode()
         else:
-            '''否则切换list显示'''
-            self.ui.displayThumb_bttn.setIcon(QtGui.QIcon('%s/icon/display_icon.png' % self.scriptsPath))
-            self.ui.displayThumb_bttn.setToolTip("缩略图显示")
+            self.displayThumb_bttn.setIcon(QtGui.QIcon('%s/icon/display_icon.png' % self.scriptsPath))
+            self.displayThumb_bttn.setToolTip("缩略图显示")
             self.isList = True
-            self.ui.main_listWgt.setIsList(self.isList)
-            self.ui.main_listWgt.setListMode()
-            if not isAction:
-                self.update_asset()
-            else:
-                self.update_action()
-
+            self.main_listWgt.setIsList(self.isList)
+            self.main_listWgt.setListMode()
+        self.update_asset()
         self.rememberSettings()
 
     def itemSizeSliderChanged(self):
         """ 设置item尺寸 """
-        itemSize = self.ui.itemSize_Slider.value()
+        itemSize = self.itemSize_Slider.value()
         if self.isList:
             pass
         else:
-            self.ui.main_listWgt.setIconSize(QtCore.QSize(itemSize, itemSize))
-            self.ui.main_listWgt.setGridSize(QtCore.QSize(itemSize + 10, itemSize + 50))
+            # 关键：主列表是自绘 delegate，图标区尺寸取自 itemSize()(_itemSize)；只改 iconSize/gridSize
+            # 只会让网格单元(间隙)变大而图标不变，必须同步更新 _itemSize，delegate 的 iconRect 高度才随之变大。
+            self.main_listWgt.setItemSize(itemSize)
+            self.main_listWgt.setIconSize(QtCore.QSize(itemSize, itemSize))
+            self.main_listWgt.setGridSize(QtCore.QSize(itemSize + 10, itemSize + 50))
 
     def itemSizeSliderReleased(self):
         self.rememberSettings()
@@ -303,64 +347,72 @@ class AssetToolsUI(QtWidgets.QWidget):
                     os.rename(downloadInfo[0]['asset.image'][0], rename)
             except:
                 print(u"下载%s失败！" % id['asset.entity'])
-        self.listWidgetAddItems_CGT_Fast(self.ui.main_listWgt, project, type, keyWords="")
-
-    def loadingText(self):
-        # print("loadingGif()")
-        text = "Loading ... "
-        self.ui.main_listWgt.clear()
-        item = QtWidgets.QListWidgetItem()
-        item.setText(text)
-        self.ui.main_listWgt.addItem(item)
+        self.listWidgetAddItems(self.getItemsFromSQL())
 
     def update_asset(self):
         """
         更新资产的多线程
         """
-        print("update_asset")
         type, project, path = self.getTypeAndProject()
-        if os.path.exists(path):
+        if path and os.path.exists(path):
             self.infoMsg("info", "Loading...")
             self.update_asset_thread.start()
         else:
-            self.ui.main_listWgt.clear()
+            self.main_listWgt.clear()
 
     def refresh_asset(self):
-        if not self.isAction:
-            self.listWidgetAddItems(self.getItemsFromSQL())
-        else:
-            self.update_action()
+        self.listWidgetAddItems(self.getItemsFromSQL())
+
+    def sort_asset_ui(self):
+        """ 资产排序菜单：按列排序，同一项再次点击切换升/降序 """
+        menu = QtWidgets.QMenu(self)
+        sort_columns = [
+            (u'按日期排序', 0),
+            (u'按资产名排序', 1),
+            (u'按中文名排序', 2),
+            (u'按模型制作排序', 3),
+            (u'按模型状态排序', 4),
+            (u'按绑定制作排序', 5),
+            (u'按绑定状态排序', 6),
+        ]
+        for name, column in sort_columns:
+            act = QtGui.QAction(name, self)
+            act.triggered.connect(lambda checked=False, col=column: self._do_sort(col))
+            menu.addAction(act)
+        menu.exec_(self.sort_bttn.mapToGlobal(self.sort_bttn.rect().bottomLeft()))
+
+    def _do_sort(self, column):
+        """
+        更新当前排序状态并重排列表：同一列再次点击 -> 反向；换列 -> 默认升序。
+        column: 0=日期 1=资产名 2=中文名 3=模型制作 4=模型状态 5=绑定制作 6=绑定状态
+        """
+        cur_col, cur_reverse = self._current_sort
+        reverse = (not cur_reverse) if column == cur_col else False
+        self._current_sort = (column, reverse)
+        self.listWidgetAddItems()  # 用现有数据按新排序状态重排重填(保留当前搜索过滤)
+
+    def _sort_data(self, data):
+        """ 按当前排序状态 self._current_sort 对数据列表就地排序。 """
+        column, reverse = self._current_sort
+
+        def sort_key(item_data):
+            try:
+                value = item_data[column] if len(item_data) > column else None
+            except (IndexError, TypeError):
+                value = None
+            if column == 0:  # 日期列统一按整数比较（空值当 0），避免 int/str 混排报错
+                try:
+                    return int(value)
+                except (ValueError, TypeError):
+                    return 0
+            return "" if value is None else str(value).lower()
+
+        data.sort(key=sort_key, reverse=reverse)
+        return data
 
     def search_asset(self):
-        """ 搜索 """
+        """ 搜索：按关键字过滤当前数据重填 """
         self.listWidgetAddItems()
-        # keyWords = self.ui.key_line.text()
-        # type, project, path = self.getTypeAndProject()
-        # if not self.ui.searchAll_cBox.isChecked():
-        #     self.update_asset_thread = myWidget.MyThread()
-        #     self.update_asset_thread.signal.connect(
-        #         lambda: self.listWidgetAddItems_CGT_Search(project, type, keyWords))
-        #     self.loadingText()
-        #     self.update_asset_thread.start()
-        # else:
-        #     for i in self.projectSetting()['projects']:
-        #         self.update_action_thread = myWidget.MyThread()
-        #         self.update_action_thread.signal.connect(lambda: self.listWidgetAddItems_CGT(i, type, keyWords))
-        #         self.loadingText()
-        #         self.update_action_thread.start()
-
-    def update_action(self):
-        """ 更新动作库的多线程 """
-        currentSelected = self.ui.main_listWgt.selectedItems()
-        if currentSelected:
-            self.currentAssetData = currentSelected[0].data(QtCore.Qt.UserRole)
-        item_data = self.currentAssetData
-        type, project, path = self.getTypeAndProject()
-        if os.path.exists(path):
-            self.loadingText()
-            self.update_action_thread.start()
-        else:
-            self.ui.main_listWgt.clear()
 
     def getItemsFromSQL(self):
         _type, _project, path = self.getTypeAndProject()
@@ -371,9 +423,9 @@ class AssetToolsUI(QtWidgets.QWidget):
         """ 得到asset数据 """
         conn = None
         cur = None
-        get_script = ''' 
-             SELECT "asset.date", "asset.name", "asset.zh_name", "asset.mod_artist", "asset.mod_status", 
-             "asset.rig_artist", "asset.rig_status", "asset.icon" 
+        get_script = '''
+             SELECT "asset.date", "asset.name", "asset.zh_name", "asset.mod_artist", "asset.mod_status",
+             "asset.rig_artist", "asset.rig_status", "asset.icon"
              FROM public."asset"
              WHERE
              "asset.type" = '%s';
@@ -384,7 +436,6 @@ class AssetToolsUI(QtWidgets.QWidget):
             cur = conn.cursor()
             cur.execute(get_script)
             data = cur.fetchall()
-            # print(data)
             return data
         except Exception as e:
             print(e)
@@ -393,297 +444,73 @@ class AssetToolsUI(QtWidgets.QWidget):
                 cur.close()
             if conn is not None:
                 conn.close()
-    #
-    # def getItemsDictFromCGTW(self, keyWords=u""):
-    #     """
-    #     从CGTeamWork获取字典
-    #     :param keyWords:
-    #     :return:{text:icon}
-    #     """
-    #     import cgtw2
-    #     t_tw = cgtw2.tw()
-    #     type, project, path = self.getTypeAndProject()
-    #     TW_proj = str(self.projectSetting()['projectdiction'][project])
-    #     t_asset_ids = t_tw.info.get_id(TW_proj, 'asset', [['asset.maya', '=', u"完成"],
-    #                                                       'and', ['asset.assetstapy', '=', type]])
-    #     TW_dictionInfo = t_tw.info.get(TW_proj, 'asset', t_asset_ids, ['asset.entity', 'asset.cn_name'])
-    #     itemsListDict = {}
-    #     for info in TW_dictionInfo:
-    #         if info['asset.entity'].lower().find(keyWords.lower()) != -1 or info['asset.cn_name'].find(keyWords) != -1:
-    #             icon_path = '{0}/{1}/Icon/{1}.png'.format(path, info['asset.entity'])
-    #             bbb = {'role_name': info['asset.entity'], 'project': project, 'type': type,
-    #                    'zh_name': info['asset.cn_name'], 'icon_path': icon_path}
-    #             itemsListDict.update({info['asset.entity']: bbb})
-    #     return itemsListDict
 
     def listWidgetAddItems(self, new_dict=None):
         """
         设置主面板FBX显示
         """
-        self.ui.main_listWgt.clear()
-        self.ui.Preview_label.clear()
-        self.isAction = False
-        keyWords = self.ui.key_line.text()
+        self.main_listWgt.clear()
+        self.preview_wgt.clear()
+        keyWords = self.key_line.text()
 
         start_time = time.time()
         if new_dict:
-            self.ui.main_listWgt.setItems(new_dict)
-        self.ui.main_listWgt.setIsList(self.isList)
-        self.ui.main_listWgt.setItemSize(self.ui.itemSize_Slider.value())
-        self.ui.main_listWgt.addItems(keyWords)
-        self.ui.main_listWgt.setMode()
+            self.main_listWgt.setItems(new_dict)
+        # 按当前排序状态排序数据（默认日期降序，最新在前），每次加载都生效
+        _data = list(self.main_listWgt.items() or [])
+        if _data:
+            self._sort_data(_data)
+            self.main_listWgt.setItems(_data)
+        self.main_listWgt.setIsList(self.isList)
+        self.main_listWgt.setItemSize(self.itemSize_Slider.value())
+        self.main_listWgt.addItems(keyWords)
+        self.main_listWgt.setMode()
         end_time = time.time()
-        self.infoMsg("info", "%s items" % (self.ui.main_listWgt.count()) +
+        self.infoMsg("info", "%s items" % (self.main_listWgt.count()) +
                      '   Cost :  %.2f' % (end_time - start_time) + ' sec')
 
-    def listWidgetAddActionItems(self, item_data):
-        """
-        根据选择item，添加主面板Action显示(非多线程)
-        """
-        selectedPath = item_data['hi_rig'].split('Rig/')[0]
-        preview_dir = QtCore.QDir('{0}/Action/ActionFBX'.format(selectedPath))
-        self.ui.back_bttn.setEnabled(True)
-        self.ui.itemSize_Slider.setEnabled(False)
-        self.ui.main_listWgt.clear()
-        self.isAction = True
-        for i in preview_dir.entryList(['*.fbx'], QtCore.QDir.Files | QtCore.QDir.NoDotAndDotDot):
-            item = QtWidgets.QListWidgetItem()
-            text = i.split('/')[(-1)].split('.')[0].split('_')[(-1)]
-            item.setText(text)
-            if self.isList:
-                self.ui.main_listWgt.setViewMode(QtWidgets.QListView.ListMode)
-                item.setSizeHint(QtCore.QSize(200, 22))
-                self.ui.main_listWgt.setGridSize(QtCore.QSize(2000, 25))
-                self.ui.main_listWgt.setSpacing(1)
-                item.setData(QtCore.Qt.UserRole, item_data)  # 设置信息
-                self.ui.main_listWgt.addItem(item)
-            else:
-                item.setSizeHint(QtCore.QSize(160, 180))
-                self.ui.main_listWgt.setGridSize(QtCore.QSize(162, 190))
-                item.setTextAlignment(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignBottom)
-                widget2 = QtWidgets.QWidget()  # 增加自定义Widget
-                widget2.setMaximumSize(QtCore.QSize(160, 160))
-                lay = QtWidgets.QVBoxLayout()
-                lay.setContentsMargins(0, 0, 0, 0)
-                widget2.setLayout(lay)
-                label = QtWidgets.QLabel()
-                label.setAlignment(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop)
-                movPath = '%s/Action/Preview/%s' % (selectedPath, i.replace('.fbx', '.gif'))
-                if os.path.isfile(movPath):
-                    mov = QtGui.QMovie(movPath)
-                    mov.start()
-                    label.setMovie(mov)
-                    lay.addWidget(label)
-                else:
-                    icon_path = "%s/icon/Default_action.png" % self.scriptsPath
-                    pixmap = QtGui.QPixmap(icon_path)
-                    label.setPixmap(pixmap)
-                    lay.addWidget(label)
-                item.setData(QtCore.Qt.UserRole, item_data)  # 设置信息
-                self.ui.main_listWgt.addItem(item)
-                self.ui.main_listWgt.setItemWidget(item, widget2)
-
     def listWidgetItemChanged(self):
-        """ 改变item触发：改变预览显示 """
-        currentSelected = self.ui.main_listWgt.selectedItems()
+        """ 改变item触发：把选中资产喂给 FBX 三维预览 + 动作库 """
+        currentSelected = self.main_listWgt.selectedItems()
         if currentSelected:
             item_data = currentSelected[0].itemData()
-            # iconpath = '{0}/{1}/Assets/{2}/{3}/Icon/{3}.png'.format(self.projectSetting()['rootPath'],
-            #                                                         item_data['project'], item_data['type'],
-            #                                                         item_data['role_name'])
-            # localpath = '{0}/{1}/Assets/{2}/{3}.png'.format(self.tempPath, item_data['project'], item_data['type'],
-            #                                                 item_data['role_name'])
-            # actionpath = '{0}/{1}/Assets/{2}/{3}/Action/Preview/{3}'.format(self.projectSetting()['rootPath'],
-            #                                                                 item_data['project'], item_data['type'],
-            #                                                                 item_data['role_name']) + "_" + \
-            #              currentSelected[0].text() + ".gif"
-            '''根据item_data设置预览窗口显示'''
-            self.ui.Preview_label.clear()
-            self.ui.title_label.clear()
-            self.ui.title_label.setText(u"Name： " + item_data[1] + u"\n中文名： " + item_data[2])
+            icon = item_data[7]
+            '''喂给 FBX 预览：必须先 setTitle（GL 据 name 由 /Icon/→/FBX/ 推绑定文件），再 setPreviewPixmap'''
+            self.preview_wgt.clear()
+            self.preview_wgt.setTitle(item_data[1], item_data[2])
+            self.preview_wgt.setPreviewPixmap(icon)
+            '''列出该资产 Action 目录下的动作（递归），点击后 on_action_selected 套播'''
+            self.action_wgt.setAsset(self.preview_wgt.deriveFbxPath(icon))
+        else:
+            self.preview_wgt.clear()
+            self.action_wgt.clear()
 
-            if not self.isAction:
-                self.ui.Preview_label.setPreviewPixmap(item_data[7], "pose")
-            else:
-                self.__playerEnabled(True)
-                self.ui.PreviewLabel.setAnim(item_data[7], "animation")
+    def on_action_selected(self, action_path):
+        """动作库选中：把该动作套到当前预览的绑定文件上循环播放；空路径回静态预览。"""
+        self.preview_wgt.playAction(action_path)
 
     def show_menu(self, point):
         """
-        设置主面板右键菜单
+        设置主面板右键菜单：Show in Explorer / Import
         """
-        currentItem = self.ui.main_listWgt.itemAt(point)
-        if currentItem is not None:
-            menu = QtWidgets.QMenu(self.ui.main_listWgt)
-            action_action = QtWidgets.QAction('Action', self)
-            show_action = QtWidgets.QAction('Show in Explorer', self)
-            show_action.setIcon(QtGui.QIcon("{}/icon/folder_white.png".format(self.scriptsPath)))
-            imp_action = QtWidgets.QAction('Import', self)
-            impAction_action = QtWidgets.QAction('Import Action', self)
-
-            if self.isAction:
-                menu.addAction(impAction_action)
-            else:
-                menu.addAction(action_action)
-                menu.addSeparator()
-                menu.addAction(show_action)
-                menu.addSeparator()
-                menu.addAction(imp_action)
-
-            self.checkDir('Action', currentItem, action_action)  # 检查Action是否为空，决定action_action是否可用
-
-            action_action.triggered.connect(self.update_action)
-            show_action.triggered.connect(partial(self.openDir,
-                                                  currentItem.itemData()[7].split("/Icon/")[0]))
-            imp_action.triggered.connect(self.importFile)
-            impAction_action.triggered.connect(self.importActionFile)
-
-            menu.exec_(QtGui.QCursor.pos())
-        return
-
-    def checkDir(self, type, item, action):
-        """
-        检查选择item的路径下是否为空，决定右键菜单显示是否可用
-        """
-        item_data = item.itemData()
-        folder_path = item_data[7].split('/Icon/')[0]
-        folder_path = '{0}/{1}'.format(folder_path, type)
-        folder_info = QtCore.QFileInfo(folder_path)
-        if folder_info.exists():
-            action.setEnabled(True)
-        else:
-            action.setEnabled(False)
-
-    # def mainListWgtAddItem(self, project_name, keyWords, type, search):
-    #     """
-    #     根据搜索词KeyWords设置主面板显示
-    #     """
-    #     path = '{0}/{1}/{2}/{3}'.format(self.ps_rootPath, project_name, self.ps_assetFolder, type)
-    #     dir = QtCore.QDir(path)
-    #     for role_name in dir.entryList(QtCore.QDir.Dirs | QtCore.QDir.NoDotAndDotDot):
-    #         role_rig_dir = QtCore.QDir('{0}/{1}/{2}'.format(path, role_name, 'FBX'))
-    #         if role_rig_dir.entryList(['*.fbx'],
-    #                                   QtCore.QDir.Files | QtCore.QDir.NoDotAndDotDot) and role_name.lower().find(
-    #             keyWords) != -1:
-    #             icon_path = '{0}/{1}/{2}/{1}.png'.format(path, role_name, self.ps_iconFolder)
-    #             if icon_path.find('/Miarmy/') != -1:
-    #                 icon_path = icon_path.replace('/Miarmy', '/Characters/')
-    #             if QtCore.QFileInfo(icon_path).exists() is False:
-    #                 icon_path = self.ps_defaultIcon
-    #             self.itemDetail(icon_path, role_name, project_name, search)
-
-    # def listWidgetAddItems_XXX(self):
-    #     """
-    #     根据type，project，读取CGT资产数据库，icon优先读取本地数据（快速），设置主面板item显示
-    #     """
-    #     type, project, path = self.getTypeAndProject()
-    #     isCGTW = self.isCGTW()
-    #     self.ui.main_listWgt.clear()
-    #     self.ui.Preview_label.clear()
-    #     self.isAction = False
-    #     keyWords = self.ui.key_line.text()
-    #     itemsList = self.getItemsListDict(keyWords).keys()
-    #     starttime = time.time()
-    #     if isCGTW:
-    #         for list in itemsList:
-    #             role_name = list.split('   /   ')[0]
-    #             item = QtWidgets.QListWidgetItem()
-    #             item_data = {'role_name': role_name, 'project': project, 'type': type}
-    #             item.setData(QtCore.Qt.UserRole, item_data)
-    #             item.setTextAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
-    #             if self.isList:
-    #                 item.setText(list)
-    #             else:
-    #                 item.setText(list.replace('   /   ', '\n'))
-    #                 item.setToolTip(list.replace('   /   ', '\n'))
-    #                 icon = QtGui.QIcon()
-    #                 icon.addPixmap(QtGui.QPixmap("%s/icon/blank_ch.png" % self.scriptsPath), QtGui.QIcon.Normal,
-    #                                QtGui.QIcon.Off)
-    #                 item.setIcon(icon)
-    #             self.ui.main_listWgt.addItem(item)
-    #         self.viewThumbnail()
-    #         self.__update_visible_icon()
-    #     # self.ui.main_listWgt._sizeSignal.connect(self.mainWightSizeChanged)
-    #     endtime = time.time()
-    #     self.infoMsg("info", 'Load Completed !  ' +
-    #                  "   %s/%s items" % (self.__updatedNum, self.ui.main_listWgt.count()) +
-    #                  '   Cost :  %.2f' % (endtime - starttime) + ' sec')
-
-    def listWidgetAddItems_CGT_Search(self, project, type, keyWords):
-        """
-        根据type，project，读取CGT资产数据库，icon优先读取本地数据（快速），设置主面板item显示
-        """
-        self.ui.main_listWgt.clear()
-        self.ui.Preview_label.clear()
-        self.isAction = False
-        path = '{0}/{1}/{2}/{3}'.format(self.projectSetting()['rootPath'], project,
-                                        self.projectSetting()['assetFolder'], type)
-        TW_proj = self.projectSetting()['projectdiction'][project]
-        t_asset_ids = t_tw.info.get_id(TW_proj, 'asset',
-                                       [['asset.maya', '=', u"完成"], 'and', ['asset.assetstapy', '=', type]])
-        TW_dictionInfo = t_tw.info.get(TW_proj, 'asset', t_asset_ids, ['asset.entity', 'asset.cn_name'])
-        if self.isList:
-            for info in TW_dictionInfo:
-                if info['asset.entity'].lower().find(keyWords.lower()) != -1 or info['asset.cn_name'].find(
-                        keyWords) != -1:
-                    icon_path = 'None'
-                    sub_thread = threading.Thread(target=self.addItems_CGT,
-                                                  args=(info['asset.entity'], icon_path, info['asset.cn_name']))
-                    sub_thread.setDaemon(True)
-                    sub_thread.start()
-                    sub_thread.join()
-        else:
-            for info in TW_dictionInfo:
-                if info['asset.entity'].lower().find(keyWords.lower()) != -1 or info['asset.cn_name'].find(
-                        keyWords) != -1:
-                    icon_path = '{0}/{1}/Assets/{2}/{3}.png'.format(self.tempPath, project, type,
-                                                                    info['asset.entity'])
-                    if QtCore.QFileInfo(icon_path).exists() is False:
-                        icon_path = '{0}/{1}/Icon/{1}.png'.format(path, info['asset.entity'])
-                        if QtCore.QFileInfo(icon_path).exists() is False:
-                            icon_path = self.projectSetting()['defaultIcon']
-                    sub_thread = threading.Thread(target=self.addItems_CGT,
-                                                  args=(info['asset.entity'], icon_path, info['asset.cn_name']))
-                    sub_thread.setDaemon(True)
-                    sub_thread.start()
-                    sub_thread.join()
-        self.viewThumbnail()
-
-    def mainListItemChange(self):
-        """
-        主面板item改变触发：改变文件类型显示
-        """
-        currentSelected = self.ui.main_listWgt.selectedItems()
-        currentProject = self.ui.project_listWgt.selectedItems()
-        rBttn_dict = {'mod': 'self.ui.mod_rBttn', 'hi_rig': 'self.ui.hiRig_rBttn',
-                      'low_rig': 'self.ui.lowRig_rBttn',
-                      'all_rig': 'self.ui.allRig_rBttn',
-                      'render': 'self.ui.render_rBttn',
-                      'xgen': 'self.ui.xgen_rBttn',
-                      'AD': 'self.ui.ad_rBttn',
-                      'OAT': 'self.ui.oat_rBttn'}
-        eval(rBttn_dict['mod']).setEnabled(True)
-        eval(rBttn_dict['hi_rig']).setEnabled(True)
-        eval(rBttn_dict['low_rig']).setEnabled(True)
-        eval(rBttn_dict['all_rig']).setEnabled(True)
-        eval(rBttn_dict['render']).setEnabled(True)
-        eval(rBttn_dict['xgen']).setEnabled(True)
-        eval(rBttn_dict['AD']).setEnabled(True)
-        eval(rBttn_dict['OAT']).setEnabled(True)
-        if len(currentSelected) != 1:
+        currentItem = self.main_listWgt.itemAt(point)
+        if currentItem is None:
             return
-        item_data = currentSelected[0].data(QtCore.Qt.UserRole)
-        item_data.pop('icon')
-        item_data.pop('role_name')
-        item_data.pop('project')
-        for type in item_data.keys():
-            file_info = QtCore.QFileInfo(item_data[type])
-            if file_info.exists() is False:
-                eval(rBttn_dict[type]).setEnabled(False)
+        menu = QtWidgets.QMenu(self.main_listWgt)
+        show_action = QtGui.QAction('Show in Explorer', self)
+        show_action.setIcon(QtGui.QIcon("{}/icon/folder_white.png".format(self.scriptsPath)))
+        imp_action = QtGui.QAction('Import', self)
+        menu.addAction(show_action)
+        menu.addSeparator()
+        menu.addAction(imp_action)
+        show_action.triggered.connect(partial(self.openDir,
+                                              currentItem.itemData()[7].split("/Icon/")[0]))
+        imp_action.triggered.connect(self.importFile)
+        menu.exec_(QtGui.QCursor.pos())
 
     def getTypeAndProject(self):
-        project = self.ui.project_comb.currentText()
-        currentType = self.ui.type_listWgt.selectedItems()
+        project = self.project_comb.currentText()
+        currentType = self.type_listWgt.selectedItems()
         if not currentType:
             type = 'Default'
             path = None
@@ -694,50 +521,11 @@ class AssetToolsUI(QtWidgets.QWidget):
         return type, project, path
 
     def getCurrentData(self):
-        currentSelected = self.ui.main_listWgt.selectedItems()
-        currentProject = str(self.ui.project_comb.currentText())
-        currentType = self.ui.type_listWgt.selectedItems()[0].text()
+        currentSelected = self.main_listWgt.selectedItems()
+        currentProject = str(self.project_comb.currentText())
+        currentType = self.type_listWgt.selectedItems()[0].text()
 
         return currentSelected, currentProject, currentType
-
-    def playerSet(self):
-        sys.path.append('{}/utils'.format(self.scriptsPath))
-        import gifplayer
-        # reload(gifplayer)
-        player = gifplayer.Player()
-        player.setPlayButtonState(self.ui.Play_toolBttn)
-        '''播放'''
-        self.ui.Play_toolBttn.setIcon(QtWidgets.QApplication.style().standardIcon(QtWidgets.QStyle.SP_MediaStop))
-        self.ui.Play_toolBttn.clicked.connect(lambda: player.play(100, self.ui.Play_toolBttn))
-        '''起始帧'''
-        self.ui.firstFrame_toolBttn.setIcon(
-            QtWidgets.QApplication.style().standardIcon(QtWidgets.QStyle.SP_MediaSkipBackward))
-        self.ui.firstFrame_toolBttn.clicked.connect(player.firstFrame)
-        '''上一帧'''
-        self.ui.prevFrame_toolBttn.setIcon(
-            QtWidgets.QApplication.style().standardIcon(QtWidgets.QStyle.SP_MediaSeekBackward))
-        self.ui.prevFrame_toolBttn.clicked.connect(player.prevFrame)
-        '''下一帧'''
-        self.ui.nextFrame_toolBttn.setIcon(
-            QtWidgets.QApplication.style().standardIcon(QtWidgets.QStyle.SP_MediaSeekForward))
-        self.ui.nextFrame_toolBttn.clicked.connect(player.nextFrame)
-        '''结束帧'''
-        self.ui.lastFrame_toolBttn.setIcon(
-            QtWidgets.QApplication.style().standardIcon(QtWidgets.QStyle.SP_MediaSkipForward))
-        self.ui.lastFrame_toolBttn.clicked.connect(player.lastFrame)
-
-    def __playerEnabled(self, value):
-        self.ui.Play_toolBttn.setEnabled(value)
-        self.ui.firstFrame_toolBttn.setEnabled(value)
-        self.ui.prevFrame_toolBttn.setEnabled(value)
-        self.ui.nextFrame_toolBttn.setEnabled(value)
-        self.ui.lastFrame_toolBttn.setEnabled(value)
-
-    def createRef(self):
-        print('TODO: CreateRef')
-
-    def switchRef(self):
-        print('TODO: SwitchRef')
 
     def importAniFBX(self, animation_mesh_fbx, skeleton_path, animations_folder):
         """
@@ -755,19 +543,23 @@ class AssetToolsUI(QtWidgets.QWidget):
 
         asset_list_after = asset_reg.get_assets_by_path(animations_folder)
         new_assets = list(set(asset_list_after) - set(asset_list_before))
+        if not new_assets:
+            unreal.log_warning(u'导入动作未生成任何资产: {0} (检查: 该fbx是否含动画 / 骨架 {1} 的骨骼是否与动作匹配)'.format(
+                animation_mesh_fbx, skeleton_path))
         for asset in new_assets:
+            asset_path = '%s.%s' % (asset.package_name, asset.asset_name)  # UE5.7: AssetData 无 object_path
             if asset.asset_class == 'SkeletalMesh':
-                unreal.EditorAssetLibrary.delete_asset(asset.object_path)
-            print('Deleted asset: ' + str(asset.object_path))
-            if asset.asset_class == 'AnimSequence':
-                anim = unreal.load_asset(asset.object_path)
+                unreal.EditorAssetLibrary.delete_asset(asset_path)
+                print('Deleted asset: ' + asset_path)
+            elif asset.asset_class == 'AnimSequence':
+                anim = unreal.load_asset(asset_path)
                 unreal.AnimationLibrary.set_is_root_motion_lock_forced(anim, True)
-                print('"Force Root Lock" enabled for: ' + str(asset.object_path))
-                unreal.EditorAssetLibrary.save_asset(asset.object_path, only_if_is_dirty=False)
+                print('"Force Root Lock" enabled for: ' + asset_path)
+                unreal.EditorAssetLibrary.save_asset(asset_path, only_if_is_dirty=False)
 
     def importFile(self):
         """
-        导入Asset文件到UE
+        导入Asset文件到UE（SkeletalMesh）
         """
         try:
             currentSelected, currentProject, currentType = self.getCurrentData()
@@ -777,57 +569,46 @@ class AssetToolsUI(QtWidgets.QWidget):
 
         for item in currentSelected:
             item_data = item.itemData()
-            # print(item_data)
             path = item_data[7].split('/Icon/')[0]
             role_name = item_data[1]
             fbx_path = '%s/FBX/%s.fbx' % (path, role_name)
-            # skeleton_path = ('/Game/Assets/{1}/{0}/Maya/{0}_Skeleton').format(role_name, currentType)
-            skeleton_path = '/Game/Assets/{1}/{0}/{0}_Skeleton'.format(role_name, currentType)
-            # character_folder = ('/Game/Assets/{1}/{0}/Maya/').format(role_name, currentType)
             character_folder = '/Game/Assets/{1}/{0}/'.format(role_name, currentType)
             material_folder = '/Game/Assets/{1}/{0}/Material/'.format(role_name, currentType)
             texture_folder = '/Game/Assets/{1}/{0}/Texture/'.format(role_name, currentType)
-            max_folder = '/Game/Assets/{1}/{0}/Max/'.format(role_name, currentType)
             AF = assetFunctions.AssetFunctions()
-            asset_reg = unreal.AssetRegistryHelpers.get_asset_registry()
-            asset_list_before = asset_reg.get_assets_by_path(character_folder)
             animation_mesh_task = AF.buildImportTask(fbx_path, character_folder, AF.buildSkeletalMeshImportOptions())
             AF.executeImportTasks([animation_mesh_task])
             if not unreal.EditorAssetLibrary.does_directory_exist(material_folder):
                 unreal.EditorAssetLibrary.make_directory(material_folder)
             if not unreal.EditorAssetLibrary.does_directory_exist(texture_folder):
                 unreal.EditorAssetLibrary.make_directory(texture_folder)
-            # if not unreal.EditorAssetLibrary.does_directory_exist(max_folder):
-            #     unreal.EditorAssetLibrary.make_directory(max_folder)
             self.repathAssets(character_folder)
 
-    def importActionFile(self):
+    def importActionFile(self, action_fbx=None):
         """
-        导入动作库文件到UE
+        导入动作到 UE 该资产的 Action 文件夹下（作 AnimSequence）。由右侧动作库右键"导入动作"触发，传动作 .fbx 全路径。
         """
-        AF = assetFunctions.AssetFunctions()
-        currentSelected = self.ui.main_listWgt.selectedItems()
-        # asset_reg = unreal.AssetRegistryHelpers.get_asset_registry()
-        # asset_list_before = asset_reg.get_assets_by_path(animations_folder)
-        # print (asset_list_before)
-        for item in currentSelected:
-            item_data = item.data(QtCore.Qt.UserRole)
-            itemText = item.text()
-            animation_mesh_ma = item_data['action']  #
-            character_name = item_data['action'].split('/Action/')[0].split('/')[-1]
-            animation_mesh_fbx = "{0}ActionFBX/{1}_{2}.fbx".format(animation_mesh_ma.split("ActionFile")[0],
-                                                                   character_name, itemText)
-            print(animation_mesh_fbx)
-            type_name = item_data['action'].split('/Action/')[0].split('/')[-2]
-            # skeleton_path = ('/Game/Assets/{0}/{1}/Maya/{1}_Skeleton').format(type_name,character_name)
-            # animations_folder = ('/Game/Assets/{0}/{1}/Maya/Action').format(type_name,character_name)
-            skeleton_path = '/Game/Assets/{0}/{1}/{1}_Skeleton'.format(type_name, character_name)
-            print(skeleton_path)
-            animations_folder = '/Game/Assets/{0}/{1}/Action'.format(type_name, character_name)
-            print(animations_folder)
-            self.importAniFBX(animation_mesh_fbx, skeleton_path, animations_folder)
-            # animation_mesh_task = AF.buildImportTask(animation_mesh_fbx, animations_folder, AF.buildAnimationImportOptions(skeleton_path))
-            # AF.executeImportTasks([animation_mesh_task])
+        if not action_fbx:
+            return
+        p = str(action_fbx).replace("\\", "/")
+        character_name = p.split('/Action/')[0].split('/')[-1]
+        type_name = p.split('/Action/')[0].split('/')[-2]
+        character_folder = '/Game/Assets/{0}/{1}'.format(type_name, character_name)
+        skeleton_path = '{0}/{1}_Skeleton'.format(character_folder, character_name)
+        animations_folder = '{0}/Action'.format(character_folder)
+        # 动画导入必须绑定已存在的骨架；骨架缺失时 Interchange 只会报含糊的"没有要导入的数据"。
+        # 这里先明确检查：找不到就列出该目录下实际存在的骨架名，直接暴露"没 Import 资产"或"骨架命名/路径不符"。
+        if unreal.load_asset(skeleton_path) is None:
+            existing = []
+            if unreal.EditorAssetLibrary.does_directory_exist(character_folder):
+                for a in unreal.EditorAssetLibrary.list_assets(character_folder, recursive=True):
+                    if 'Skeleton' in str(a):
+                        existing.append(str(a))
+            unreal.log_warning(u'导入动作失败：找不到骨架 {0}。该目录下现有骨架: {1}'.format(
+                skeleton_path, existing or u'无（请先 Import 该资产以生成骨架）'))
+            self.infoMsg("warning", u"找不到骨架 %s_Skeleton，请先 Import 该资产" % character_name)
+            return
+        self.importAniFBX(p, skeleton_path, animations_folder)
 
     @staticmethod
     def repathAssets(character_folder):
@@ -841,7 +622,6 @@ class AssetToolsUI(QtWidgets.QWidget):
             assetName = assetData.get_asset().get_name()
             assetPathName = assetData.get_asset().get_path_name()
             assetClassName = assetData.get_asset().get_class().get_name()
-            # print('============================='+assetClassName)
             if assetClassName == 'Material' or assetClassName == 'MaterialInstanceConstant':
                 targetPathName = '{0}/Material/{1}.{1}'.format(character_folder.rsplit('/', 1)[0], assetName)
                 editorAssetLib.rename_asset(assetPathName, targetPathName)
@@ -855,6 +635,5 @@ class AssetToolsUI(QtWidgets.QWidget):
         :param icon: "warning", "info", "error"
         :param text: str
         """
-        messageBox.show_msg(self.ui.msg_icon_label, icon,
-                            self.ui.msg_label, text)
-
+        messageBox.show_msg(self.msg_icon_label, icon,
+                            self.msg_label, text)

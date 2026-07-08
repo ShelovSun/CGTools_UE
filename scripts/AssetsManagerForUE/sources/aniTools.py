@@ -261,7 +261,7 @@ class AniToolsUI(QtWidgets.QWidget):
             asset_list_new = asset_reg.get_assets_by_path(sequence_path)
             for asset in asset_list_new:
                 if asset.asset_class == 'AnimSequence':
-                    sequenceFunctions.addSkeletalAnimationTrack(sequence_path, asset.object_path)
+                    sequenceFunctions.addSkeletalAnimationTrack(sequence_path, '%s.%s' % (asset.package_name, asset.asset_name))
 
             self.add_to_folder(sequence_path)
             ani_camera_folder = fbx_path.rsplit('/', 1)[0].replace('AniFBX', 'AniCamera')
@@ -276,7 +276,7 @@ class AniToolsUI(QtWidgets.QWidget):
         asset_list = asset_reg.get_assets_by_path(animations_folder)
         assetName_list = []
         for asset in asset_list:
-            assetName_list.append(str(asset.object_path).split('.')[1])
+            assetName_list.append(str('%s.%s' % (asset.package_name, asset.asset_name)).split('.')[1])
 
         return assetName_list
 
@@ -302,13 +302,13 @@ class AniToolsUI(QtWidgets.QWidget):
         new_assets = list(set(asset_list_after) - set(asset_list_before))
         for asset in new_assets:
             if asset.asset_class == 'SkeletalMesh':
-                unreal.EditorAssetLibrary.delete_asset(asset.object_path)
-            print ('Deleted asset: ' + str(asset.object_path))
+                unreal.EditorAssetLibrary.delete_asset('%s.%s' % (asset.package_name, asset.asset_name))
+            print ('Deleted asset: ' + str('%s.%s' % (asset.package_name, asset.asset_name)))
             if asset.asset_class == 'AnimSequence':
-                anim = unreal.load_asset(asset.object_path)
+                anim = unreal.load_asset('%s.%s' % (asset.package_name, asset.asset_name))
                 unreal.AnimationLibrary.set_is_root_motion_lock_forced(anim, True)
-                print ('"Force Root Lock" enabled for: ' + str(asset.object_path))
-                unreal.EditorAssetLibrary.save_asset(asset.object_path, only_if_is_dirty=False)
+                print ('"Force Root Lock" enabled for: ' + str('%s.%s' % (asset.package_name, asset.asset_name)))
+                unreal.EditorAssetLibrary.save_asset('%s.%s' % (asset.package_name, asset.asset_name), only_if_is_dirty=False)
 
     def renameAniFBX(self, animations_folder):
         current_idea = self.get_current_idea()
@@ -318,7 +318,7 @@ class AniToolsUI(QtWidgets.QWidget):
         editorAssetLib = unreal.EditorAssetLibrary()
         for asset in asset_list:
             if asset.asset_class == 'AnimSequence':
-                assetPathName = str(asset.object_path)
+                assetPathName = str('%s.%s' % (asset.package_name, asset.asset_name))
                 folderNameList = assetPathName.split('/')
                 if assetPathName.split('.')[1].find(('{0}_{1}_').format(current_idea, current_scene)) != -1:
                     continue
@@ -332,7 +332,7 @@ class AniToolsUI(QtWidgets.QWidget):
         asset_list = asset_reg.get_assets_by_path(animations_folder)
         editorAssetLib = unreal.EditorAssetLibrary()
         for asset in asset_list:
-            editorAssetLib.delete_asset(asset.object_path)
+            editorAssetLib.delete_asset('%s.%s' % (asset.package_name, asset.asset_name))
 
     def createLevelSequence(self):
         pass

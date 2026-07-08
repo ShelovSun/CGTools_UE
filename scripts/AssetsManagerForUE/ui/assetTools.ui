@@ -172,7 +172,7 @@
         <number>3</number>
        </property>
        <item>
-        <layout class="QHBoxLayout" name="horizontalLayout" stretch="0,0,0,0,0,0,1,0">
+        <layout class="QHBoxLayout" name="horizontalLayout" stretch="0,0,0,0,0,1,0">
          <property name="spacing">
           <number>2</number>
          </property>
@@ -282,6 +282,12 @@
          </item>
          <item>
           <widget class="QSlider" name="itemSize_Slider">
+           <property name="maximumSize">
+            <size>
+             <width>250</width>
+             <height>16777215</height>
+            </size>
+           </property>
            <property name="font">
             <font>
              <family>Microsoft YaHei UI</family>
@@ -392,19 +398,6 @@
           </widget>
          </item>
          <item>
-          <spacer name="horizontalSpacer">
-           <property name="orientation">
-            <enum>Qt::Horizontal</enum>
-           </property>
-           <property name="sizeHint" stdset="0">
-            <size>
-             <width>40</width>
-             <height>20</height>
-            </size>
-           </property>
-          </spacer>
-         </item>
-         <item>
           <widget class="QLineEdit" name="key_line">
            <property name="minimumSize">
             <size>
@@ -414,7 +407,7 @@
            </property>
            <property name="maximumSize">
             <size>
-             <width>250</width>
+             <width>16777215</width>
              <height>25</height>
             </size>
            </property>
@@ -915,19 +908,6 @@ background-color: rgb(29, 29, 29);</string>
           </layout>
          </widget>
         </item>
-        <item>
-         <spacer name="verticalSpacer">
-          <property name="orientation">
-           <enum>Qt::Vertical</enum>
-          </property>
-          <property name="sizeHint" stdset="0">
-           <size>
-            <width>20</width>
-            <height>40</height>
-           </size>
-          </property>
-         </spacer>
-        </item>
        </layout>
       </widget>
      </widget>
@@ -1019,7 +999,4 @@ background-color: rgb(29, 29, 29);</string>
  </widget>
  <resources/>
  <connections/>
- <buttongroups>
-  <buttongroup name="fileType_bttnGroup"/>
- </buttongroups>
 </ui>

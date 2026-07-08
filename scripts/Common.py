@@ -43,10 +43,15 @@ def projectSetting():
                           u'type': u'PYTHON', 
                           u'label': u'样条线锁帧工具'},
                       u'Blueprint': {
-                          u'command': u"",
+                          u'command': u"import Common as I;I.run_utilityWidget(content_widget_path='/Engine/Python/scripts/通用蓝图快速生成/通用蓝图快速生成')",
                           u'section': u'Bp', 
                           u'type': u'PYTHON', 
                           u'label': u'蓝图加载工具'},
+                      u'BCache': {
+                          u'command': u"",
+                          u'section': u'Bp', 
+                          u'type': u'PYTHON', 
+                          u'label': u'蓝图缓存工具'},
                       u'LGT_Set 2.0.2': {
                           u'command': "import Common as I;I.run_utilityWidget()", 
                           u'section': u'Render',

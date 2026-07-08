@@ -473,9 +473,9 @@ class ActionToolsUI(QtWidgets.QMainWindow):
         # currentItem = self.ui.main_listWgt.selectedItems()[0]
         menu = QtWidgets.QMenu(self.ui.main_listWgt)
         if currentItem is not None:
-            show_action = QtWidgets.QAction('Show in Explorer', self)
+            show_action = QtGui.QAction('Show in Explorer', self)
             show_action.setIcon(QtGui.QIcon("{}/icon/folder_white.png".format(self.scriptsPath)))
-            apply_action = QtWidgets.QAction('Import Action', self)
+            apply_action = QtGui.QAction('Import Action', self)
 
             menu.addAction(show_action)
             menu.addAction(apply_action)
@@ -486,7 +486,7 @@ class ActionToolsUI(QtWidgets.QMainWindow):
 
             menu.exec_(QtGui.QCursor.pos())
         else:
-            refresh_action = QtWidgets.QAction(u'刷新', self)
+            refresh_action = QtGui.QAction(u'刷新', self)
             refresh_action.setIcon(QtGui.QIcon("{}/icon/refresh.png".format(self.scriptsPath)))
             refresh_action.triggered.connect(self.refresh_asset)
 
@@ -542,13 +542,13 @@ class ActionToolsUI(QtWidgets.QMainWindow):
         new_assets = list(set(asset_list_after) - set(asset_list_before))
         for asset in new_assets:
             if asset.asset_class == 'SkeletalMesh':
-                unreal.EditorAssetLibrary.delete_asset(asset.object_path)
-            print('Deleted asset: ' + str(asset.object_path))
+                unreal.EditorAssetLibrary.delete_asset('%s.%s' % (asset.package_name, asset.asset_name))
+            print('Deleted asset: ' + str('%s.%s' % (asset.package_name, asset.asset_name)))
             if asset.asset_class == 'AnimSequence':
-                anim = unreal.load_asset(asset.object_path)
+                anim = unreal.load_asset('%s.%s' % (asset.package_name, asset.asset_name))
                 unreal.AnimationLibrary.set_is_root_motion_lock_forced(anim, True)
-                print('"Force Root Lock" enabled for: ' + str(asset.object_path))
-                unreal.EditorAssetLibrary.save_asset(asset.object_path, only_if_is_dirty=False)
+                print('"Force Root Lock" enabled for: ' + str('%s.%s' % (asset.package_name, asset.asset_name)))
+                unreal.EditorAssetLibrary.save_asset('%s.%s' % (asset.package_name, asset.asset_name), only_if_is_dirty=False)
 
     def clearWidgetItems(self):
         self.ui.PreviewLabel.clear()
@@ -582,7 +582,7 @@ class ActionToolsUI(QtWidgets.QMainWindow):
     def show_menu_preview(self):
         actionPath = r'%s\ActionTools\ActionGif' % self.MYPREFSDIR
         pop = QtWidgets.QMenu(self.ui.PreviewLabel)
-        shot = QtWidgets.QAction('Open Local SnapShot', self)
+        shot = QtGui.QAction('Open Local SnapShot', self)
         pop.addAction(shot)
         shot.triggered.connect(lambda: os.startfile(actionPath))
         pop.exec_(QtGui.QCursor.pos())

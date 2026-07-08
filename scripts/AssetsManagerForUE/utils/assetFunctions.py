@@ -87,6 +87,9 @@ class AssetFunctions(object):
         Animation 的options
         """
         options = unreal.FbxImportUI()
+        # UE5.7 Interchange 关键：显式声明这是"动画导入"。否则导入器(含 Interchange OverridePipeline 桥接)
+        # 默认按网格类型处理，而动作 fbx 无网格 -> 报"提供的源数据中没有要导入的数据"。
+        options.set_editor_property('mesh_type_to_import', unreal.FBXImportType.FBXIT_ANIMATION)
         options.set_editor_property('import_as_skeletal', True)
         options.skeletal_mesh_import_data.set_editor_property('vertex_color_import_option',
                                                               unreal.VertexColorImportOption.REPLACE)

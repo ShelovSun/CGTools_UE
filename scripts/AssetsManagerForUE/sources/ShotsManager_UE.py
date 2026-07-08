@@ -618,7 +618,7 @@ class ShotsManagerUEUI(QtWidgets.QWidget):
         #       asset_class: "AnimSequence"}])
         for asset in asset_list_new:
             if asset.asset_class == 'AnimSequence':  # 如果资产类型是动画序列
-                sequenceFunctions.addSkeletalAnimationTrack(sequence_path, asset.object_path)  # 则把动作加入动画序列轨道
+                sequenceFunctions.addSkeletalAnimationTrack(sequence_path, '%s.%s' % (asset.package_name, asset.asset_name))  # 则把动作加入动画序列轨道
         '''建立 seq/Animations 文件夹，并把动画序列加入文件夹'''
         self.add_seq_folder(sequence_path)
 
@@ -639,7 +639,7 @@ class ShotsManagerUEUI(QtWidgets.QWidget):
         asset_list = asset_reg.get_assets_by_path(animations_folder)
         assetName_list = []
         for asset in asset_list:
-            assetName_list.append(str(asset.object_path).split('.')[1])
+            assetName_list.append(str('%s.%s' % (asset.package_name, asset.asset_name)).split('.')[1])
         return assetName_list
 
     def add_seq_folder(self, sequence_path):
@@ -696,13 +696,13 @@ class ShotsManagerUEUI(QtWidgets.QWidget):
         new_assets = list(set(asset_list_after) - set(asset_list_before))
         for asset in new_assets:
             if asset.asset_class == 'SkeletalMesh':
-                unreal.EditorAssetLibrary.delete_asset(asset.object_path)  # 如果多出的是骨架就删除
-            print('Deleted asset: ' + str(asset.object_path))
+                unreal.EditorAssetLibrary.delete_asset('%s.%s' % (asset.package_name, asset.asset_name))  # 如果多出的是骨架就删除
+            print('Deleted asset: ' + str('%s.%s' % (asset.package_name, asset.asset_name)))
             if asset.asset_class == 'AnimSequence':
-                anim = unreal.load_asset(asset.object_path)
+                anim = unreal.load_asset('%s.%s' % (asset.package_name, asset.asset_name))
                 unreal.AnimationLibrary.set_is_root_motion_lock_forced(anim, True)
-                print('"Force Root Lock" enabled for: ' + str(asset.object_path))
-                unreal.EditorAssetLibrary.save_asset(asset.object_path, only_if_is_dirty=False)
+                print('"Force Root Lock" enabled for: ' + str('%s.%s' % (asset.package_name, asset.asset_name)))
+                unreal.EditorAssetLibrary.save_asset('%s.%s' % (asset.package_name, asset.asset_name), only_if_is_dirty=False)
 
     def renameAniFBX(self, animations_folder):
         """
@@ -716,7 +716,7 @@ class ShotsManagerUEUI(QtWidgets.QWidget):
         editorAssetLib = unreal.EditorAssetLibrary()
         for asset in asset_list:
             if asset.asset_class == 'AnimSequence':
-                assetPathName = str(asset.object_path)
+                assetPathName = str('%s.%s' % (asset.package_name, asset.asset_name))
                 # print(/Game/Projects/20210626_test/Animations/C3/FeliciaSexy_hi_rig__FeliciaSexy_FFA_AST_Anim.FeliciaSexy_hi_rig__FeliciaSexy_FFA_AST_Anim)
                 folderNameList = assetPathName.split('/')
                 if assetPathName.split('.')[1].find('{0}_{1}_'.format(current_idea, current_shot)) != -1:
@@ -737,7 +737,7 @@ class ShotsManagerUEUI(QtWidgets.QWidget):
         asset_list = asset_reg.get_assets_by_path(animations_folder)
         editorAssetLib = unreal.EditorAssetLibrary()
         for asset in asset_list:
-            editorAssetLib.delete_asset(asset.object_path)
+            editorAssetLib.delete_asset('%s.%s' % (asset.package_name, asset.asset_name))
 
     def createLevelSequence(self):
         pass
@@ -749,11 +749,11 @@ class ShotsManagerUEUI(QtWidgets.QWidget):
         self.currentItem = self.ui.ani_shot_listWgt.itemAt(point)
         if self.currentItem is not None and self.currentItem.text() != '-- Custom --':
             pop = QtWidgets.QMenu(self.ui.ani_shot_listWgt)
-            alembic_action = QtWidgets.QAction('Alembic', self)
-            ani_action = QtWidgets.QAction('Ani', self)
-            camera_action = QtWidgets.QAction('Camera', self)
-            fbx_action = QtWidgets.QAction('FBX', self)
-            playblast_action = QtWidgets.QAction('Playblast', self)
+            alembic_action = QtGui.QAction('Alembic', self)
+            ani_action = QtGui.QAction('Ani', self)
+            camera_action = QtGui.QAction('Camera', self)
+            fbx_action = QtGui.QAction('FBX', self)
+            playblast_action = QtGui.QAction('Playblast', self)
             pop.addAction(alembic_action)
             pop.addAction(ani_action)
             pop.addAction(camera_action)
