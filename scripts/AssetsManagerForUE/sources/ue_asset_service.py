@@ -305,6 +305,241 @@ def build_folder_import_plan(source_folder, source_content_root,
     return query_filesystem_state(plan)
 
 
+def _build_package_file_import_plan(package_files, source_content_root,
+                                    selected_source_file,
+                                    project_content_dir=None,
+                                    missing_dependencies=None,
+                                    dependency_resolved=False):
+    """把一组主包及 sidecar 转成保持 Content 相对路径不变的复制计划。"""
+    source_content_root = os.path.abspath(
+        os.path.normpath(str(source_content_root or "")))
+    selected_source_file = os.path.abspath(
+        os.path.normpath(str(selected_source_file or "")))
+    target_root = _project_content_dir(project_content_dir)
+    plan = {
+        "asset_root": _forward(os.path.dirname(selected_source_file)),
+        "source_root": _forward(source_content_root),
+        "source_content_root": _forward(source_content_root),
+        "target_root": _forward(target_root),
+        "files": [],
+        "package_object_paths": [],
+        "main_object_path": object_path_for_source_file(
+            selected_source_file, source_content_root),
+        "manifest": {},
+        "missing_dependencies": list(missing_dependencies or []),
+        "dependency_resolved": bool(dependency_resolved),
+        "state": "missing",
+        "message": u"没有找到可迁移的特效包",
+    }
+    if not os.path.isdir(source_content_root):
+        plan["state"] = "error"
+        plan["message"] = u"特效库 Content 目录不可访问"
+        return plan
+
+    seen_files = set()
+    seen_objects = set()
+    for package_file in package_files or []:
+        package_file = os.path.abspath(os.path.normpath(str(package_file or "")))
+        extension = os.path.splitext(package_file)[1].lower()
+        if extension not in PRIMARY_EXTENSIONS or not os.path.isfile(package_file):
+            continue
+        try:
+            inside_source = (
+                os.path.commonpath((source_content_root, package_file))
+                == source_content_root)
+        except ValueError:
+            inside_source = False
+        if not inside_source:
+            continue
+
+        object_path = object_path_for_source_file(package_file, source_content_root)
+        object_key = object_path.lower()
+        if object_path and object_key not in seen_objects:
+            seen_objects.add(object_key)
+            plan["package_object_paths"].append(object_path)
+
+        package_stem = os.path.splitext(package_file)[0]
+        family = [package_file]
+        for sidecar_extension in sorted(PACKAGE_EXTENSIONS - PRIMARY_EXTENSIONS):
+            sidecar = package_stem + sidecar_extension
+            if os.path.isfile(sidecar):
+                family.append(sidecar)
+        for source in family:
+            source = os.path.abspath(os.path.normpath(source))
+            source_key = os.path.normcase(source)
+            if source_key in seen_files:
+                continue
+            seen_files.add(source_key)
+            relative = os.path.relpath(source, source_content_root)
+            target = os.path.abspath(os.path.join(target_root, relative))
+            try:
+                inside_target = os.path.commonpath((target_root, target)) == target_root
+            except ValueError:
+                inside_target = False
+            if not inside_target:
+                continue
+            file_extension = os.path.splitext(source)[1].lower()
+            try:
+                size = os.path.getsize(source)
+            except OSError:
+                size = 0
+            plan["files"].append({
+                "source": _forward(source),
+                "target": _forward(target),
+                "relative": _forward(relative),
+                "size": int(size),
+                "extension": file_extension,
+            })
+
+    plan["files"].sort(key=lambda entry: (
+        entry["extension"] in PRIMARY_EXTENSIONS,
+        entry["relative"].lower(),
+    ))
+    plan["package_object_paths"].sort(key=str.lower)
+    plan = query_filesystem_state(plan)
+    if plan["missing_dependencies"]:
+        plan["state"] = "error"
+        plan["message"] = u"特效有 {0} 个依赖既不在服务器 Content 中，也不在当前工程/插件中".format(
+            len(plan["missing_dependencies"]))
+    elif dependency_resolved:
+        if plan.get("state") == "ready":
+            plan["message"] = u"特效及其 {0} 个依赖包已在当前工程中".format(
+                max(0, len(plan["package_object_paths"]) - 1))
+        elif plan.get("state") == "missing":
+            plan["message"] = u"已解析 {0} 个特效及依赖包，等待迁移".format(
+                len(plan["package_object_paths"]))
+    return plan
+
+
+def build_single_package_import_plan(source_file, source_content_root,
+                                     project_content_dir=None):
+    """后台扫描卡片时使用的轻量状态计划；不调用 UE，也不展开依赖。"""
+    return _build_package_file_import_plan(
+        [source_file], source_content_root, source_file,
+        project_content_dir=project_content_dir,
+        dependency_resolved=False)
+
+
+def get_external_asset_class_names(asset_file_paths, source_content_root):
+    """批量读取工程外 uasset 的 UE 类型，返回（与输入对齐的类型列表, 错误）。"""
+    paths = [str(value) for value in (asset_file_paths or [])]
+    if not paths:
+        return [], ""
+    if unreal is None:
+        return [], u"当前不在 Unreal Editor 中"
+    bridge = getattr(unreal, "CGToolsAssetBridgeLibrary", None)
+    if bridge is None:
+        return [], u"未启用 CGToolsAssetBridge 插件"
+    query_method = getattr(bridge, "get_external_asset_class_names", None)
+    if query_method is None:
+        return [], u"CGToolsAssetBridge 版本低于 1.3.2，不支持按特效类型过滤"
+    try:
+        try:
+            result = query_method(paths, str(source_content_root))
+        except TypeError:
+            result = query_method(paths, str(source_content_root), [], "")
+    except Exception as exc:
+        return [], u"读取外部特效类型失败：{0}".format(exc)
+
+    if not isinstance(result, (tuple, list)):
+        return [], u"CGToolsAssetBridge 返回了无法识别的类型结果：{0}".format(result)
+    values = list(result)
+    if len(values) >= 3 and isinstance(values[0], bool):
+        success = bool(values[0])
+        classes_value, error_value = values[1:3]
+    elif len(values) >= 2:
+        classes_value, error_value = values[:2]
+        success = not bool(error_value)
+    else:
+        return [], u"CGToolsAssetBridge 返回了无法识别的类型结果：{0}".format(result)
+
+    try:
+        class_names = [str(value) for value in (
+            classes_value if classes_value is not None else [])]
+    except TypeError:
+        class_names = []
+    error = str(error_value or "")
+    if not success:
+        return [], error or u"原生桥无法读取外部特效类型"
+    if len(class_names) != len(paths):
+        return [], u"原生桥返回的特效类型数量不匹配：{0}/{1}".format(
+            len(class_names), len(paths))
+    return class_names, error
+
+
+def resolve_external_asset_dependencies(asset_file_path, source_content_root):
+    """在 UE 主线程调用原生桥，返回（包文件列表、缺失包列表、错误文本）。"""
+    if unreal is None:
+        return [], [], u"当前不在 Unreal Editor 中"
+    bridge = getattr(unreal, "CGToolsAssetBridgeLibrary", None)
+    if bridge is None:
+        return [], [], u"未启用 CGToolsAssetBridge 插件"
+    resolve_method = getattr(bridge, "resolve_external_asset_dependencies", None)
+    if resolve_method is None:
+        return [], [], u"CGToolsAssetBridge 版本低于 1.3.0，不支持特效依赖迁移"
+    try:
+        try:
+            result = resolve_method(str(asset_file_path), str(source_content_root))
+        except TypeError:
+            result = resolve_method(
+                str(asset_file_path), str(source_content_root), [], [], "")
+    except Exception as exc:
+        return [], [], u"解析特效依赖失败：{0}".format(exc)
+
+    if not isinstance(result, (tuple, list)):
+        return [], [], u"CGToolsAssetBridge 返回了无法识别的依赖结果：{0}".format(result)
+
+    # UE Python 对“C++ 返回值 + 多个输出引用”的包装在不同引擎版本中不同：
+    # - 某些版本返回 (bool, OutPackageFiles, OutMissingPackages, OutError)；
+    # - UE 5.7 实测会省略 bool，返回 (OutPackageFiles, OutMissingPackages, OutError)。
+    # unreal.Array 不是 Python list，但可迭代，因此在这里统一转成普通字符串列表。
+    values = list(result)
+    if len(values) >= 4 and isinstance(values[0], bool):
+        success = bool(values[0])
+        package_value, missing_value, error_value = values[1:4]
+    elif len(values) >= 3:
+        package_value, missing_value, error_value = values[:3]
+        try:
+            success = bool(len(package_value))
+        except (TypeError, AttributeError):
+            success = bool(package_value)
+    else:
+        return [], [], u"CGToolsAssetBridge 返回了无法识别的依赖结果：{0}".format(result)
+
+    try:
+        package_files = [str(value) for value in (package_value or [])]
+    except TypeError:
+        package_files = []
+    try:
+        missing_packages = [str(value) for value in (missing_value or [])]
+    except TypeError:
+        missing_packages = []
+    error = str(error_value or "")
+    if not success:
+        return [], missing_packages, error or u"原生桥无法解析该特效的依赖"
+    return package_files, missing_packages, error
+
+
+def build_external_dependency_import_plan(source_file, source_content_root,
+                                          project_content_dir=None):
+    """为选中特效建立递归依赖闭包迁移计划；必须从 UE 主线程调用。"""
+    package_files, missing_packages, error = resolve_external_asset_dependencies(
+        source_file, source_content_root)
+    if error and not package_files:
+        plan = _build_package_file_import_plan(
+            [source_file], source_content_root, source_file,
+            project_content_dir=project_content_dir,
+            dependency_resolved=False)
+        plan["state"] = "error"
+        plan["message"] = error
+        return plan
+    return _build_package_file_import_plan(
+        package_files, source_content_root, source_file,
+        project_content_dir=project_content_dir,
+        missing_dependencies=missing_packages,
+        dependency_resolved=True)
+
+
 def query_filesystem_state(plan):
     """用文件存在性/大小更新红、橙、绿状态；不会读取或加载 UE 包。"""
     files = plan.get("files") or []

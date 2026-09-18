@@ -28,7 +28,7 @@ from PySide6 import QtWidgets, QtCore, QtGui
 if scriptsPath not in sys.path:
     sys.path.append(scriptsPath)
 
-# 4. 这里只导入轻量配置。资产/场景/蓝图模块在对应 Tab 第一次打开时再导入，
+# 4. 这里只导入轻量配置。各功能模块在对应 Tab 第一次打开时再导入，
 # 避免点击菜单时把数据库、FBX/OpenGL 预览和所有工具一次性冷加载。
 from .config import SMConfig, commonSettingPath
 
@@ -37,7 +37,7 @@ class AssetsManagerUI(QtWidgets.QWidget):
     scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/')
     sm_temp = "{}/ShotManagerTemp".format(os.environ.get('APPDATA'))
     SM_SETTING_JSON = "{}/setting.json".format(sm_temp)
-    VERSION = "4.2.3"
+    VERSION = "4.3.2"
     def __init__(self, parent=None):
         super(AssetsManagerUI, self).__init__(parent)
 
@@ -90,7 +90,7 @@ class AssetsManagerUI(QtWidgets.QWidget):
             pass
 
     def build_ui(self):
-        """纯代码搭建主窗：资产/场景/蓝图/组件四个懒加载页。"""
+        """纯代码搭建主窗：资产/场景/蓝图/特效/组件五个懒加载页。"""
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(1, 3, 1, 1)
 
@@ -103,10 +103,12 @@ class AssetsManagerUI(QtWidgets.QWidget):
         self.asset_page = self._createLazyPage(u"正在准备资产工具…")
         self.scene_page = self._createLazyPage(u"正在准备场景工具…")
         self.blueprint_page = self._createLazyPage(u"正在准备蓝图工具…")
+        self.vfx_page = self._createLazyPage(u"正在准备特效工具…")
         self.component_page = self._createLazyPage(u"正在准备组件工具…")
         self.tabWidget.addTab(self.asset_page, u"资产")
         self.tabWidget.addTab(self.scene_page, u"场景")
         self.tabWidget.addTab(self.blueprint_page, u"蓝图")
+        self.tabWidget.addTab(self.vfx_page, u"特效")
         self.tabWidget.addTab(self.component_page, u"组件")
 
         '''风格外观 / 记忆的窗口位置大小与上次 tab'''
@@ -118,7 +120,7 @@ class AssetsManagerUI(QtWidgets.QWidget):
             self.resize(950, 600)
             self.move(2000, 120)
         tab = int(tab) if tab is not None else 0
-        if tab not in (0, 1, 2, 3):
+        if tab not in (0, 1, 2, 3, 4):
             tab = 0
         self.getStyleSheet()
 
@@ -201,7 +203,7 @@ class AssetsManagerUI(QtWidgets.QWidget):
     def _stop_child_threads(self):
         """停止各 tab 子界面持有的 QThread（MyThread 等），让旧窗口能被回收。"""
         for page in (self.asset_page, self.scene_page, self.blueprint_page,
-                     self.component_page):
+                     self.vfx_page, self.component_page):
             layout = page.layout() if page is not None else None
             if layout is None:
                 continue
@@ -240,7 +242,7 @@ class AssetsManagerUI(QtWidgets.QWidget):
             self._tab_build_pending.discard(idx)
             return
         pages = (self.asset_page, self.scene_page, self.blueprint_page,
-                 self.component_page)
+                 self.vfx_page, self.component_page)
         if idx not in range(len(pages)):
             self._tab_build_pending.discard(idx)
             return
@@ -258,6 +260,9 @@ class AssetsManagerUI(QtWidgets.QWidget):
             elif idx == 2:
                 from .sources import blueprintTools
                 widget = blueprintTools.BlueprintToolsUI()
+            elif idx == 3:
+                from .sources import vfxTools
+                widget = vfxTools.VfxToolsUI()
             else:
                 from .sources import componentTools
                 widget = componentTools.ComponentToolsUI()
