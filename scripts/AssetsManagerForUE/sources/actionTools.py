@@ -19,7 +19,8 @@ from PySide6 import QtCore
 from PySide6 import QtGui
 from PySide6 import QtUiTools
 from PySide6 import QtWidgets
-from utils import jsonHelper, assetFunctions, messageBox, sequenceplayer, imagesequence, myWidget, style
+from ..utils import jsonHelper, assetFunctions, messageBox, sequenceplayer, imagesequence, myWidget, style
+from ..config import commonSetting
 
 reload(myWidget)
 
@@ -47,7 +48,7 @@ class ActionToolsUI(QtWidgets.QMainWindow):
         self.DEFAULT_FPS = 30
         self.LOG = ""
 
-        self.ACTION_PATH = self.projectSetting()['rootPath'] + "/StudioLibrary_Ani"
+        self.ACTION_PATH = commonSetting()['rootPath'] + "/StudioLibrary_Ani"
         self._imageSequence = None
         self._current_fram = 0
         self.init_ui_thread = myWidget.MyThread()
@@ -131,10 +132,6 @@ class ActionToolsUI(QtWidgets.QMainWindow):
         self.ui.actionPublish_bttn.clicked.connect(self.importAction)
         self.ui.actionPublish_bttn.setStyleSheet("QPushButton{background: #b0e600; color: #000000;}")
 
-    def projectSetting(self):
-        data = jsonHelper.readDictFromFile('%s/config/projectSetting.json' % self.scriptsPath)
-        return data
-
     def infoMsg(self, icon, text):
         """
         消息栏
@@ -170,7 +167,7 @@ class ActionToolsUI(QtWidgets.QMainWindow):
 
     def get_project(self):
         # print("update_project")
-        self.ui.proj_comb.addItems(self.projectSetting()['projects'])
+        self.ui.proj_comb.addItems(commonSetting()['DataBase'])
         return
 
     def get_typ(self):
@@ -282,7 +279,7 @@ class ActionToolsUI(QtWidgets.QMainWindow):
 
     def getItemsDict(self):
         """
-        从CGTW获取字典
+        从动作库目录获取字典。
         :return:{role_name:{'role_name': xx,
                             'project': xx,
                             'type': xx,

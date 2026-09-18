@@ -12,7 +12,8 @@ if venv_path not in sys.path:
 
 from PySide6 import QtWidgets, QtUiTools, QtCore, QtGui
 from functools import partial
-from utils import jsonHelper, assetFunctions, sequenceFunctions
+from ..utils import assetFunctions, sequenceFunctions
+from ..config import commonSetting
 from imp import reload
 reload(assetFunctions)
 reload(sequenceFunctions)
@@ -71,11 +72,6 @@ class AniToolsUI(QtWidgets.QWidget):
         settings.setValue('pos', self.pos())
         settings.setValue('size', self.size())
 
-    def projectSetting(self):
-        scriptsPath = self.scriptsPath.replace('ui', 'config')
-        data = jsonHelper.readDictFromFile('%s/projectSetting.json' % scriptsPath)
-        return data
-
     def getStyleSheet(self):
         scriptsPath = self.scriptsPath.replace('ui', 'qss')
         style_sheet_path = '%s/darkOrange.qss' % scriptsPath
@@ -84,7 +80,7 @@ class AniToolsUI(QtWidgets.QWidget):
         self.setStyleSheet(str)
 
     def update_project(self):
-        self.ui.ani_project_listWgt.addItems(self.projectSetting()['projects'])
+        self.ui.ani_project_listWgt.addItems(commonSetting()['DataBase'])
         self.ui.ani_project_listWgt.setCurrentRow(0)
 
     def get_current_project(self):
@@ -93,7 +89,7 @@ class AniToolsUI(QtWidgets.QWidget):
     def update_idea(self):
         self.ui.ani_idea_listWgt.clear()
         current_item = self.get_current_project()
-        idea_path = ('{0}/{1}/{2}').format(self.projectSetting()['rootPath'], current_item, 'project')
+        idea_path = ('{0}/{1}/{2}').format(commonSetting()['rootPath'], current_item, 'project')
         directory = QtCore.QDir(idea_path)
         directory.setNameFilters(['2019*', '2020*', '2021*', '2022*'])
         for dir in directory.entryList(QtCore.QDir.NoDotAndDotDot ^ QtCore.QDir.AllEntries):
@@ -118,7 +114,7 @@ class AniToolsUI(QtWidgets.QWidget):
         current_project = self.get_current_project()
         current_idea = self.get_current_idea()
         current_idea_data = self.get_current_idea_data()
-        scene_path = ('{0}/{1}/{2}/{3}/Ani/AniFile').format(self.projectSetting()['rootPath'], current_project, 'project', current_idea_data)
+        scene_path = ('{0}/{1}/{2}/{3}/Ani/AniFile').format(commonSetting()['rootPath'], current_project, 'project', current_idea_data)
         directory = QtCore.QDir(scene_path)
         prefix_scene = ('{0}_{1}_S').format(current_project, current_idea)
         for dir in directory.entryList(QtCore.QDir.NoDotAndDotDot ^ QtCore.QDir.AllEntries):

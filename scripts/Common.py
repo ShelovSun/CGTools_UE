@@ -12,8 +12,9 @@ scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/')
 
 def projectSetting():
     data = {u'menu': {u'AssetsManager': {
+                          # 最终版已接管唯一正式入口；旧代码仅保存在 Build 备份目录。
                           u'command': u"import AssetsManagerForUE.AssetsManagerForUE as AM;AM.showWindow()",
-                          u'section': u'pipeline', 
+                          u'section': u'Pipeline', 
                           u'type': u'PYTHON', 
                           u'label': u'AssetsManager'},
                       # 原生可停靠(UMG)版暂时下线；文件保留，需要时取消注释即可恢复菜单项

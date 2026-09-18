@@ -5,7 +5,7 @@
 import os
 import math
 from . import imagesequence
-from my_vendor import six
+from ..my_vendor import six
 from PySide6 import QtGui
 from PySide6 import QtCore
 from PySide6 import QtWidgets
@@ -336,10 +336,116 @@ class PreviewLabel(QtWidgets.QLabel):
             painter.drawRect(r.x(), y, width, height)
 
 
+class AssetListHeader(QtWidgets.QWidget):
+    """资产列表模式的轻量表头。
+
+    列表本体继续使用 MainQListWiget，因此已有的 UE 状态、右键菜单、
+    FBX 预览和关卡拖放都不需要换成另一套 item 类型。
+    """
+    sectionClicked = QtCore.Signal(int)
+
+    def __init__(self, items_widget, parent=None):
+        super(AssetListHeader, self).__init__(parent)
+        self._items_widget = items_widget
+        self._scroll_offset = 0
+        self._sort_column = 0
+        self._sort_descending = True
+        self._clickable = True
+        self.setFixedHeight(25)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        items_widget.horizontalScrollBar().valueChanged.connect(self.setScrollOffset)
+
+    def setScrollOffset(self, value):
+        self._scroll_offset = max(0, int(value))
+        self.update()
+
+    def setSortIndicator(self, column, descending):
+        self._sort_column = int(column)
+        self._sort_descending = bool(descending)
+        self.update()
+
+    def setClickable(self, value):
+        """设置表头能否触发排序；未接入排序的页面使用普通箭头光标。"""
+        self._clickable = bool(value)
+        cursor = QtCore.Qt.PointingHandCursor if self._clickable else QtCore.Qt.ArrowCursor
+        self.setCursor(cursor)
+
+    def _columnAt(self, position_x):
+        logical_x = int(position_x) + self._scroll_offset
+        cursor = 0
+        for column, width in enumerate(self._items_widget.listColumnWidths()):
+            if cursor <= logical_x < cursor + width:
+                return column
+            cursor += width
+        return -1
+
+    def mousePressEvent(self, event):
+        if self._clickable and event.button() == QtCore.Qt.LeftButton:
+            try:
+                x = event.position().x()
+            except AttributeError:
+                x = event.pos().x()
+            column = self._columnAt(x)
+            if column >= 0:
+                self.sectionClicked.emit(column)
+                event.accept()
+                return
+        super(AssetListHeader, self).mousePressEvent(event)
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.fillRect(self.rect(), QtGui.QColor(72, 73, 75))
+        painter.setFont(self.font())
+        widths = self._items_widget.listColumnWidths()
+        x = -self._scroll_offset
+        for column, (label, width) in enumerate(zip(self._items_widget.listHeaders(), widths)):
+            rect = QtCore.QRect(x, 0, width, self.height())
+            if rect.right() >= 0 and rect.left() <= self.width():
+                painter.fillRect(rect.adjusted(1, 1, -1, -1), QtGui.QColor(91, 92, 94))
+                painter.setPen(QtGui.QColor(52, 53, 55))
+                painter.drawLine(rect.right(), rect.top(), rect.right(), rect.bottom())
+
+                has_indicator = self._sort_column >= 0 and column == self._sort_column
+                text_rect = rect.adjusted(6, 0, -20 if has_indicator else -6, 0)
+                metrics = QtGui.QFontMetrics(painter.font())
+                text = metrics.elidedText(str(label), QtCore.Qt.ElideRight, max(0, text_rect.width()))
+                painter.setPen(QtGui.QColor(230, 230, 230))
+                painter.drawText(text_rect, QtCore.Qt.AlignCenter, text)
+
+                if has_indicator:
+                    center_x = rect.right() - 10
+                    center_y = int(rect.center().y())
+                    if self._sort_descending:
+                        points = [QtCore.QPoint(center_x - 4, center_y - 2),
+                                  QtCore.QPoint(center_x + 4, center_y - 2),
+                                  QtCore.QPoint(center_x, center_y + 3)]
+                    else:
+                        points = [QtCore.QPoint(center_x - 4, center_y + 2),
+                                  QtCore.QPoint(center_x + 4, center_y + 2),
+                                  QtCore.QPoint(center_x, center_y - 3)]
+                    painter.setPen(QtCore.Qt.NoPen)
+                    painter.setBrush(QtGui.QColor(215, 215, 215))
+                    painter.drawPolygon(QtGui.QPolygon(points))
+            x += width
+        painter.end()
+
+
 class MainQListWiget(QtWidgets.QListWidget):
     dragSignal = QtCore.Signal()
+    assetDropRequested = QtCore.Signal(object)
+    assetDragRejected = QtCore.Signal(str)
 
     DEF_SPACING = 8
+    TEXT_AREA_HEIGHT = 48
+    LIST_ROW_HEIGHT = 25
+    LIST_HEADERS = (u"创建日期", u"资产名", u"中文名", u"模型制作",
+                    u"模型状态", u"绑定制作", u"绑定状态", u"备注")
+    LIST_COLUMN_WIDTHS = (86, 180, 110, 78, 78, 78, 78, 180)
+    LIST_FIELD_INDICES = (0, 1, 2, 3, 4, 5, 6, 8)
+    LIST_FORMATTERS = (None, None, None, None, None, None, None, "note")
+    LIST_ALIGNMENTS = ("center", "left", "left", "center",
+                       "center", "center", "center", "left")
 
     scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/').replace('widgets', '')
 
@@ -349,9 +455,23 @@ class MainQListWiget(QtWidgets.QListWidget):
         self._isList = False
         self._itemSize = 120
         self._currentItem = None
-        self.setDragEnabled(False)  # ? 不起作用
+        self._assetDragStart = None
+        self._assetDragItem = None
+        self._assetDragActive = False
+        self._assetDragRejectedOnce = False
+        self._assetDragPreview = None
+        self._listHeader = None
+        self._listHeaders = list(self.LIST_HEADERS)
+        self._listColumnWidths = list(self.LIST_COLUMN_WIDTHS)
+        self._listFieldIndices = list(self.LIST_FIELD_INDICES)
+        self._listFormatters = list(self.LIST_FORMATTERS)
+        self._listAlignments = list(self.LIST_ALIGNMENTS)
+        # 不使用系统 QDrag：UE Slate 视口不是 Qt drop target，会显示“禁止拖放”光标。
+        # 改用 QWidget 隐式鼠标捕获 + 自绘预览，并在松手时把屏幕坐标交给 C++。
+        self.setDragEnabled(False)
+        self.setAcceptDrops(False)
         self.setDragDropMode(QtWidgets.QAbstractItemView.NoDragDrop)
-        self.setDefaultDropAction(QtCore.Qt.MoveAction)
+        self.setDefaultDropAction(QtCore.Qt.CopyAction)
         self.setSortingEnabled(True)
         self.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.setResizeMode(QtWidgets.QListView.Adjust)
@@ -379,7 +499,7 @@ class MainQListWiget(QtWidgets.QListWidget):
             return
         bar = self.verticalScrollBar()
         steps = event.angleDelta().y() / 120.0  # 一格标准滚轮 = 120
-        rowHeight = self._itemSize + self.DEF_SPACING + 40  # 一个网格行高(图标+间隙+文字)
+        rowHeight = self._itemSize + self.DEF_SPACING + self.TEXT_AREA_HEIGHT
         bar.setValue(bar.value() - int(steps * rowHeight))
         event.accept()
 
@@ -447,8 +567,187 @@ class MainQListWiget(QtWidgets.QListWidget):
     def dragLeaveEvent(self, e):
         self.dragSignal.emit()
 
+    def startDrag(self, supportedActions):
+        """禁用 QAbstractItemView 的原生 QDrag；拖放由 mouse*Event 接管。"""
+        return
+
+    def textAreaHeight(self):
+        return self.TEXT_AREA_HEIGHT
+
+    def listHeaders(self):
+        return tuple(self._listHeaders)
+
+    def listFieldIndices(self):
+        return tuple(self._listFieldIndices)
+
+    def listFormatters(self):
+        return tuple(self._listFormatters)
+
+    def listAlignments(self):
+        return tuple(self._listAlignments)
+
+    def setListColumns(self, headers, field_indices, widths,
+                       formatters=None, alignments=None):
+        """为当前页面设置列表模式的列名、数据下标和显示格式。"""
+        headers = tuple(headers)
+        field_indices = tuple(field_indices)
+        widths = tuple(widths)
+        if not headers or not (len(headers) == len(field_indices) == len(widths)):
+            raise ValueError("headers, field_indices and widths must have the same non-zero length")
+
+        if formatters is None:
+            formatters = (None,) * len(headers)
+        if alignments is None:
+            alignments = ("left",) * len(headers)
+        formatters = tuple(formatters)
+        alignments = tuple(alignments)
+        if len(formatters) != len(headers) or len(alignments) != len(headers):
+            raise ValueError("formatters and alignments must match the header count")
+
+        self._listHeaders = list(headers)
+        self._listFieldIndices = list(field_indices)
+        self._listColumnWidths = [max(1, int(width)) for width in widths]
+        self._listFormatters = list(formatters)
+        self._listAlignments = list(alignments)
+        self._updateListGeometry()
+        if self._listHeader is not None:
+            self._listHeader.update()
+
+    def listColumnWidths(self):
+        """返回当前列宽；窗口足够宽时只拉伸最后的备注列。"""
+        widths = list(self._listColumnWidths)
+        available = max(0, self.viewport().width())
+        fixed_width = sum(widths)
+        if available > fixed_width:
+            widths[-1] += available - fixed_width
+        return widths
+
+    def listContentWidth(self):
+        return sum(self.listColumnWidths())
+
+    def setListHeader(self, header):
+        self._listHeader = header
+
+    def _updateListGeometry(self):
+        if not self.isList():
+            return
+        self.setGridSize(QtCore.QSize(self.listContentWidth(), self.LIST_ROW_HEIGHT))
+        if self._listHeader is not None:
+            self._listHeader.update()
+
+    @staticmethod
+    def _eventGlobalPos(event):
+        try:
+            return event.globalPosition().toPoint()
+        except AttributeError:
+            return event.globalPos()
+
+    def mousePressEvent(self, event):
+        super(MainQListWiget, self).mousePressEvent(event)
+        if event.button() == QtCore.Qt.LeftButton:
+            self._assetDragStart = QtCore.QPoint(event.pos())
+            self._assetDragItem = self.itemAt(event.pos())
+            self._assetDragActive = False
+            self._assetDragRejectedOnce = False
+
+    def _beginAssetDrag(self, item, global_pos):
+        if not item.dragEnabled():
+            if not self._assetDragRejectedOnce:
+                self.assetDragRejected.emit(u"该卡片不支持拖入关卡")
+            self._assetDragRejectedOnce = True
+            return False
+        if item.ueState() != "ready":
+            if not self._assetDragRejectedOnce:
+                self.assetDragRejected.emit(u"该资产尚未加载完成，请先点击【加载资产】")
+            self._assetDragRejectedOnce = True
+            return False
+        if not item.ueMainObjectPath():
+            if not self._assetDragRejectedOnce:
+                self.assetDragRejected.emit(u"该 UE 包没有可拖入关卡的 Actor 蓝图或网格体")
+            self._assetDragRejectedOnce = True
+            return False
+
+        flags = QtCore.Qt.ToolTip | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint
+        preview = QtWidgets.QFrame(None, flags)
+        preview.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        preview.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+        preview.setStyleSheet(
+            "QFrame {background:rgba(38,40,43,225); border:1px solid #55a8e8; "
+            "border-radius:6px;} QLabel {border:0; background:transparent; color:#f0f0f0;}"
+        )
+        layout = QtWidgets.QVBoxLayout(preview)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(3)
+        image = QtWidgets.QLabel()
+        image.setAlignment(QtCore.Qt.AlignCenter)
+        try:
+            pixmap = QtGui.QPixmap(item.itemData()[7])
+        except Exception:
+            pixmap = QtGui.QPixmap()
+        if not pixmap.isNull():
+            image.setPixmap(pixmap.scaled(86, 86, QtCore.Qt.KeepAspectRatio,
+                                          QtCore.Qt.SmoothTransformation))
+        image.setFixedSize(90, 90)
+        layout.addWidget(image)
+        name = QtWidgets.QLabel(item.name())
+        name.setAlignment(QtCore.Qt.AlignCenter)
+        name.setMaximumWidth(90)
+        layout.addWidget(name)
+        preview.adjustSize()
+        self._assetDragPreview = preview
+        self._assetDragActive = True
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.ClosedHandCursor)
+        self._moveAssetDragPreview(global_pos)
+        preview.show()
+        return True
+
+    def _moveAssetDragPreview(self, global_pos):
+        if self._assetDragPreview is not None:
+            self._assetDragPreview.move(global_pos + QtCore.QPoint(18, 22))
+
+    def _finishAssetDrag(self):
+        if self._assetDragPreview is not None:
+            self._assetDragPreview.hide()
+            self._assetDragPreview.deleteLater()
+            self._assetDragPreview = None
+        if self._assetDragActive:
+            try:
+                QtWidgets.QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
+        self._assetDragActive = False
+
+    def mouseReleaseEvent(self, event):
+        was_dragging = self._assetDragActive
+        item = self._assetDragItem
+        global_pos = self._eventGlobalPos(event)
+        super(MainQListWiget, self).mouseReleaseEvent(event)
+        self._finishAssetDrag()
+
+        if was_dragging and item is not None:
+            local_pos = self.viewport().mapFromGlobal(global_pos)
+            if not self.viewport().rect().contains(local_pos):
+                self.assetDropRequested.emit({
+                    "object_path": item.ueMainObjectPath(),
+                    "asset_name": item.name(),
+                    "icon_path": item.itemData()[7],
+                    "screen_x": global_pos.x(),
+                    "screen_y": global_pos.y(),
+                })
+        self._assetDragStart = None
+        self._assetDragItem = None
+        self._assetDragRejectedOnce = False
+
     def mouseMoveEvent(self, e):
-        # print("mouseMoveEvent")
+        if (self._assetDragItem is not None and self._assetDragStart is not None
+                and e.buttons() & QtCore.Qt.LeftButton):
+            distance = (e.pos() - self._assetDragStart).manhattanLength()
+            if distance >= QtWidgets.QApplication.startDragDistance():
+                global_pos = self._eventGlobalPos(e)
+                if self._assetDragActive or self._beginAssetDrag(self._assetDragItem, global_pos):
+                    self._moveAssetDragPreview(global_pos)
+                    e.accept()
+                    return
         super(MainQListWiget, self).mouseMoveEvent(e)
         item = self.itemAt(e.pos())
         if self.isList():
@@ -460,6 +759,15 @@ class MainQListWiget(QtWidgets.QListWidget):
         if self._currentItem:
             self.itemMouseLeaveEvent(self._currentItem, event)
             self._currentItem = None
+
+    def keyPressEvent(self, event):
+        if event.key() == QtCore.Qt.Key_Escape and self._assetDragActive:
+            self._finishAssetDrag()
+            self._assetDragStart = None
+            self._assetDragItem = None
+            event.accept()
+            return
+        super(MainQListWiget, self).keyPressEvent(event)
 
     def itemUpdateEvent(self, item, event):
         if id(self._currentItem) != id(item):
@@ -506,8 +814,9 @@ class MainQListWiget(QtWidgets.QListWidget):
         """列表显示"""
         # print("_viewList")
         self.setViewMode(QtWidgets.QListView.ListMode)
-        self.setGridSize(QtCore.QSize(2000, 25))
-        self.setSpacing(1)
+        self.setWrapping(False)
+        self._updateListGeometry()
+        self.setSpacing(0)
         self.setAlternatingRowColors(True)
 
     def setIconMode(self):
@@ -515,7 +824,9 @@ class MainQListWiget(QtWidgets.QListWidget):
         # print("_viewThumb")
         self.setIconSize(QtCore.QSize(self._itemSize, self._itemSize))
         self.setViewMode(QtWidgets.QListView.IconMode)
-        self.setGridSize(QtCore.QSize(self._itemSize + self.DEF_SPACING, self._itemSize + self.DEF_SPACING + 40))
+        self.setWrapping(True)
+        self.setGridSize(QtCore.QSize(self._itemSize + self.DEF_SPACING,
+                                      self._itemSize + self.DEF_SPACING + self.TEXT_AREA_HEIGHT))
         self.setSpacing(2)  # 不起作用
         self.setWordWrap(True)
         self.setAlternatingRowColors(False)
@@ -568,6 +879,7 @@ class MainQListWiget(QtWidgets.QListWidget):
     def resizeEvent(self, event):
         """窗口尺寸变化：重新计算可见区（换行后可见 item 集合会变）。"""
         super(MainQListWiget, self).resizeEvent(event)
+        self._updateListGeometry()
         self._updateVisibleItems()
 
     def showEvent(self, event):
@@ -667,6 +979,13 @@ class Item(QtWidgets.QListWidgetItem):
         self._sliderEnabled = False
 
         self._isVisibleInViewport = False  # 懒加载：item 是否在可视区/预取带内（worker 开跑前据此判定是否跳过）
+
+        # UE 最终资产包状态。红=未加载/错误，橙=部分/加载中/冲突，绿=已注册可用。
+        self._ue_state = "scanning"
+        self._ue_progress = 0
+        self._ue_message = u"正在检查 UE 发布资产…"
+        self._ue_plan = {}
+        self._ue_main_object_path = ""
 
         self._worker = ImageWorker()
         self._worker.setAutoDelete(False)
@@ -802,6 +1121,45 @@ class Item(QtWidgets.QListWidgetItem):
         :rtype: dict
         """
         return self._itemData
+
+    def setUEState(self, state, message="", plan=None):
+        self._ue_state = str(state or "missing")
+        self._ue_message = str(message or "")
+        if plan is not None:
+            self._ue_plan = plan
+            self._ue_main_object_path = str(plan.get("main_object_path") or "")
+        try:
+            self.setToolTip(self._ue_message)
+        except Exception:
+            pass
+        self.repaintItem()
+
+    def ueState(self):
+        return self._ue_state
+
+    def setUEProgress(self, value, message=""):
+        self._ue_progress = max(0, min(100, int(value)))
+        self._ue_state = "importing"
+        if message:
+            self._ue_message = str(message)
+            try:
+                self.setToolTip(self._ue_message)
+            except Exception:
+                pass
+        self.repaintItem()
+
+    def ueProgress(self):
+        return self._ue_progress
+
+    def uePlan(self):
+        return self._ue_plan
+
+    def setUEMainObjectPath(self, object_path):
+        self._ue_main_object_path = str(object_path or "")
+        self.repaintItem()
+
+    def ueMainObjectPath(self):
+        return self._ue_main_object_path
 
     def name(self):
         """
@@ -995,9 +1353,10 @@ class Item(QtWidgets.QListWidgetItem):
         """
         size = self._itemsWidget.itemSize()
         if not self._itemsWidget.isList():
-            iconSize = QtCore.QSize(size, size + 40)
+            iconSize = QtCore.QSize(size, size + self.itemsWidget().textAreaHeight())
         else:
-            iconSize = QtCore.QSize(2000, 20)
+            iconSize = QtCore.QSize(self._itemsWidget.listContentWidth(),
+                                    self._itemsWidget.LIST_ROW_HEIGHT)
         return iconSize
 
     def thumbnailPath(self):
@@ -1257,9 +1616,16 @@ class Item(QtWidgets.QListWidgetItem):
         """
         return QtCore.QRect(option.rect)
 
+    def cardRect(self, option):
+        """卡片主体在 grid 单元内留出阴影和圆角空间。"""
+        rect = self.visualRect(option)
+        if self.itemsWidget().isList():
+            return rect.adjusted(1, 1, -2, -2)
+        return rect.adjusted(3, 2, -3, -4)
+
     def iconPercent(self):
         itemsize = float('%.2f' % (self._itemsWidget.itemSize()))
-        return itemsize / (itemsize + 40.00)
+        return itemsize / (itemsize + float(self.itemsWidget().textAreaHeight()))
 
     def backgroundColor(self, visualRect):
         linearGradient = QtGui.QLinearGradient(QtCore.QPointF(0, visualRect.y()),
@@ -1297,15 +1663,75 @@ class Item(QtWidgets.QListWidgetItem):
         painter.save()
 
         try:
+            if self.itemsWidget().isList():
+                # 列表模式使用紧凑的表格绘制，但仍然是原来的 Item，
+                # 因此 UE 加载状态、右键和拖放状态都会完整保留。
+                self.paintBackground(painter, option, index)
+                self.paintText(painter, option, index)
+                self.paintUEStatus(painter, option)
+                return
+
             self.paintBackground(painter, option, index)
-            self.paintIcon(painter, option, index)
-            self.paintText(painter, option, index)
-            self.paintTypeIcon(painter, option)
-            if self.imageSequence():
-                self.paintPlayhead(painter, option)
+            clip_path = QtGui.QPainterPath()
+            card = self.cardRect(option)
+            clip_path.addRoundedRect(QtCore.QRectF(card), 5.0, 5.0)
+            painter.save()
+            painter.setClipPath(clip_path)
+            try:
+                self.paintThumbnailBackground(painter, option)
+                self.paintIcon(painter, option, index)
+                self.paintText(painter, option, index)
+                self.paintTypeIcon(painter, option)
+                if self.imageSequence():
+                    self.paintPlayhead(painter, option)
+                self.paintUEStatus(painter, option)
+            finally:
+                painter.restore()
+            self.paintSelectionOutline(painter, option)
 
         finally:
             painter.restore()
+
+    def paintUEStatus(self, painter, option):
+        """绘制独立于 FBX 悬停播放线的 UE 包状态线与复制进度。"""
+        colors = {
+            "scanning": QtGui.QColor(115, 125, 135, 235),
+            "missing": QtGui.QColor(220, 55, 55, 245),
+            "error": QtGui.QColor(220, 55, 55, 245),
+            "partial": QtGui.QColor(245, 155, 35, 245),
+            "importing": QtGui.QColor(245, 155, 35, 245),
+            "conflict": QtGui.QColor(245, 155, 35, 245),
+            "ready": QtGui.QColor(45, 205, 90, 245),
+        }
+        color = colors.get(self._ue_state, colors["missing"])
+        card = self.cardRect(option)
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(color)
+        if self.itemsWidget().isList():
+            line = QtCore.QRect(card.x(), card.bottom() - 2, card.width(), 3)
+        else:
+            # 缩略图与标题栏之间的分界线，与 UE 原生资产卡片一致。
+            line_y = card.y() + self.itemsWidget().itemSize() - 2
+            line = QtCore.QRect(card.x(), line_y, card.width(), 3)
+        painter.drawRect(line)
+
+        if self._ue_state != "importing" or self.itemsWidget().isList():
+            return
+        icon_rect = self.iconRect(option)
+        bar_height = 22
+        bar = QtCore.QRect(icon_rect.x(), icon_rect.bottom() - bar_height + 1,
+                           icon_rect.width(), bar_height)
+        painter.setBrush(QtGui.QColor(0, 0, 0, 180))
+        painter.drawRect(bar)
+        fill = QtCore.QRect(bar)
+        fill.setWidth(int(bar.width() * self._ue_progress / 100.0))
+        painter.setBrush(QtGui.QColor(color.red(), color.green(), color.blue(), 205))
+        painter.drawRect(fill)
+        painter.setPen(QtGui.QColor(255, 255, 255, 245))
+        font = painter.font()
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(bar, QtCore.Qt.AlignCenter, u"加载 {0}%".format(self._ue_progress))
 
     def paintBackground(self, painter, option, index):
         """
@@ -1319,24 +1745,93 @@ class Item(QtWidgets.QListWidgetItem):
         isMouseOver = option.state & QtWidgets.QStyle.State_MouseOver
         painter.setPen(QtGui.QPen(QtCore.Qt.NoPen))
 
-        visualRect = self.visualRect(option)
+        if self.itemsWidget().isList():
+            rect = self.visualRect(option)
+            if isSelected:
+                color = QtGui.QColor(48, 103, 139, 255)
+            elif isMouseOver:
+                color = QtGui.QColor(58, 60, 63, 255)
+            elif index.row() & 1:
+                color = QtGui.QColor(47, 48, 50, 255)
+            else:
+                color = QtGui.QColor(43, 44, 46, 255)
+            painter.fillRect(rect, color)
+            painter.setPen(QtGui.QColor(67, 68, 70))
+            painter.drawLine(rect.left(), rect.bottom(), rect.right(), rect.bottom())
+            return
 
+        card = self.cardRect(option)
+        radius = 5.0
         if not self.itemsWidget().isList():
-            if isSelected:
-                color = self.backgroundSelectedColor(visualRect)
-            elif isMouseOver:
-                color = self.backgroundHoverColor(visualRect)
-            else:
-                color = self.backgroundColor(visualRect)
+            shadow = QtCore.QRect(card)
+            shadow.translate(0, 2)
+            painter.setBrush(QtGui.QColor(0, 0, 0, 115))
+            painter.drawRoundedRect(QtCore.QRectF(shadow), radius, radius)
+
+        if isSelected:
+            # UE Content Browser 的选中态不是给整张缩略图蒙蓝色：
+            # 缩略图保持原色，状态线以下的标题面板填充选择蓝，整卡再加亮蓝描边。
+            color = QtGui.QColor(47, 48, 50, 255)
+            border = QtGui.QColor(15, 145, 255, 255)
+        elif isMouseOver:
+            color = QtGui.QColor(54, 56, 59, 255)
+            border = QtGui.QColor(92, 96, 101, 255)
         else:
-            if isSelected:
-                color = self.DEFAULT_SELECTED_COLOR
-            elif isMouseOver:
-                color = self.DEFAULT_HOVER_COLOR
+            color = QtGui.QColor(47, 48, 50, 255)
+            border = QtGui.QColor(22, 22, 22, 255)
+        painter.setPen(QtGui.QPen(border, 2.0 if isSelected else 1.0))
+        painter.setBrush(color)
+        painter.drawRoundedRect(QtCore.QRectF(card), radius, radius)
+
+        if isSelected:
+            if self.itemsWidget().isList():
+                selection_rect = QtCore.QRect(card)
             else:
-                color = self.DEFAULT_COLOR
-        painter.setBrush(QtGui.QBrush(color))
-        painter.drawRect(visualRect)
+                title_top = card.y() + self.itemsWidget().itemSize()
+                selection_rect = QtCore.QRect(
+                    card.x(), title_top, card.width(), card.bottom() - title_top + 1)
+
+            # 裁到卡片圆角内，确保底部两个角仍与 UE 原生卡片一致。
+            clip_path = QtGui.QPainterPath()
+            clip_path.addRoundedRect(QtCore.QRectF(card), radius, radius)
+            painter.save()
+            painter.setClipPath(clip_path)
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.setBrush(self.DEFAULT_SELECTED_COLOR)
+            painter.drawRect(selection_rect)
+            painter.restore()
+
+
+    def paintSelectionOutline(self, painter, option):
+        """在缩略图和状态线完成后叠加 UE 风格的清晰选中外框。"""
+        if self.itemsWidget().isList() or not option.state & QtWidgets.QStyle.State_Selected:
+            return
+        card = self.cardRect(option)
+        painter.setPen(QtGui.QPen(QtGui.QColor(15, 145, 255, 255), 2.0))
+        painter.setBrush(QtCore.Qt.NoBrush)
+        painter.drawRoundedRect(QtCore.QRectF(card), 5.0, 5.0)
+
+    def paintThumbnailBackground(self, painter, option):
+        """UE 风格的深色棋盘格缩略图底板。"""
+        if self.itemsWidget().isList():
+            return
+        rect = self.iconRect(option)
+        tile = max(6, int(self.itemsWidget().itemSize() / 12.0))
+        colors = (QtGui.QColor(27, 28, 30), QtGui.QColor(34, 35, 37))
+        painter.setPen(QtCore.Qt.NoPen)
+        row = 0
+        y = rect.y()
+        while y < rect.bottom() + 1:
+            column = 0
+            x = rect.x()
+            while x < rect.right() + 1:
+                painter.setBrush(colors[(row + column) & 1])
+                painter.drawRect(x, y, min(tile, rect.right() - x + 1),
+                                 min(tile, rect.bottom() - y + 1))
+                x += tile
+                column += 1
+            y += tile
+            row += 1
 
     def paintSlider(self, painter, option, index):
         """
@@ -1398,12 +1893,12 @@ class Item(QtWidgets.QListWidgetItem):
         :rtype: QtCore.QRect
         """
         padding = self.padding()
-        cell = self.visualRect(option)
-        iconSize = self.itemsWidget().itemSize()  # 顶部方形区边长，与 iconPercent/sizeHint 的划分保持一致
+        card = self.cardRect(option)
+        iconSize = self.itemsWidget().itemSize()
 
-        x = int(cell.x() + padding / 2.0)
-        y = int(cell.y() + padding / 2.0)
-        width = int(cell.width() - padding)
+        x = int(card.x() + padding / 2.0)
+        y = int(card.y() + padding / 2.0)
+        width = int(card.width() - padding)
         height = int(iconSize - padding)
         return QtCore.QRect(x, y, width, height)
 
@@ -1563,15 +2058,93 @@ class Item(QtWidgets.QListWidgetItem):
 
         pen = QtGui.QPen(color)
         painter.setPen(pen)
+        if self.itemsWidget().isList():
+            data = self.itemData() or []
+            items_widget = self.itemsWidget()
+            field_indices = items_widget.listFieldIndices()
+            widths = items_widget.listColumnWidths()
+            formatters = items_widget.listFormatters()
+            alignments = items_widget.listAlignments()
+            row_height = max(1, rect.height() - 3)  # 底部 3px 留给 UE 加载状态线
+            x = rect.x()
+            list_font = painter.font()
+            list_font.setPixelSize(12)
+            painter.setFont(list_font)
+            metrics = QtGui.QFontMetrics(list_font)
+            status_colors = {
+                u"未开始": QtGui.QColor(205, 72, 72, 235),
+                u"制作中": QtGui.QColor(199, 132, 52, 235),
+                u"已完成": QtGui.QColor(106, 108, 111, 235),
+            }
+
+            columns = zip(field_indices, widths, formatters, alignments)
+            for column, (field_index, width, formatter, cell_alignment) in enumerate(columns):
+                cell = QtCore.QRect(x, rect.y(), width, row_height)
+                try:
+                    value = data[field_index]
+                except (IndexError, TypeError):
+                    value = ""
+
+                if value is None:
+                    value = "" if formatter == "note" else "None"
+                text = str(value)
+                if formatter == "datetime" and value not in (None, ""):
+                    try:
+                        seconds = int(float(value))
+                        text = QtCore.QDateTime.fromSecsSinceEpoch(seconds).toString(
+                            "yyyy-MM-dd HH:mm")
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+                elif formatter == "note":
+                    # 备注在库中以 $ 分隔多条记录；表格中单行紧凑显示。
+                    text = text.replace("$", "  |  ")
+
+                if text in status_colors:
+                    painter.fillRect(cell.adjusted(1, 1, -1, -1), status_colors[text])
+
+                text_rect = cell.adjusted(6, 0, -6, 0)
+                elided = metrics.elidedText(text, QtCore.Qt.ElideRight,
+                                            max(0, text_rect.width()))
+                if cell_alignment == "center":
+                    alignment = QtCore.Qt.AlignCenter
+                else:
+                    alignment = QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
+                painter.setPen(QtGui.QColor(244, 244, 244) if isSelected
+                               else QtGui.QColor(220, 220, 220))
+                painter.drawText(text_rect, alignment, elided)
+                painter.setPen(QtGui.QColor(70, 71, 73))
+                painter.drawLine(cell.right(), cell.top(), cell.right(), cell.bottom())
+                x += width
+            return
+
         if self.zh_name():
             zh_name = self.zh_name()
         else:
             zh_name = ""
-        if self.itemsWidget().isList():
-            text = self.name() + "       " + zh_name
-        else:
-            text = self.name() + "\n" + zh_name
-        painter.drawText(rect, align, text)
+        card = self.cardRect(option)
+        text_top = card.y() + self.itemsWidget().itemSize() + 4
+        text_rect = QtCore.QRect(card.x() + 6, text_top,
+                                 card.width() - 12, card.bottom() - text_top - 3)
+        name_font = painter.font()
+        name_font.setPixelSize(12)
+        name_font.setBold(False)
+        painter.setFont(name_font)
+        metrics = QtGui.QFontMetrics(name_font)
+        name_text = metrics.elidedText(self.name(), QtCore.Qt.ElideRight, text_rect.width())
+        painter.setPen(QtGui.QColor(225, 225, 225) if not isSelected
+                       else QtGui.QColor(255, 255, 255))
+        painter.drawText(QtCore.QRect(text_rect.x(), text_rect.y(), text_rect.width(), 17),
+                         QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, name_text)
+        if zh_name:
+            detail_font = QtGui.QFont(name_font)
+            detail_font.setPixelSize(10)
+            painter.setFont(detail_font)
+            detail_metrics = QtGui.QFontMetrics(detail_font)
+            detail = detail_metrics.elidedText(zh_name, QtCore.Qt.ElideRight, text_rect.width())
+            painter.setPen(QtGui.QColor(145, 148, 152))
+            painter.drawText(QtCore.QRect(text_rect.x(), text_rect.y() + 18,
+                                          text_rect.width(), 15),
+                             QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, detail)
 
     def countGRPNum(self):
         path = self._itemData[7].split("Icon")[0]

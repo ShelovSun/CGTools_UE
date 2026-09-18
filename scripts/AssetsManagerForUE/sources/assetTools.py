@@ -7,7 +7,6 @@ import os
 import sys
 import time
 import unreal
-import psycopg2
 
 # 添加venv路径，确保UE能找到PySide6
 scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/')
@@ -18,17 +17,138 @@ if venv_path not in sys.path:
 from PySide6 import QtWidgets, QtCore, QtGui
 
 from functools import partial
-from utils import jsonHelper, assetFunctions, messageBox, myWidget
-from utils.fbxpreview.am_previewGLWidget import PreviewGLWidget
-from utils.fbxpreview.am_actionWidget import AssetActionWidget
+from ..utils import assetFunctions, messageBox, myWidget
+from ..config import commonSetting
+from . import ue_asset_service
 
 _FLAT = "border-style: flat; background: transparent;"
+_DRAINING_THREAD_JOBS = []
+
+
+def _releaseDrainingJob(job):
+    try:
+        _DRAINING_THREAD_JOBS.remove(job)
+    except ValueError:
+        pass
+
+
+def _fetch_database(host, user, password, project, asset_type):
+    """后台线程可调用的纯数据库查询；不接触任何 Qt 控件。"""
+    import psycopg2
+
+    conn = None
+    cur = None
+    query = '''
+         SELECT "asset.date", "asset.name", "asset.zh_name", "asset.mod_artist", "asset.mod_status",
+         "asset.rig_artist", "asset.rig_status", "asset.icon", "asset.note"
+         FROM public."asset"
+         WHERE "asset.type" = %s;
+         '''
+    try:
+        conn = psycopg2.connect(
+            database=project,
+            user=user,
+            password=password,
+            host=host,
+            port="5432",
+            connect_timeout=4,
+        )
+        cur = conn.cursor()
+        cur.execute(query, (asset_type,))
+        return cur.fetchall()
+    finally:
+        if cur is not None:
+            cur.close()
+        if conn is not None:
+            conn.close()
+
+
+class _StartupSignals(QtCore.QObject):
+    loaded = QtCore.Signal(object)
+    failed = QtCore.Signal(str)
+
+
+class _StartupTask(QtCore.QRunnable):
+    """首次网络配置 + PostgreSQL 查询，完整运行在后台线程。"""
+
+    def __init__(self, host, user, password, is_sql, project_index, type_index):
+        super(_StartupTask, self).__init__()
+        self.signals = _StartupSignals()
+        self.host = host
+        self.user = user
+        self.password = password
+        self.is_sql = is_sql
+        self.project_index = project_index
+        self.type_index = type_index
+
+    @staticmethod
+    def _index(value, count):
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            value = 0
+        return max(0, min(value, count - 1)) if count else -1
+
+    def run(self):
+        try:
+            settings = commonSetting()
+            projects = list(settings.get("DataBase") or [])
+            asset_types = list(settings.get("type") or [])
+            project_index = self._index(self.project_index, len(projects))
+            type_index = self._index(self.type_index, len(asset_types))
+            rows = []
+            if self.is_sql and project_index >= 0 and type_index >= 0:
+                rows = _fetch_database(
+                    self.host,
+                    self.user,
+                    self.password,
+                    projects[project_index],
+                    asset_types[type_index],
+                )
+            self.signals.loaded.emit({
+                "settings": settings,
+                "project_index": project_index,
+                "type_index": type_index,
+                "rows": rows,
+            })
+        except Exception as exc:
+            self.signals.failed.emit(str(exc))
+
+
+class _QuerySignals(QtCore.QObject):
+    loaded = QtCore.Signal(int, object)
+    failed = QtCore.Signal(int, str)
+
+
+class _QueryTask(QtCore.QRunnable):
+    """项目/类型切换和刷新使用的后台数据库查询。"""
+
+    def __init__(self, generation, host, user, password, project, asset_type):
+        super(_QueryTask, self).__init__()
+        self.signals = _QuerySignals()
+        self.generation = generation
+        self.host = host
+        self.user = user
+        self.password = password
+        self.project = project
+        self.asset_type = asset_type
+
+    def run(self):
+        try:
+            rows = _fetch_database(
+                self.host, self.user, self.password, self.project, self.asset_type)
+            self.signals.loaded.emit(self.generation, rows)
+        except Exception as exc:
+            self.signals.failed.emit(self.generation, str(exc))
+
+
+# 进程级数据线程池不隶属于窗口；关闭窗口时不会等待仍在网络超时中的查询。
+_DATA_THREAD_POOL = QtCore.QThreadPool()
+_DATA_THREAD_POOL.setMaxThreadCount(2)
 
 
 class AssetToolsUI(QtWidgets.QWidget):
     scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/').replace('sources', '')
-
-    jsonPath = 'Y:/ACTools/CGTools/scripts/AssetsManagerForMaya'
 
     def __init__(self, isSQL=True,
                  user="",
@@ -43,22 +163,26 @@ class AssetToolsUI(QtWidgets.QWidget):
 
         self.isList = False
         self._current_sort = (0, True)  # 默认排序：按日期(列0)降序(reverse=True)，最新在前
+        self._state_generation = 0
+        self._state_jobs = []
+        self._copy_thread = None
+        self._copy_worker = None
+        self._copy_item_key = ""
 
-        self.update_asset_thread = myWidget.MyThread()
-        self.update_asset_thread.signal.connect(lambda: self.listWidgetAddItems())
+        self._query_generation = 0
+        self._query_tasks = {}
+        self._startup_task = None
+        self._data_pool = _DATA_THREAD_POOL
 
         # 同步搭建界面（纯控件、无 I/O，秒级）→ 窗口一显示即最终布局，不闪。
         self.build_ui()
-        # 填充项目/类型并恢复上次选择（build_ui 已连信号，这里在 firstView 内屏蔽选择信号，避免触发 DB 查询）。
-        self.firstView()
-        # 数据加载(含 DB 查询，可能较慢)延迟到窗口显示后执行，避免卡住启动。
-        self.init_ui_thread = myWidget.MyThread()
-        self.init_ui_thread.signal.connect(lambda: self.listWidgetAddItems(self.getItemsFromSQL()))
-        self.init_ui_thread.start()
+        # 网络配置、psycopg2 冷导入和第一次查询都交给真正的后台任务。
+        # 0ms 定时器让本控件先返回给主窗口，窗口可先完成一次绘制。
+        QtCore.QTimer.singleShot(0, self._startInitialLoad)
 
     # ------------------------------------------------------------------ UI 搭建
     def build_ui(self):
-        """纯代码搭建界面：左(项目下拉+类型列表) | 中(工具栏+缩略图列表) | 右(FBX预览+动作库+Import) + 底部状态栏。"""
+        """纯代码搭建界面：左侧筛选、中间资产卡片、右侧 FBX/皮肤预览与动作库。"""
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(2, 2, 2, 2)
         root.setSpacing(2)
@@ -107,8 +231,6 @@ class AssetToolsUI(QtWidgets.QWidget):
         self.itemSize_Slider.setToolTip(u"缩放图标")
         tool.addWidget(self.itemSize_Slider)
 
-        self.download_Bttn = self._toolBtn('download.png', u"下载资产到本地")
-        tool.addWidget(self.download_Bttn)
         self.refresh_Bttn = self._toolBtn('refresh.png', u"刷新")
         tool.addWidget(self.refresh_Bttn)
 
@@ -129,23 +251,29 @@ class AssetToolsUI(QtWidgets.QWidget):
         self.main_listWgt = myWidget.MainQListWiget()
         # 关掉 Qt 按 item 文字(资产名)的自动排序，否则会覆盖排序菜单选择的自定义顺序(日期/状态等)
         self.main_listWgt.setSortingEnabled(False)
+        self.asset_list_header = myWidget.AssetListHeader(self.main_listWgt)
+        self.asset_list_header.setSortIndicator(*self._current_sort)
+        self.asset_list_header.sectionClicked.connect(self._do_sort)
+        self.asset_list_header.setVisible(self.isList)
+        self.main_listWgt.setListHeader(self.asset_list_header)
+        midV.addWidget(self.asset_list_header)
         midV.addWidget(self.main_listWgt, 1)
         self.mainWindow_splitter.addWidget(mid)
 
-        # ---- 右栏：FBX 三维预览 + 动作库 + 底部 Import ----
+        # ---- 右栏：FBX/OpenGL 预览在第一次选中资产时才创建 ----
         right = QtWidgets.QWidget()
         rightV = QtWidgets.QVBoxLayout(right)
         rightV.setContentsMargins(0, 0, 0, 0)
         rightV.setSpacing(2)
-        self.preview_wgt = PreviewGLWidget(isPlayer=False)
-        self.preview_wgt.setMinimumHeight(350)
-        rightV.addWidget(self.preview_wgt)
-        self.action_wgt = AssetActionWidget()
-        self.action_wgt.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        rightV.addWidget(self.action_wgt, 1)
-        self.import_bttn = QtWidgets.QPushButton("Import")
-        self.import_bttn.setMinimumHeight(30)
-        rightV.addWidget(self.import_bttn)
+        self._right_layout = rightV
+        self.preview_wgt = None
+        self.action_wgt = None
+        self._preview_placeholder = QtWidgets.QLabel(u"选择资产后加载 FBX 预览")
+        self._preview_placeholder.setAlignment(QtCore.Qt.AlignCenter)
+        self._preview_placeholder.setMinimumHeight(350)
+        self._preview_placeholder.setStyleSheet(
+            "background:#242528; color:#858585; border:1px solid #151515;")
+        rightV.addWidget(self._preview_placeholder, 1)
         self.mainWindow_splitter.addWidget(right)
 
         self.mainWindow_splitter.setSizes([120, 500, 350])
@@ -173,16 +301,15 @@ class AssetToolsUI(QtWidgets.QWidget):
         self.displayThumb_bttn.clicked.connect(self.viewThumbnailChange)
         self.itemSize_Slider.valueChanged.connect(self.itemSizeSliderChanged)
         self.itemSize_Slider.sliderReleased.connect(self.itemSizeSliderReleased)
-        self.download_Bttn.clicked.connect(self.download_CGTicon_to_localTemp)
         self.refresh_Bttn.clicked.connect(self.refresh_asset)
         self.sort_bttn.clicked.connect(self.sort_asset_ui)
         self.key_line.returnPressed.connect(self.search_asset)
         self.main_listWgt.itemSelectionChanged.connect(self.listWidgetItemChanged)
         self.main_listWgt.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.main_listWgt.customContextMenuRequested.connect(self.show_menu)
-        self.action_wgt.actionActivated.connect(self.on_action_selected)
-        self.action_wgt.importActionRequested.connect(self.importActionFile)  # 右键"导入动作"
-        self.import_bttn.clicked.connect(self.importFile)
+        self.main_listWgt.assetDropRequested.connect(self.placeImportedAsset)
+        self.main_listWgt.assetDragRejected.connect(
+            lambda text: self.infoMsg("warning", text))
 
     def _toolBtn(self, icon_name, tip):
         """工具栏小按钮：25x25、扁平透明、22 图标。"""
@@ -194,11 +321,36 @@ class AssetToolsUI(QtWidgets.QWidget):
         b.setStyleSheet(_FLAT)
         return b
 
-    # ------------------------------------------------------------------ 数据/逻辑
-    def projectSetting(self):
-        data = jsonHelper.readDictFromFile('%s/config/projectSetting.json' % self.jsonPath)
-        return data
+    def _ensurePreviewWidgets(self):
+        """首次选中资产时才导入并创建 FBX/OpenGL 预览，避免阻塞首开窗口。"""
+        if self.preview_wgt is not None and self.action_wgt is not None:
+            return True
+        try:
+            from ..utils.fbxpreview.am_previewGLWidget import PreviewGLWidget
+            from ..utils.fbxpreview.am_actionWidget import AssetActionWidget
 
+            preview = PreviewGLWidget(isPlayer=False)
+            preview.setMinimumHeight(350)
+            action = AssetActionWidget()
+            action.setSizePolicy(
+                QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+            action.actionActivated.connect(self.on_action_selected)
+            action.importActionRequested.connect(self.importActionFile)
+
+            if self._preview_placeholder is not None:
+                self._right_layout.removeWidget(self._preview_placeholder)
+                self._preview_placeholder.deleteLater()
+                self._preview_placeholder = None
+            self._right_layout.insertWidget(0, preview)
+            self._right_layout.insertWidget(1, action, 1)
+            self.preview_wgt = preview
+            self.action_wgt = action
+            return True
+        except Exception as exc:
+            self.infoMsg("error", u"FBX 预览器加载失败：{0}".format(exc))
+            return False
+
+    # ------------------------------------------------------------------ 数据/逻辑
     def rememberSettings(self):
         settings = QtCore.QSettings('AssetsUE', 'AssetsUESettings')
         settings.setValue('isList', self.isList)
@@ -221,31 +373,78 @@ class AssetToolsUI(QtWidgets.QWidget):
 
         return thumbSize, project, typ
 
-    def firstView(self):
-        """ 初显示：填充项目/类型并恢复上次选择。屏蔽选择信号，避免启动时同步触发 DB 查询。"""
+    def _startInitialLoad(self):
+        """读取本机 UI 偏好后，把网络配置和首次数据库查询交给后台线程。"""
+        thumbSize, project, typ = self.readSettings()
+        if thumbSize is not None:
+            try:
+                self.itemSize_Slider.setValue(int(thumbSize))
+            except (TypeError, ValueError):
+                pass
+        self.infoMsg("info", u"正在后台读取项目配置和资产数据…")
+        task = _StartupTask(
+            self.host, self.user, self.password, self.isSQL, project, typ)
+        task.signals.loaded.connect(self._applyInitialLoad)
+        task.signals.failed.connect(self._initialLoadFailed)
+        self._startup_task = task
+        self._data_pool.start(task)
+
+    def _populateFilters(self, settings, project_index=0, type_index=0):
+        """只在 UI 主线程中更新项目和类型控件。"""
         self.project_comb.blockSignals(True)
         self.type_listWgt.blockSignals(True)
         try:
-            self.update_project()
-            self.update_type()
-            thumbSize, project, typ = self.readSettings()
-            if thumbSize is not None:
-                self.itemSize_Slider.setValue(int(thumbSize))
-            if project is not None:
-                self.project_comb.setCurrentIndex(int(project))
-            self.type_listWgt.setCurrentRow(int(typ) if typ is not None else 0)
+            self.project_comb.clear()
+            self.type_listWgt.clear()
+            self.project_comb.addItems([str(value) for value in settings.get('DataBase', [])])
+            for value in settings.get('type', []):
+                item = QtWidgets.QListWidgetItem(str(value))
+                icon = QtGui.QIcon()
+                pixmap = myWidget.Pixmap('%s/icon/folder.svg' % self.scriptsPath)
+                pixmap.setColor(QtGui.QColor("#b3b3b3"))
+                icon.addPixmap(pixmap, QtGui.QIcon.Normal, QtGui.QIcon.Off)
+                item.setIcon(icon)
+                self.type_listWgt.addItem(item)
+            if self.project_comb.count():
+                self.project_comb.setCurrentIndex(max(0, int(project_index)))
+            if self.type_listWgt.count():
+                self.type_listWgt.setCurrentRow(max(0, int(type_index)))
         finally:
             self.project_comb.blockSignals(False)
             self.type_listWgt.blockSignals(False)
 
+    def _applyInitialLoad(self, payload):
+        self._startup_task = None
+        self._populateFilters(
+            payload.get("settings") or {},
+            payload.get("project_index", 0),
+            payload.get("type_index", 0),
+        )
+        self.listWidgetAddItems(payload.get("rows") or [])
+
+    def _initialLoadFailed(self, error):
+        self._startup_task = None
+        self.infoMsg("error", u"资产数据加载失败：{0}".format(error))
+        try:
+            unreal.log_warning(u"AssetsManager 首次数据加载失败：{0}".format(error))
+        except Exception:
+            pass
+
+    def firstView(self):
+        """兼容旧调用；新版启动流程使用 _startInitialLoad 后台加载。"""
+        thumbSize, project, typ = self.readSettings()
+        if thumbSize is not None:
+            self.itemSize_Slider.setValue(int(thumbSize))
+        self._populateFilters(commonSetting(), project or 0, typ or 0)
+
     def update_project(self):
-        self.project_comb.addItems(self.projectSetting()['projects'])
+        self.project_comb.addItems(commonSetting()['DataBase'])
 
     def update_type(self):
         """
         设置type显示
         """
-        for i in self.projectSetting()['type']:
+        for i in commonSetting()['type']:
             item = QtWidgets.QListWidgetItem()
             item.setText(str(i))
             icon = QtGui.QIcon()
@@ -257,11 +456,11 @@ class AssetToolsUI(QtWidgets.QWidget):
 
     def projectChanged(self):
         self.rememberSettings()
-        self.listWidgetAddItems(self.getItemsFromSQL())
+        self._requestAssetData()
 
     def typeChanged(self):
         self.rememberSettings()
-        self.listWidgetAddItems(self.getItemsFromSQL())
+        self._requestAssetData()
 
     def openDir(self, dir_path):
         """
@@ -269,7 +468,7 @@ class AssetToolsUI(QtWidgets.QWidget):
         """
         folder_info = QtCore.QFileInfo(dir_path)
         if folder_info.exists():
-            QtGui.QDesktopServices.openUrl(dir_path)
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(folder_info.absoluteFilePath()))
         else:
             self.infoMsg('warning', 'Can not find {0}'.format(dir_path))
 
@@ -286,7 +485,8 @@ class AssetToolsUI(QtWidgets.QWidget):
 
     def backToMainWgt(self):
         """返回主面板"""
-        self.preview_wgt.clear()
+        if self.preview_wgt is not None:
+            self.preview_wgt.clear()
         self.update_asset()
 
     def viewThumbnailChange(self):
@@ -297,12 +497,14 @@ class AssetToolsUI(QtWidgets.QWidget):
             self.isList = False
             self.main_listWgt.setIsList(self.isList)
             self.main_listWgt.setIconMode()
+            self.asset_list_header.hide()
         else:
             self.displayThumb_bttn.setIcon(QtGui.QIcon('%s/icon/display_icon.png' % self.scriptsPath))
             self.displayThumb_bttn.setToolTip("缩略图显示")
             self.isList = True
             self.main_listWgt.setIsList(self.isList)
             self.main_listWgt.setListMode()
+            self.asset_list_header.show()
         self.update_asset()
         self.rememberSettings()
 
@@ -316,52 +518,19 @@ class AssetToolsUI(QtWidgets.QWidget):
             # 只会让网格单元(间隙)变大而图标不变，必须同步更新 _itemSize，delegate 的 iconRect 高度才随之变大。
             self.main_listWgt.setItemSize(itemSize)
             self.main_listWgt.setIconSize(QtCore.QSize(itemSize, itemSize))
-            self.main_listWgt.setGridSize(QtCore.QSize(itemSize + 10, itemSize + 50))
+            self.main_listWgt.setGridSize(QtCore.QSize(
+                itemSize + self.main_listWgt.DEF_SPACING,
+                itemSize + self.main_listWgt.DEF_SPACING + self.main_listWgt.textAreaHeight()))
 
     def itemSizeSliderReleased(self):
         self.rememberSettings()
 
-    def download_CGTicon_to_localTemp(self):
-        """
-        下载CGT的icon到本地
-        """
-        import cgtw2
-        t_tw = cgtw2.tw()
-        type, project, path = self.getTypeAndProject()
-        TW_proj = self.projectSetting()['projectdiction'][project]
-        t_asset_ids = t_tw.info.get_id(TW_proj, 'asset',
-                                       [['asset.maya', '=', u"完成"], 'and', ['asset.assetstapy', '=', type]])
-        TW_dictionInfo = t_tw.info.get(TW_proj, 'asset', t_asset_ids, ['asset.entity', 'asset.image', 'asset.cn_name'])
-        for id in TW_dictionInfo:
-            ids = [id['id']]
-            localPath = "{0}/{1}/Assets/{2}".format(self.tempPath, project, type)
-            if not os.path.exists(localPath):
-                os.makedirs(localPath)
-            try:
-                downloadInfo = t_tw.info.download_image(TW_proj, 'asset', ids, 'asset.image', is_small=False,
-                                                        local_dir=localPath)
-                rename = downloadInfo[0]['asset.image'][0].rsplit("/", 1)[0] + "/" + id['asset.entity'] + ".png"
-                if os.path.exists(rename):
-                    print(u"%s已经存在！" % rename)
-                else:
-                    os.rename(downloadInfo[0]['asset.image'][0], rename)
-            except:
-                print(u"下载%s失败！" % id['asset.entity'])
-        self.listWidgetAddItems(self.getItemsFromSQL())
-
     def update_asset(self):
-        """
-        更新资产的多线程
-        """
-        type, project, path = self.getTypeAndProject()
-        if path and os.path.exists(path):
-            self.infoMsg("info", "Loading...")
-            self.update_asset_thread.start()
-        else:
-            self.main_listWgt.clear()
+        """用内存中的查询结果重建列表；该调用来自 UI 线程，无需伪 QThread。"""
+        self.listWidgetAddItems()
 
     def refresh_asset(self):
-        self.listWidgetAddItems(self.getItemsFromSQL())
+        self._requestAssetData()
 
     def sort_asset_ui(self):
         """ 资产排序菜单：按列排序，同一项再次点击切换升/降序 """
@@ -374,6 +543,7 @@ class AssetToolsUI(QtWidgets.QWidget):
             (u'按模型状态排序', 4),
             (u'按绑定制作排序', 5),
             (u'按绑定状态排序', 6),
+            (u'按备注排序', 7),
         ]
         for name, column in sort_columns:
             act = QtGui.QAction(name, self)
@@ -384,11 +554,13 @@ class AssetToolsUI(QtWidgets.QWidget):
     def _do_sort(self, column):
         """
         更新当前排序状态并重排列表：同一列再次点击 -> 反向；换列 -> 默认升序。
-        column: 0=日期 1=资产名 2=中文名 3=模型制作 4=模型状态 5=绑定制作 6=绑定状态
+        column: 0=日期 1=资产名 2=中文名 3=模型制作 4=模型状态
+                5=绑定制作 6=绑定状态 7=备注（数据中下标 8）
         """
         cur_col, cur_reverse = self._current_sort
         reverse = (not cur_reverse) if column == cur_col else False
         self._current_sort = (column, reverse)
+        self.asset_list_header.setSortIndicator(column, reverse)
         self.listWidgetAddItems()  # 用现有数据按新排序状态重排重填(保留当前搜索过滤)
 
     def _sort_data(self, data):
@@ -396,8 +568,9 @@ class AssetToolsUI(QtWidgets.QWidget):
         column, reverse = self._current_sort
 
         def sort_key(item_data):
+            data_index = 8 if column == 7 else column
             try:
-                value = item_data[column] if len(item_data) > column else None
+                value = item_data[data_index] if len(item_data) > data_index else None
             except (IndexError, TypeError):
                 value = None
             if column == 0:  # 日期列统一按整数比较（空值当 0），避免 int/str 混排报错
@@ -420,41 +593,57 @@ class AssetToolsUI(QtWidgets.QWidget):
             return self.get_database(_project, _type)
 
     def get_database(self, _project, _type):
-        """ 得到asset数据 """
-        conn = None
-        cur = None
-        get_script = '''
-             SELECT "asset.date", "asset.name", "asset.zh_name", "asset.mod_artist", "asset.mod_status",
-             "asset.rig_artist", "asset.rig_status", "asset.icon"
-             FROM public."asset"
-             WHERE
-             "asset.type" = '%s';
-             ''' % _type
+        """兼容旧调用的同步查询；交互界面统一走 _requestAssetData 后台查询。"""
         try:
-            conn = psycopg2.connect(database=_project, user=self.user, password=self.password, host=self.host,
-                                    port="5432")
-            cur = conn.cursor()
-            cur.execute(get_script)
-            data = cur.fetchall()
-            return data
+            return _fetch_database(
+                self.host, self.user, self.password, _project, _type)
         except Exception as e:
             print(e)
-        finally:
-            if cur is not None:
-                cur.close()
-            if conn is not None:
-                conn.close()
+            return []
+
+    def _requestAssetData(self):
+        """后台刷新当前项目/类型；generation 防止慢查询覆盖较新的选择。"""
+        asset_type, project, _path = self.getTypeAndProject()
+        if not self.isSQL or not project or not asset_type:
+            self.listWidgetAddItems([])
+            return
+        self._query_generation += 1
+        generation = self._query_generation
+        self.infoMsg("info", u"正在后台读取 {0} / {1}…".format(project, asset_type))
+        task = _QueryTask(
+            generation, self.host, self.user, self.password, project, asset_type)
+        task.signals.loaded.connect(self._assetDataLoaded)
+        task.signals.failed.connect(self._assetDataFailed)
+        self._query_tasks[generation] = task
+        self._data_pool.start(task)
+
+    def _assetDataLoaded(self, generation, rows):
+        self._query_tasks.pop(generation, None)
+        if generation != self._query_generation:
+            return
+        self.listWidgetAddItems(rows or [])
+
+    def _assetDataFailed(self, generation, error):
+        self._query_tasks.pop(generation, None)
+        if generation != self._query_generation:
+            return
+        self.infoMsg("error", u"资产数据读取失败：{0}".format(error))
+        try:
+            unreal.log_warning(u"AssetsManager 数据读取失败：{0}".format(error))
+        except Exception:
+            pass
 
     def listWidgetAddItems(self, new_dict=None):
         """
         设置主面板FBX显示
         """
         self.main_listWgt.clear()
-        self.preview_wgt.clear()
+        if self.preview_wgt is not None:
+            self.preview_wgt.clear()
         keyWords = self.key_line.text()
 
         start_time = time.time()
-        if new_dict:
+        if new_dict is not None:
             self.main_listWgt.setItems(new_dict)
         # 按当前排序状态排序数据（默认日期降序，最新在前），每次加载都生效
         _data = list(self.main_listWgt.items() or [])
@@ -465,14 +654,19 @@ class AssetToolsUI(QtWidgets.QWidget):
         self.main_listWgt.setItemSize(self.itemSize_Slider.value())
         self.main_listWgt.addItems(keyWords)
         self.main_listWgt.setMode()
+        self.asset_list_header.setVisible(self.isList)
+        self.asset_list_header.setSortIndicator(*self._current_sort)
         end_time = time.time()
         self.infoMsg("info", "%s items" % (self.main_listWgt.count()) +
                      '   Cost :  %.2f' % (end_time - start_time) + ' sec')
+        self.scanUEAssetStates()
 
     def listWidgetItemChanged(self):
         """ 改变item触发：把选中资产喂给 FBX 三维预览 + 动作库 """
         currentSelected = self.main_listWgt.selectedItems()
         if currentSelected:
+            if not self._ensurePreviewWidgets():
+                return
             item_data = currentSelected[0].itemData()
             icon = item_data[7]
             '''喂给 FBX 预览：必须先 setTitle（GL 据 name 由 /Icon/→/FBX/ 推绑定文件），再 setPreviewPixmap'''
@@ -482,31 +676,290 @@ class AssetToolsUI(QtWidgets.QWidget):
             '''列出该资产 Action 目录下的动作（递归），点击后 on_action_selected 套播'''
             self.action_wgt.setAsset(self.preview_wgt.deriveFbxPath(icon))
         else:
-            self.preview_wgt.clear()
-            self.action_wgt.clear()
+            if self.preview_wgt is not None:
+                self.preview_wgt.clear()
+            if self.action_wgt is not None:
+                self.action_wgt.clear()
 
     def on_action_selected(self, action_path):
         """动作库选中：把该动作套到当前预览的绑定文件上循环播放；空路径回静态预览。"""
-        self.preview_wgt.playAction(action_path)
+        if self.preview_wgt is not None:
+            self.preview_wgt.playAction(action_path)
 
     def show_menu(self, point):
         """
-        设置主面板右键菜单：Show in Explorer / Import
+        设置主面板右键菜单：旧 FBX Import 与新 UE 包加载并存。
         """
         currentItem = self.main_listWgt.itemAt(point)
         if currentItem is None:
             return
+        self.main_listWgt.setCurrentItem(currentItem)
         menu = QtWidgets.QMenu(self.main_listWgt)
         show_action = QtGui.QAction('Show in Explorer', self)
         show_action.setIcon(QtGui.QIcon("{}/icon/folder_white.png".format(self.scriptsPath)))
-        imp_action = QtGui.QAction('Import', self)
+        show_ue_action = QtGui.QAction(u'打开 UE 发布目录', self)
+        load_action = QtGui.QAction(u'加载资产', self)
+        imp_action = QtGui.QAction('Import FBX', self)
+        locate_action = QtGui.QAction(u'在内容浏览器中定位', self)
+        locate_action.setEnabled(bool(currentItem.ueMainObjectPath()))
         menu.addAction(show_action)
+        menu.addAction(show_ue_action)
+        menu.addSeparator()
+        menu.addAction(load_action)
+        menu.addAction(locate_action)
         menu.addSeparator()
         menu.addAction(imp_action)
-        show_action.triggered.connect(partial(self.openDir,
-                                              currentItem.itemData()[7].split("/Icon/")[0]))
+        asset_root = ue_asset_service.asset_root_from_item_data(currentItem.itemData())
+        show_action.triggered.connect(partial(self.openDir, asset_root))
+        show_ue_action.triggered.connect(partial(self.openDir, os.path.join(asset_root, "UE")))
+        load_action.triggered.connect(partial(self.loadUEAsset, currentItem))
+        locate_action.triggered.connect(partial(self.locateUEAsset, currentItem))
         imp_action.triggered.connect(self.importFile)
         menu.exec_(QtGui.QCursor.pos())
+
+    # ---------------------------------------------------------- UE 最终资产包
+    def _findItemByKey(self, key):
+        for index in range(self.main_listWgt.count()):
+            item = self.main_listWgt.item(index)
+            try:
+                if str(item.itemData()[7]) == str(key):
+                    return item
+            except (IndexError, TypeError, RuntimeError):
+                pass
+        return None
+
+    def scanUEAssetStates(self):
+        """后台扫描每张卡片的 UE 发布/工程文件状态，避免网络盘阻塞 UI。"""
+        self._state_generation += 1
+        generation = self._state_generation
+        for _thread, worker in list(self._state_jobs):
+            worker.cancel()
+
+        requests = []
+        for index in range(self.main_listWgt.count()):
+            item = self.main_listWgt.item(index)
+            key = str(item.itemData()[7])
+            root = ue_asset_service.asset_root_from_item_data(item.itemData())
+            item.setUEState("scanning", u"正在检查 UE 发布资产…")
+            requests.append((key, root))
+        if not requests:
+            return
+        try:
+            target_content = ue_asset_service.project_content_dir()
+        except Exception as exc:
+            self.infoMsg("error", str(exc))
+            return
+
+        thread = QtCore.QThread()
+        worker = ue_asset_service.AssetStateWorker(generation, requests, target_content)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.itemScanned.connect(self._applyUEState)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._releaseStateJob)
+        self._state_jobs.append((thread, worker))
+        thread.start()
+
+    def _releaseStateJob(self):
+        finished_thread = self.sender()
+        self._state_jobs = [job for job in self._state_jobs if job[0] is not finished_thread]
+
+    def _applyUEState(self, generation, key, plan):
+        if generation != self._state_generation:
+            return
+        item = self._findItemByKey(key)
+        if item is None:
+            return
+        if plan.get("state") == "ready":
+            try:
+                plan["main_object_path"] = ue_asset_service.resolve_placeable_object_path(plan)
+                if not plan["main_object_path"]:
+                    plan["state"] = "partial"
+                    plan["message"] = u"UE 包已在工程中；未找到可直接拖放的 Actor 蓝图或网格体"
+            except Exception:
+                pass
+        item.setUEState(plan.get("state"), plan.get("message"), plan)
+
+    def loadUEAsset(self, item=None):
+        """复制选中资产 UE 发布包；现有同名不同内容文件绝不自动覆盖。"""
+        if isinstance(item, bool):  # QPushButton.clicked(bool)
+            item = None
+        item = item or self.main_listWgt.currentItem()
+        if item is None:
+            self.infoMsg("warning", u"请先选择一张资产卡片")
+            return
+        if self._copy_thread is not None and self._copy_thread.isRunning():
+            self.infoMsg("warning", u"已有资产正在加载，请等待当前任务完成")
+            return
+
+        plan = item.uePlan()
+        if not plan or plan.get("state") == "scanning":
+            try:
+                asset_root = ue_asset_service.asset_root_from_item_data(item.itemData())
+                plan = ue_asset_service.build_import_plan(asset_root)
+            except Exception as exc:
+                item.setUEState("error", str(exc))
+                self.infoMsg("error", str(exc))
+                return
+        # ``files`` 可能只有 .uexp/.ubulk 等 sidecar；没有 .uasset/.umap
+        # 仍然不是一个可加载的 UE 包，不能把孤立 sidecar 复制进工程。
+        if not plan.get("files") or not plan.get("package_object_paths"):
+            message = plan.get("message") or u"没有找到该资产的 UE 发布文件"
+            item.setUEState("missing", message, plan)
+            self.infoMsg("warning", message)
+            self._showMissingUEPackageDialog(plan, message)
+            return
+        if plan.get("state") == "conflict":
+            item.setUEState("conflict", plan.get("message"), plan)
+            self.infoMsg("warning", plan.get("message"))
+            return
+        if plan.get("state") == "ready":
+            self._registerLoadedPlan(item, plan)
+            return
+
+        key = str(item.itemData()[7])
+        self._copy_item_key = key
+        item.setUEProgress(0, u"准备加载 UE 最终资产…")
+        thread = QtCore.QThread()
+        worker = ue_asset_service.AssetCopyWorker(plan)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._onCopyProgress)
+        worker.finished.connect(self._onCopyFinished)
+        worker.failed.connect(self._onCopyFailed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._onCopyThreadFinished)
+        self._copy_thread = thread
+        self._copy_worker = worker
+        thread.start()
+
+    def _showMissingUEPackageDialog(self, plan, message):
+        """用户主动点击【加载资产】但发布包不可用时给出模态提醒。"""
+        asset_root = os.path.normpath(str((plan or {}).get("asset_root") or ""))
+        release_root = os.path.join(asset_root, "UE") if asset_root else ""
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Warning)
+        box.setWindowTitle(u"加载资产失败")
+        box.setText(str(message or u"没有找到可加载的 UE 发布资产"))
+        detail = (
+            u"请确认资产的 UE 发布目录中至少包含一个完整的 .uasset 或 .umap 主包。\n"
+            u"只有 .uexp、.ubulk 或 .uptnl 等附属文件不能单独加载。"
+        )
+        if release_root:
+            detail += u"\n\n检查路径：{0}".format(release_root)
+        box.setInformativeText(detail)
+        box.setStandardButtons(QtWidgets.QMessageBox.Ok)
+        box.setDefaultButton(QtWidgets.QMessageBox.Ok)
+        box.setEscapeButton(QtWidgets.QMessageBox.Ok)
+        box.exec()
+
+    def _onCopyProgress(self, percent, name):
+        key = self._copy_item_key
+        item = self._findItemByKey(key)
+        if item is not None:
+            item.setUEProgress(percent, u"正在加载：{0}".format(name))
+        self.infoMsg("info", u"加载资产 {0}%：{1}".format(percent, name))
+
+    def _onCopyFinished(self, plan):
+        key = self._copy_item_key
+        item = self._findItemByKey(key)
+        if item is None:
+            return
+        self._registerLoadedPlan(item, plan)
+
+    def _registerLoadedPlan(self, item, plan):
+        try:
+            item.setUEProgress(100, u"正在刷新 UE Asset Registry…")
+            plan = ue_asset_service.refresh_asset_registry(plan)
+            item.setUEState(plan.get("state"), plan.get("message"), plan)
+            if plan.get("state") == "ready":
+                self.infoMsg("info", plan.get("message"))
+            else:
+                self.infoMsg("error", plan.get("message"))
+        except Exception as exc:
+            item.setUEState("error", str(exc), plan)
+            self.infoMsg("error", u"UE 注册资产失败：{0}".format(exc))
+
+    def _onCopyFailed(self, message):
+        key = self._copy_item_key
+        item = self._findItemByKey(key)
+        state = "conflict" if (u"同名不同" in message or u"目标文件" in message) else "error"
+        if item is not None:
+            item.setUEState(state, message)
+        self.infoMsg("error", message)
+
+    def _onCopyThreadFinished(self):
+        self._copy_thread = None
+        self._copy_worker = None
+        self._copy_item_key = ""
+
+    def locateUEAsset(self, item=None):
+        item = item or self.main_listWgt.currentItem()
+        if item is None or not item.ueMainObjectPath():
+            self.infoMsg("warning", u"该资产尚未加载，或没有可定位的主资产")
+            return
+        if not ue_asset_service.sync_to_content_browser(item.ueMainObjectPath()):
+            self.infoMsg("warning", u"内容浏览器无法定位该资产")
+
+    def placeImportedAsset(self, payload):
+        object_path = (payload or {}).get("object_path", "")
+        screen_position = None
+        if "screen_x" in (payload or {}) and "screen_y" in (payload or {}):
+            screen_position = (payload["screen_x"], payload["screen_y"])
+        success, error = ue_asset_service.place_asset_at_cursor(
+            object_path, screen_position=screen_position)
+        if success:
+            self.infoMsg("info", u"已放入关卡：{0}".format(object_path))
+        else:
+            self.infoMsg("warning", error or u"资产未能放入当前关卡")
+
+    def shutdownThreads(self):
+        """主窗口关闭前取消本页 I/O 任务，避免销毁仍在运行的 QThread。"""
+        self._query_generation += 1
+        self._query_tasks.clear()
+        self._startup_task = None
+        self._state_generation += 1
+        jobs = list(self._state_jobs)
+        for thread, worker in jobs:
+            worker.cancel()
+            thread.requestInterruption()
+            thread.quit()
+        if self._copy_worker is not None:
+            self._copy_worker.cancel()
+        if self._copy_thread is not None:
+            self._copy_thread.requestInterruption()
+            self._copy_thread.quit()
+        for thread, _worker in jobs:
+            try:
+                thread.wait(1500)
+            except RuntimeError:
+                pass
+        if self._copy_thread is not None:
+            try:
+                self._copy_thread.wait(3000)
+            except RuntimeError:
+                pass
+
+        # 极慢 NAS 调用可能在等待窗口后仍未返回。把线程/worker 提升到模块级持有，
+        # 直到 finished 再释放，避免关闭窗口时出现 QThread destroyed while running。
+        remaining = list(jobs)
+        if self._copy_thread is not None and self._copy_worker is not None:
+            remaining.append((self._copy_thread, self._copy_worker))
+        for job in remaining:
+            thread, worker = job
+            try:
+                running = thread.isRunning()
+            except RuntimeError:
+                running = False
+            if running and job not in _DRAINING_THREAD_JOBS:
+                _DRAINING_THREAD_JOBS.append(job)
+                thread.finished.connect(partial(_releaseDrainingJob, job))
 
     def getTypeAndProject(self):
         project = self.project_comb.currentText()
@@ -516,8 +969,7 @@ class AssetToolsUI(QtWidgets.QWidget):
             path = None
         else:
             type = str(currentType[0].text())
-            path = '%s/%s/%s/%s' % (self.projectSetting()['rootPath'], project,
-                                    self.projectSetting()['assetFolder'], type)
+            path = '%s/%s/Assets/%s' % (commonSetting()['rootPath'], project, type)
         return type, project, path
 
     def getCurrentData(self):

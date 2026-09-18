@@ -20,7 +20,9 @@ read(path) -> (MeshData, AnimData|None)：
 
 已知简化：
   - 只读二进制 FBX(Maya FBXExport 默认即二进制)；ASCII FBX 不支持。
-  - 旋转按 Maya 默认 XYZ 顺序；暂不处理 PreRotation/PostRotation/旋转轴心。
+  - 会读取 GlobalSettings 的 Up/Front/Coord Axis 与 UnitScaleFactor，并统一转换为
+    Maya 常用的 Y-up / +Z front / +X coord / cm 内部坐标系。
+  - 静态和动画变换会处理 RotationOrder、Pre/PostRotation 与旋转/缩放轴心。
   - 非索引(每三角形 3 个角点)输出 —— 解析快、避免逐角点字典去重的开销(大网格友好)。
   - 假设小端(Windows/Mac x64/ARM 均小端)。
 """
@@ -270,12 +272,104 @@ def _p70(node, name):
     return None
 
 
+# --------------------------------------------------------------------------- FBX 全局轴系
+class AxisSystem(object):
+    """FBX GlobalSettings 轴系，以及转换到本预览器内部坐标系的矩阵。
+
+    FBX 用三个互不重复的轴索引(0=X/1=Y/2=Z)和符号描述 Up、Front、Coord。
+    本预览器固定使用 Maya 常用的 Up=+Y、Front=+Z、Coord=+X；matrix 把源文件
+    坐标转换到这个内部坐标系，并同时把 UnitScaleFactor 归一到厘米。
+    """
+
+    __slots__ = ("up_axis", "up_sign", "front_axis", "front_sign",
+                 "coord_axis", "coord_sign", "unit_scale", "matrix", "valid")
+
+    def __init__(self, up_axis, up_sign, front_axis, front_sign,
+                 coord_axis, coord_sign, unit_scale, matrix, valid=True):
+        self.up_axis = up_axis
+        self.up_sign = up_sign
+        self.front_axis = front_axis
+        self.front_sign = front_sign
+        self.coord_axis = coord_axis
+        self.coord_sign = coord_sign
+        self.unit_scale = unit_scale
+        self.matrix = matrix
+        self.valid = valid
+
+    def describe(self):
+        names = "XYZ"
+
+        def axis_text(axis, sign):
+            return ("+" if sign > 0 else "-") + names[axis]
+
+        return "Up=%s Front=%s Coord=%s Unit=%.6gcm%s" % (
+            axis_text(self.up_axis, self.up_sign),
+            axis_text(self.front_axis, self.front_sign),
+            axis_text(self.coord_axis, self.coord_sign),
+            self.unit_scale,
+            "" if self.valid else " (fallback)",
+        )
+
+
+def _axis_system(root):
+    """读取 FBX GlobalSettings，返回到内部 Y-up 坐标系的转换信息。
+
+    缺少或损坏轴信息时按 Maya FBX 常见默认值处理，因此 Maya 导出的 Y-up 文件
+    得到单位矩阵；例如 Maya/FBX 的 Z-up 文件会得到 (x, y, z)->(x, z, -y)。
+    """
+    gs = root.first("GlobalSettings") if root else None
+
+    def int_prop(name, default):
+        value = _p70(gs, name) if gs else None
+        try:
+            return int(value[0]) if value else default
+        except (TypeError, ValueError, IndexError):
+            return default
+
+    def float_prop(name, default):
+        value = _p70(gs, name) if gs else None
+        try:
+            return float(value[0]) if value else default
+        except (TypeError, ValueError, IndexError):
+            return default
+
+    up_axis = int_prop("UpAxis", 1)
+    up_sign = int_prop("UpAxisSign", 1)
+    front_axis = int_prop("FrontAxis", 2)
+    front_sign = int_prop("FrontAxisSign", 1)
+    coord_axis = int_prop("CoordAxis", 0)
+    coord_sign = int_prop("CoordAxisSign", 1)
+    unit_scale = float_prop("UnitScaleFactor", 1.0)
+
+    axes_valid = {up_axis, front_axis, coord_axis} == {0, 1, 2}
+    signs_valid = all(s in (-1, 1) for s in (up_sign, front_sign, coord_sign))
+    unit_valid = math.isfinite(unit_scale) and unit_scale > 0.0
+    valid = axes_valid and signs_valid and unit_valid
+    if not valid:
+        up_axis, up_sign = 1, 1
+        front_axis, front_sign = 2, 1
+        coord_axis, coord_sign = 0, 1
+        unit_scale = 1.0
+
+    # C * (source_sign * source_axis) = target_role_axis。
+    # target Coord/Up/Front 分别固定为 +X/+Y/+Z。
+    matrix = [0.0] * 16
+    matrix[15] = 1.0
+    for source_axis, source_sign, target_axis in (
+            (coord_axis, coord_sign, 0),
+            (up_axis, up_sign, 1),
+            (front_axis, front_sign, 2)):
+        matrix[target_axis * 4 + source_axis] = float(source_sign) * unit_scale
+
+    return AxisSystem(up_axis, up_sign, front_axis, front_sign,
+                      coord_axis, coord_sign, unit_scale, matrix, valid)
+
+
 # --------------------------------------------------------------------------- 变换装配
 def _model_local(model):
-    t = _p70(model, "Lcl Translation") or [0.0, 0.0, 0.0]
-    r = _p70(model, "Lcl Rotation") or [0.0, 0.0, 0.0]
-    s = _p70(model, "Lcl Scaling") or [1.0, 1.0, 1.0]
-    return _local_matrix(t[:3], (r + [0, 0, 0])[:3], (s + [1, 1, 1])[:3])
+    # 函数定义在文件后部，但模块加载完成后调用时已经可用。统一走完整 FBX 局部
+    # 变换，尤其要保留 UE/Maya 导出器常写在根节点上的 PreRotation。
+    return _full_local(_bone_components(model), *_rest_trs(model))
 
 
 def _geometric(model):
@@ -323,11 +417,12 @@ def _op_connections(root):
     return out
 
 
-def _build_transforms(root):
-    """geometryId -> 世界变换矩阵(含 Geometric);解析不出则空表(全用单位阵)。"""
+def _build_transforms(root, axis_system=None):
+    """geometryId -> 归一到内部轴系的世界矩阵(含 Geometric)。"""
     models, geom_ids, _mat_ids, oo = _scene_ids(root)
+    axis_system = axis_system or _axis_system(root)
     if not models or not oo:
-        return {}
+        return {gid: axis_system.matrix for gid in geom_ids}
 
     geom_to_model, model_parent = {}, {}
     for child, parent in oo:
@@ -358,9 +453,10 @@ def _build_transforms(root):
         try:
             w = model_world(mid, set())
             geo = _geometric(models[mid])
-            out[gid] = _matmul(w, geo) if geo else w
+            w = _matmul(w, geo) if geo else w
+            out[gid] = _matmul(axis_system.matrix, w)
         except Exception:
-            out[gid] = _identity()
+            out[gid] = axis_system.matrix
     return out
 
 
@@ -526,14 +622,17 @@ class Submesh(object):
 
 
 class MeshData(object):
-    __slots__ = ("interleaved", "submeshes", "bbox_min", "bbox_max", "vertex_count")
+    __slots__ = ("interleaved", "submeshes", "bbox_min", "bbox_max", "vertex_count",
+                 "axis_system")
 
-    def __init__(self, interleaved, submeshes, bbox_min, bbox_max, vertex_count):
+    def __init__(self, interleaved, submeshes, bbox_min, bbox_max, vertex_count,
+                 axis_system=None):
         self.interleaved = interleaved   # bytes: [px,py,pz,nx,ny,nz,u,v] * vertex_count (float32)
         self.submeshes = submeshes       # list[Submesh]
         self.bbox_min = bbox_min
         self.bbox_max = bbox_max
         self.vertex_count = vertex_count
+        self.axis_system = axis_system
 
     def center_radius(self):
         cx = (self.bbox_min[0] + self.bbox_max[0]) * 0.5
@@ -705,7 +804,7 @@ def _eval_channel(model, nid, curve_nodes, curves, t, p70name, default):
 
 
 def _norm_bone_name(s):
-    """对象名规范化:去 '\\x00\\x01<类名>' 后缀,再去命名空间 'ns:' 前缀。
+    """对象名规范化:去 '\x00\x01<类名>' 后缀,再去命名空间 'ns:' 前缀。
     用于跨文件(绑定/动作)按骨骼名匹配:动作骨名常带 'BaSiTeV4_hi_rig:' 前缀。"""
     s = str(s)
     if "\x00\x01" in s:
@@ -877,11 +976,12 @@ class SkinData(object):
     __slots__ = ("interleaved", "submeshes", "bbox_min", "bbox_max",
                  "joint_parent", "joint_name", "joint_comp", "joint_trs",
                  "joint_rest_local", "joint_order",
-                 "bone_count", "bone_joint", "bone_invbind")
+                 "bone_count", "bone_joint", "bone_invbind", "axis_system")
 
     def __init__(self, interleaved, submeshes, bbox_min, bbox_max,
                  joint_parent, joint_name, joint_comp, joint_trs,
-                 joint_rest_local, joint_order, bone_count, bone_joint, bone_invbind):
+                 joint_rest_local, joint_order, bone_count, bone_joint, bone_invbind,
+                 axis_system=None):
         self.interleaved = interleaved
         self.submeshes = submeshes
         self.bbox_min = bbox_min
@@ -895,6 +995,7 @@ class SkinData(object):
         self.bone_count = bone_count
         self.bone_joint = bone_joint              # list[int] 调色板骨->关节序号
         self.bone_invbind = bone_invbind          # list[16f] inverse(骨 rest 世界)
+        self.axis_system = axis_system
 
 
 def _topo_order(parent):
@@ -926,6 +1027,7 @@ def _topo_order(parent):
 
 def build_skin(root, objects, path):
     """构建 SkinData(蒙皮网格 + 关节层级)。无 skin 返回 None。"""
+    axis_system = _axis_system(root)
     models, geom_ids, mat_ids, oo = _scene_ids(root)
     if not models:
         return None
@@ -971,9 +1073,10 @@ def build_skin(root, objects, path):
     rest_world = [None] * len(model_ids)
     for j in joint_order:
         p = joint_parent[j]
-        rest_world[j] = joint_rest_local[j] if p < 0 else _matmul(rest_world[p], joint_rest_local[j])
+        rest_world[j] = (_matmul(axis_system.matrix, joint_rest_local[j]) if p < 0
+                         else _matmul(rest_world[p], joint_rest_local[j]))
 
-    xforms = _build_transforms(root)
+    xforms = _build_transforms(root, axis_system)
     geom_mats = _geom_material_lists(root)
     try:
         mat_info = _parse_materials(root, path)
@@ -1158,19 +1261,23 @@ def build_skin(root, objects, path):
          % (placed, len(model_ids), len(bone_joint), len(out) // _AFPV))
     return SkinData(out.tobytes(), submeshes, (min_x, min_y, min_z), (max_x, max_y, max_z),
                     joint_parent, joint_name, joint_comp, joint_trs,
-                    joint_rest_local, joint_order, len(bone_joint), bone_joint, bone_invbind)
+                    joint_rest_local, joint_order, len(bone_joint), bone_joint, bone_invbind,
+                    axis_system)
 
 
 class ActionData(object):
     """动作文件的骨骼动画(与具体绑定无关):按规范化骨名取动画 Lcl T/R/S。"""
-    __slots__ = ("t0", "t1", "fps", "curves", "curve_nodes", "name_channels", "name_node")
+    __slots__ = ("t0", "t1", "fps", "curves", "curve_nodes", "name_channels",
+                 "name_node", "axis_system")
 
-    def __init__(self, t0, t1, fps, curves, curve_nodes, name_channels, name_node):
+    def __init__(self, t0, t1, fps, curves, curve_nodes, name_channels, name_node,
+                 axis_system=None):
         self.t0 = t0; self.t1 = t1; self.fps = fps
         self.curves = curves
         self.curve_nodes = curve_nodes
         self.name_channels = name_channels   # norm_name -> {'T':nid,'R':nid,'S':nid}
         self.name_node = name_node            # norm_name -> 动作 Model 节点(取 P70 默认)
+        self.axis_system = axis_system
 
 
 def build_action(root, objects):
@@ -1200,7 +1307,8 @@ def build_action(root, objects):
             name_node[nm] = node
     if not name_channels:
         return None
-    return ActionData(tr[0], tr[1], tr[2], curves, curve_nodes, name_channels, name_node)
+    return ActionData(tr[0], tr[1], tr[2], curves, curve_nodes, name_channels, name_node,
+                      _axis_system(root))
 
 
 def _action_trs(action, name, t):
@@ -1227,7 +1335,16 @@ def combine(skin, action):
         n_frames = max(2, 200000 // bc)
 
     name_ch = action.name_channels
+    # 动画骨骼优先使用动作文件中的 _bone_components(PreRotation/RotationOrder 等),
+    # 以适配 UE/Maya 跨工具导出时骨骼固定分量可能不同的情况。
+    action_comps = {}
+    for nm in name_ch:
+        act_node = action.name_node.get(nm)
+        if act_node:
+            action_comps[nm] = _bone_components(act_node)
+
     palettes = []
+    action_axis = action.axis_system.matrix if action.axis_system else _identity()
     for f in range(n_frames):
         t = action.t0 + (action.t1 - action.t0) * (f / float(n_frames - 1))
         world = [None] * J
@@ -1235,11 +1352,14 @@ def combine(skin, action):
             nm = skin.joint_name[j]
             if nm in name_ch:
                 tt, rr, ss = _action_trs(action, nm, t)
-                loc = _full_local(skin.joint_comp[j], tt, rr, ss)
+                comp = action_comps.get(nm, skin.joint_comp[j])
+                loc = _full_local(comp, tt, rr, ss)
             else:
                 loc = skin.joint_rest_local[j]
             p = skin.joint_parent[j]
-            world[j] = loc if p < 0 else _matmul(world[p], loc)
+            # FBX 轴系是场景根级变换：只在层级根部应用一次，子节点自然继承。
+            world[j] = (_matmul(action_axis, loc) if p < 0
+                        else _matmul(world[p], loc))
         pal = array.array('f')
         for bp in range(bc):
             m = _matmul(world[skin.bone_joint[bp]], skin.bone_invbind[bp])
@@ -1283,7 +1403,8 @@ def read(path, want_anim=True):
     if not objects:
         raise FbxParseError("no Objects section")
 
-    xforms = _build_transforms(root)
+    axis_system = _axis_system(root)
+    xforms = _build_transforms(root, axis_system)
     try:
         geom_mats = _geom_material_lists(root)
         mat_info = _parse_materials(root, path)
@@ -1435,7 +1556,7 @@ def read(path, want_anim=True):
     total = len(out) // _FPV
     bbox_min = (min_x, min_y, min_z)
     bbox_max = (max_x, max_y, max_z)
-    md = MeshData(out.tobytes(), submeshes, bbox_min, bbox_max, total)
+    md = MeshData(out.tobytes(), submeshes, bbox_min, bbox_max, total, axis_system)
 
     # 尝试动画解析(单文件自带动画):任何异常都吞掉,回退静态(md, None)。
     anim = None

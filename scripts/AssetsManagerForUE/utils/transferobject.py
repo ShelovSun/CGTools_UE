@@ -11,7 +11,7 @@ import locale
 import getpass
 import logging
 
-from my_vendor import six
+from ..my_vendor import six
 
 # from utils import namespace
 import utils

@@ -17,11 +17,11 @@ if venv_path not in sys.path:
 
 from PySide6 import QtUiTools, QtWidgets, QtCore, QtGui
 from functools import partial
-from utils import jsonHelper, assetFunctions, sequenceplayer, sequenceFunctions, imagesequence, myWidget, style
+from ..utils import assetFunctions, sequenceplayer, sequenceFunctions, imagesequence, myWidget, style
+from ..config import commonSetting
 import imp
 
 # imp.reload(sequenceFunctions)
-# imp.reload(jsonHelper)
 imp.reload(assetFunctions)
 
 SYSTEMP = os.environ['TMP'].replace('\\', '/') + '/'
@@ -29,7 +29,6 @@ SYSTEMP = os.environ['TMP'].replace('\\', '/') + '/'
 
 class ShotsManagerUEUI(QtWidgets.QWidget):
     scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/').replace('sources', '')
-    # jsonPath = 'Y:/ACTools/CGTools/scripts/AssetsManagerForMaya'
     stages = ["/ANI/AniFile/", "/ANI/AniFBX/", "/ANI/AniCamera/", "SIM/SimABC"]
 
     def __init__(self):
@@ -56,7 +55,7 @@ class ShotsManagerUEUI(QtWidgets.QWidget):
             self.ui.Project_ComboBox.setCurrentIndex(project)
         else:
             self.ui.Project_ComboBox.setCurrentIndex(0)
-        self.getIdea_CGTeamWork()
+        self.getIdea_path()
         if eps is not None:
             self.ui.ani_idea_listWgt.setCurrentRow(eps)
         else:
@@ -123,66 +122,22 @@ class ShotsManagerUEUI(QtWidgets.QWidget):
         settings.setValue('shot', self.ui.ani_shot_listWgt.currentRow())
         settings.setValue('sort', self.sortReverse)
 
-    def projectSetting(self):
-        data = jsonHelper.readDictFromFile('%s/config/projectSetting.json' % self.scriptsPath)
-        return data
-
-    #
-    # def toolSetting_UI(self):
-    #     Dialog = QtWidgets.QDialog(self)
-    #     Dialog.resize(390, 95)
-    #     Dialog.setWindowTitle(u"Enter Super User Password")
-    #     font = QtGui.QFont()
-    #     font.setFamily(u"Microsoft YaHei UI")
-    #     font.setPointSize(10)
-    #     label = QtWidgets.QLabel(Dialog)
-    #     label.setText(u"*请输入管理员密码以获取修改权限：")
-    #     label.setFont(font)
-    #     label2 = QtWidgets.QLabel(Dialog)
-    #     label2.setText(u"Password")
-    #     label2.setFont(font)
-    #     password_lineEdit = QtWidgets.QLineEdit(Dialog)
-    #     password_lineEdit.setEchoMode(QtWidgets.QLineEdit.Password)
-    #     bttnbox = QtWidgets.QDialogButtonBox(Dialog)
-    #     bttnbox.setOrientation(QtCore.Qt.Horizontal)
-    #     bttnbox.setStandardButtons(QtWidgets.QDialogButtonBox.Cancel | QtWidgets.QDialogButtonBox.Ok)
-    #     lay = QtWidgets.QGridLayout(Dialog)
-    #     lay.setContentsMargins(10, 5, 10, 10)
-    #     lay.addWidget(label, 0, 0, 1, 2)
-    #     lay.addWidget(label2, 1, 0, 1, 1)
-    #     lay.addWidget(password_lineEdit, 1, 1, 1, 1)
-    #     lay.addWidget(bttnbox, 2, 1, 1, 1)
-    #     bttnbox.accepted.connect(self.toolSetting)
-    #     bttnbox.rejected.connect(Dialog.reject)
-    #     Dialog.exec_()
-    #
-    # def toolSetting(self):
-    #     password = self.password_lineEdit.text()
-    #     jsonPath = '%s/config/projectSetting.json' % self.scriptsPath
-    #     if password == "999999":
-    #         if os.path.isfile(jsonPath):
-    #             os.startfile(jsonPath)
-    #         else:
-    #             print(u"没有找到设置文件")
-    #     else:
-    #         QtWidgets.QMessageBox.warning(self, u'提示', u'密码错误')
-
     def getPath(self):
         """
         根据Project设置路径
         """
         RootPath, current_project, current_idea, current_idea_en, current_idea_ch, current_stage, current_shot, current_fbx = self._get_current_data()
-        self.ui.aniPath_label.setText('{0}/{1}/Projects'.format(self.projectSetting()['rootPath'], current_project))
+        self.ui.aniPath_label.setText('{0}/{1}/Projects'.format(RootPath, current_project))
         if current_idea != "":
             self.ui.aniPath_label.setText(
-                '{0}/{1}/Projects/{2}'.format(self.projectSetting()['rootPath'], current_project, current_idea_en))
+                '{0}/{1}/Projects/{2}'.format(RootPath, current_project, current_idea_en))
             if current_stage != "":
-                self.ui.aniPath_label.setText('{0}/{1}/Projects/{2}/{3}'.format(self.projectSetting()['rootPath'],
+                self.ui.aniPath_label.setText('{0}/{1}/Projects/{2}/{3}'.format(RootPath,
                                                                                 current_project, current_idea_en,
                                                                                 current_stage))
                 if current_shot != "":
                     self.ui.aniPath_label.setText(
-                        '{0}/{1}/Projects/{2}/{3}/{4}'.format(self.projectSetting()['rootPath'],
+                        '{0}/{1}/Projects/{2}/{3}/{4}'.format(RootPath,
                                                               current_project, current_idea_en,
                                                               current_stage, current_shot))
 
@@ -190,7 +145,7 @@ class ShotsManagerUEUI(QtWidgets.QWidget):
         """
         得到Project列表，如果有txt则读取上次的Project设置
         """
-        self.ui.Project_ComboBox.addItems(self.projectSetting()['projects'])
+        self.ui.Project_ComboBox.addItems(commonSetting()['DataBase'])
 
     def getIdea_path(self):
         """
@@ -198,10 +153,12 @@ class ShotsManagerUEUI(QtWidgets.QWidget):
         """
         self.ui.ani_idea_listWgt.clear()
         current_project = self.get_current_project()
-        idea_path = '{0}/{1}/{2}'.format(self.projectSetting()['rootPath'], current_project, 'projects')
+        idea_path = '{0}/{1}/{2}'.format(commonSetting()['rootPath'], current_project, 'projects')
         directory = QtCore.QDir(idea_path)
         directory.setNameFilters(['2019*', '2020*', '2021*', '2022*'])
-        for dir in directory.entryList(QtCore.QDir.NoDotAndDotDot ^ QtCore.QDir.AllEntries):
+        idea_dirs = directory.entryList(QtCore.QDir.NoDotAndDotDot ^ QtCore.QDir.AllEntries)
+        idea_dirs.sort(reverse=self.sortReverse)
+        for dir in idea_dirs:
             if dir.find('_') != -1:
                 dir_item = QtWidgets.QListWidgetItem()
                 dir_item.setText(dir.split('_', 1)[1])
@@ -209,31 +166,6 @@ class ShotsManagerUEUI(QtWidgets.QWidget):
                 self.ui.ani_idea_listWgt.addItem(dir_item)
 
         self.ui.ani_idea_listWgt.setCurrentRow(0)
-
-    def getIdea_CGTeamWork(self):
-        """
-        根据CGT和项目获得创意显示
-        """
-        import cgtw2
-        t_tw = cgtw2.tw()
-        current_project = self.ui.Project_ComboBox.currentText()
-        keyword = self.ui.key_line.text()
-        TW_proj = self.projectSetting()['projectdiction'][current_project]
-        t_eps_ids = t_tw.info.get_id(TW_proj, 'chuangyi', [])
-        eps = t_tw.info.get(TW_proj, 'chuangyi', t_eps_ids,
-                            ['chuangyi.creatdate', 'chuangyi.entity', 'chuangyi.chname'])
-        eps_list = []
-        for info in eps:
-            aa = "{0}_{1}".format(info['chuangyi.creatdate'], info['chuangyi.entity']) + '   /   ' + info[
-                'chuangyi.chname']
-            eps_list.append(aa)
-        eps_list.sort(reverse=self.sortReverse)
-        self.ui.ani_idea_listWgt.clear()
-        for i in eps_list:
-            if i.lower().find(keyword.lower()) != -1:
-                item = QtWidgets.QListWidgetItem()
-                item.setText(i)
-                self.ui.ani_idea_listWgt.addItem(item)
 
     def getStage(self):
         self.ui.ani_stages_listWgt.addItems(self.stages)  # 设置阶段显示
@@ -315,7 +247,6 @@ class ShotsManagerUEUI(QtWidgets.QWidget):
     #     得到创意英文名
     #     """
     #     current_project = self.get_current_project()
-    #     TW_proj = self.projectSetting()['projectdiction'][current_project]
     #     t_eps_ids = t_tw.info.get_id(TW_proj, 'chuangyi', [])
     #     TW_dictionInfo = t_tw.info.get(TW_proj, 'chuangyi', t_eps_ids, ['chuangyi.entity', 'chuangyi.chname'])
     #     AA = []
@@ -329,7 +260,6 @@ class ShotsManagerUEUI(QtWidgets.QWidget):
     #     得到创意中英文对照字典
     #     """
     #     current_project = self.get_current_project()
-    #     TW_proj = self.projectSetting()['projectdiction'][current_project]
     #     t_eps_ids = t_tw.info.get_id(TW_proj, 'chuangyi', [])
     #     TW_dictionInfo = t_tw.info.get(TW_proj, 'chuangyi', t_eps_ids, ['chuangyi.entity', 'chuangyi.chname'])
     #     AA = []
@@ -348,8 +278,8 @@ class ShotsManagerUEUI(QtWidgets.QWidget):
         """
         currentProjectIndex = str(self.ui.Project_ComboBox.currentIndex())
         currentProject = str(self.ui.Project_ComboBox.currentText())
-        self.ui.aniPath_label.setText('{0}/{1}/Projects'.format(self.projectSetting()['rootPath'], currentProject))
-        self.getIdea_CGTeamWork()
+        self.ui.aniPath_label.setText('{0}/{1}/Projects'.format(commonSetting()['rootPath'], currentProject))
+        self.getIdea_path()
         self.getShot()
 
     def changeIdeaSort(self):
@@ -359,10 +289,10 @@ class ShotsManagerUEUI(QtWidgets.QWidget):
         """
         if self.sortReverse:
             self.sortReverse = False
-            self.getIdea_CGTeamWork()
+            self.getIdea_path()
         else:
             self.sortReverse = True
-            self.getIdea_CGTeamWork()
+            self.getIdea_path()
         self.rememberSettings()
 
     def changeIdea(self):
@@ -396,7 +326,7 @@ class ShotsManagerUEUI(QtWidgets.QWidget):
         self.getPath()
         # self.ui.ani_shot_listWgt.clear()
         # RootPath, current_project, current_idea, current_idea_en, current_idea_ch, current_stage, current_shot, current_fbx = self._get_current_data()
-        # shot_path = '{0}/{1}/{2}/{3}/{4}'.format(self.projectSetting()['rootPath'], current_project, 'Projects',
+        # shot_path = '{0}/{1}/{2}/{3}/{4}'.format(commonSetting()['rootPath'], current_project, 'Projects',
         #                                          current_idea_en, current_stage)
         # self.ui.aniPath_label.setText(shot_path)
         # directory = QtCore.QDir(shot_path)
@@ -430,7 +360,7 @@ class ShotsManagerUEUI(QtWidgets.QWidget):
         """
         得到面板信息
         """
-        RootPath = self.projectSetting()['rootPath']
+        RootPath = commonSetting()['rootPath']
         current_project = str(self.ui.Project_ComboBox.currentText())
         current_idea = str(self.get_current_idea())
         current_idea_en = current_idea.split('   /   ')[0]
@@ -525,7 +455,7 @@ class ShotsManagerUEUI(QtWidgets.QWidget):
                     item = self.ui.ani_idea_listWgt.item(n)
                     item.setHidden(True)
         else:
-            self.getIdea_CGTeamWork()
+            self.getIdea_path()
 
     def get_ani_path(self):
         current_idea = self.get_current_idea()

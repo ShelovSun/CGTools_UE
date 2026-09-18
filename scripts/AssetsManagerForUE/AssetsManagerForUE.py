@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # <AssetsManager_UE>Created: 19/10/2020 by Sunxh<175702994@qq.com>
-# 主窗已由 .ui + QUiLoader 改为纯 Python 代码搭建；只保留 资产/场景 两个 Tab。
+# 新版主窗：完整保留旧资产/场景页，并增加 UE 最终包和蓝图工具能力。
 
 import os
 import sys
@@ -28,51 +28,86 @@ from PySide6 import QtWidgets, QtCore, QtGui
 if scriptsPath not in sys.path:
     sys.path.append(scriptsPath)
 
-# 4. 导入子模块（只保留 资产 / 场景 两个页）
-from .sources import assetTools, sceneTools
-from .utils import jsonHelper
-from .config import SMConfig
+# 4. 这里只导入轻量配置。资产/场景/蓝图模块在对应 Tab 第一次打开时再导入，
+# 避免点击菜单时把数据库、FBX/OpenGL 预览和所有工具一次性冷加载。
+from .config import SMConfig, commonSettingPath
 
 
 class AssetsManagerUI(QtWidgets.QWidget):
     scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/')
     sm_temp = "{}/ShotManagerTemp".format(os.environ.get('APPDATA'))
     SM_SETTING_JSON = "{}/setting.json".format(sm_temp)
-    VERSION = "3.0.5"
-    jsonPath = 'Y:/ACTools/CGTools/for_Maya/AssetsManagerForMaya'  # 读maya的json
-
+    VERSION = "4.2.3"
     def __init__(self, parent=None):
         super(AssetsManagerUI, self).__init__(parent)
 
         self.setWindowTitle('Assets Manager ' + self.VERSION)
         self.setWindowIcon(QtGui.QIcon('%s/icon/blank_ch.png' % self.scriptsPath))
 
-        try:
-            self.user = self.readLoginSetting()['user']
-            self.password = self.readLoginSetting()['password']
-        except Exception as e:
-            print(e)
-            self.user = SMConfig().getPrefsValue("Info/user", "")
-            self.password = SMConfig().getPrefsValue("Info/password", "")
+        login = self.readLoginSetting()
+        self.user = login.get('user', '')
+        self.password = login.get('password', '')
+        if not self.user or not self.password:
+            # 兼容旧 ShotManager 登录存储，但不再用缺少 key 的异常控制流程，
+            # 避免每次开窗都打印 KeyError('user')。
+            try:
+                prefs = SMConfig()
+                self.user = self.user or prefs.getPrefsValue("Info/user", "")
+                self.password = self.password or prefs.getPrefsValue("Info/password", "")
+            except Exception:
+                pass
 
         self.isSQL = True
         self.tempPath = "{}/AssetsManagerIconTemp".format(os.environ.get('TEMP'))
+        self._prepareOpenGLSurface()
         self.build_ui()
 
+    def _prepareOpenGLSurface(self):
+        """在顶层窗口首次 show 前建立一个极小的 OpenGL 子控件。
+
+        Qt 在已经显示的普通 QWidget 树中第一次动态加入 QOpenGLWidget 时，
+        可能把顶层窗口从 RasterSurface 切成 OpenGLSurface，并销毁/重建原生
+        HWND。这个 HWND 已经被 UE Slate 托管，所以用户会看到主窗口消失后
+        再出现。保留这个 1x1、位于其他控件下方的 guard，可让 surface 类型
+        在 Slate 托管之前一次确定；真实 FBX 预览仍然保持按需创建。
+        """
+        self._gl_surface_guard = None
+        try:
+            from PySide6.QtOpenGLWidgets import QOpenGLWidget
+
+            guard = QOpenGLWidget(self)
+            guard.setObjectName("AssetsManagerOpenGLSurfaceGuard")
+            guard.setFixedSize(1, 1)
+            guard.move(0, 0)
+            guard.setFocusPolicy(QtCore.Qt.NoFocus)
+            guard.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+            # 此时父窗口尚未显示；显式 show 只负责提前传播 texture-child 状态。
+            guard.show()
+            guard.lower()
+            self._gl_surface_guard = guard
+        except Exception:
+            # 没有 QtOpenGLWidgets 时，FBX 预览器本身也会走图片回退，不阻止主窗。
+            pass
+
     def build_ui(self):
-        """纯代码搭建主窗：一个 QTabWidget，含 资产/场景 两个懒加载页 + 右上角登录/设置角标。"""
+        """纯代码搭建主窗：资产/场景/蓝图/组件四个懒加载页。"""
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(1, 3, 1, 1)
 
         self.tabWidget = QtWidgets.QTabWidget()
         root.addWidget(self.tabWidget)
 
-        self.asset_page = QtWidgets.QWidget()
-        QtWidgets.QVBoxLayout(self.asset_page).setContentsMargins(0, 0, 0, 0)
-        self.scene_page = QtWidgets.QWidget()
-        QtWidgets.QVBoxLayout(self.scene_page).setContentsMargins(0, 0, 0, 0)
+        self._tab_initialized = set()
+        self._tab_build_pending = set()
+        self._startup_load_enabled = False
+        self.asset_page = self._createLazyPage(u"正在准备资产工具…")
+        self.scene_page = self._createLazyPage(u"正在准备场景工具…")
+        self.blueprint_page = self._createLazyPage(u"正在准备蓝图工具…")
+        self.component_page = self._createLazyPage(u"正在准备组件工具…")
         self.tabWidget.addTab(self.asset_page, u"资产")
         self.tabWidget.addTab(self.scene_page, u"场景")
+        self.tabWidget.addTab(self.blueprint_page, u"蓝图")
+        self.tabWidget.addTab(self.component_page, u"组件")
 
         '''风格外观 / 记忆的窗口位置大小与上次 tab'''
         pos, size, tab = self.readSettings()
@@ -83,7 +118,7 @@ class AssetsManagerUI(QtWidgets.QWidget):
             self.resize(950, 600)
             self.move(2000, 120)
         tab = int(tab) if tab is not None else 0
-        if tab not in (0, 1):
+        if tab not in (0, 1, 2, 3):
             tab = 0
         self.getStyleSheet()
 
@@ -107,7 +142,24 @@ class AssetsManagerUI(QtWidgets.QWidget):
 
         self.tabWidget.currentChanged.connect(self.tabChange)
         self.tabWidget.setCurrentIndex(tab)
-        self.tabChange()  # 幂等：确保当前 tab 内容已构建（currentIndex 未变时 currentChanged 不会触发）
+
+    @staticmethod
+    def _createLazyPage(message):
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        label = QtWidgets.QLabel(message)
+        label.setAlignment(QtCore.Qt.AlignCenter)
+        label.setStyleSheet("color:#9b9b9b; font-size:14px;")
+        layout.addWidget(label)
+        return page
+
+    def beginDeferredLoad(self):
+        """窗口完成 show/Slate 挂接后再启动当前页，保证菜单点击能先看到窗口。"""
+        if self._startup_load_enabled:
+            return
+        self._startup_load_enabled = True
+        QtCore.QTimer.singleShot(80, self.tabChange)
 
     def readLoginSetting(self):
         """ """
@@ -148,7 +200,8 @@ class AssetsManagerUI(QtWidgets.QWidget):
 
     def _stop_child_threads(self):
         """停止各 tab 子界面持有的 QThread（MyThread 等），让旧窗口能被回收。"""
-        for page in (self.asset_page, self.scene_page):
+        for page in (self.asset_page, self.scene_page, self.blueprint_page,
+                     self.component_page):
             layout = page.layout() if page is not None else None
             if layout is None:
                 continue
@@ -156,6 +209,12 @@ class AssetsManagerUI(QtWidgets.QWidget):
                 w = layout.itemAt(i).widget()
                 if w is None:
                     continue
+                shutdown = getattr(w, "shutdownThreads", None)
+                if callable(shutdown):
+                    try:
+                        shutdown()
+                    except Exception:
+                        pass
                 for v in list(vars(w).values()):
                     if isinstance(v, QtCore.QThread):
                         try:
@@ -166,21 +225,56 @@ class AssetsManagerUI(QtWidgets.QWidget):
 
     def tabChange(self):
         """
-        切换tab（懒加载：首次进入才构建该页的工具界面）
+        切换 tab：先让占位页有机会绘制，再异步调度首次模块导入和界面构建。
         """
+        if not self._startup_load_enabled:
+            return
         idx = self.tabWidget.currentIndex()
-        if idx == 0 and self.asset_page.layout().count() == 0:
-            self.asset_page.layout().addWidget(assetTools.AssetToolsUI(self.isSQL,
-                                                                       user=self.user,
-                                                                       password=self.password))
-        elif idx == 1 and self.scene_page.layout().count() == 0:
-            self.scene_page.layout().addWidget(sceneTools.SceneToolsUI(self.isSQL,
-                                                                       user=self.user,
-                                                                       password=self.password))
+        if idx in self._tab_initialized or idx in self._tab_build_pending:
+            return
+        self._tab_build_pending.add(idx)
+        QtCore.QTimer.singleShot(20, lambda index=idx: self._buildLazyTab(index))
 
-    def projectSetting(self):
-        data = jsonHelper.readDictFromFile('%s/config/projectSetting.json' % self.jsonPath)
-        return data
+    def _buildLazyTab(self, idx):
+        if idx in self._tab_initialized:
+            self._tab_build_pending.discard(idx)
+            return
+        pages = (self.asset_page, self.scene_page, self.blueprint_page,
+                 self.component_page)
+        if idx not in range(len(pages)):
+            self._tab_build_pending.discard(idx)
+            return
+        page = pages[idx]
+        layout = page.layout()
+        try:
+            if idx == 0:
+                from .sources import assetTools
+                widget = assetTools.AssetToolsUI(
+                    self.isSQL, user=self.user, password=self.password)
+            elif idx == 1:
+                from .sources import sceneTools
+                widget = sceneTools.SceneToolsUI(
+                    self.isSQL, user=self.user, password=self.password)
+            elif idx == 2:
+                from .sources import blueprintTools
+                widget = blueprintTools.BlueprintToolsUI()
+            else:
+                from .sources import componentTools
+                widget = componentTools.ComponentToolsUI()
+
+            while layout.count():
+                old = layout.takeAt(0).widget()
+                if old is not None:
+                    old.deleteLater()
+            layout.addWidget(widget)
+            self._tab_initialized.add(idx)
+        except Exception as exc:
+            label = layout.itemAt(0).widget() if layout.count() else None
+            if isinstance(label, QtWidgets.QLabel):
+                label.setText(u"工具加载失败：{0}".format(exc))
+            raise
+        finally:
+            self._tab_build_pending.discard(idx)
 
     def toolSetting_UI(self):
         Dialog = QtWidgets.QDialog(self)
@@ -212,7 +306,7 @@ class AssetsManagerUI(QtWidgets.QWidget):
 
     def toolSetting(self):
         password = self.password_lineEdit.text()
-        jsonPath = '%s/config/projectSetting.json' % self.scriptsPath
+        jsonPath = commonSettingPath()
         if password == "999999":
             if os.path.isfile(jsonPath):
                 os.startfile(jsonPath)
@@ -245,4 +339,13 @@ def showWindow():
     win.setAttribute(QtCore.Qt.WA_DeleteOnClose)
 
     import ue_qt_host
-    ue_qt_host.host_window(win, app=QtWidgets.QApplication.instance())
+    app = QtWidgets.QApplication.instance()
+    if getattr(ue_qt_host, "_IN_UNREAL", False):
+        # 先创建 HWND 并挂到 Slate，再在第一次 Qt processEvents 中启动延迟计时。
+        # beginDeferredLoad 内还会等待 80ms，因此首轮事件只负责真正绘制窗口壳。
+        ue_qt_host.host_window(win, app=app)
+        QtCore.QTimer.singleShot(0, win.beginDeferredLoad)
+    else:
+        # 独立环境的 host_window 会进入阻塞式 Qt exec()，必须预先安排定时器。
+        win.beginDeferredLoad()
+        ue_qt_host.host_window(win, app=app)

@@ -4,7 +4,8 @@
 asset_backend —— 资产 tab 的「无 Qt」后端数据/动作层，供原生 EUW（经 euw_bridge）调用。
 
 它把 sources/assetTools.py 里和 UI 无关的逻辑抽出来用纯函数实现，便于原生界面复用：
-    - 项目/类型列表   <- projectSetting.json（与 Qt 版同源）
+    - 项目列表        <- commonSetting.json 的 DataBase（与其它 ShotManager 软件同源）
+    - 类型列表        <- commonSetting.json 的 type
     - 资产列表        <- PostgreSQL（与 assetTools.get_database 同一条 SQL）
     - 导入            <- 忠实复刻 assetTools.AssetToolsUI.importFile 的核心（无 Qt）
 
@@ -26,7 +27,6 @@ if os.path.isdir(_VENV) and _VENV not in sys.path:
     sys.path.insert(0, _VENV)
 
 # 与 assetTools.py 保持一致的常量
-_JSON_PATH = 'Y:/ACTools/CGTools/scripts/AssetsManagerForMaya'   # projectSetting.json 所在
 _DB_HOST = '10.0.203.34'
 _DB_PORT = '5432'
 
@@ -34,17 +34,14 @@ _DB_PORT = '5432'
 # --------------------------------------------------------------------------- #
 # 配置 / 登录
 # --------------------------------------------------------------------------- #
-def project_setting():
-    from utils import jsonHelper
-    return jsonHelper.readDictFromFile('%s/config/projectSetting.json' % _JSON_PATH)
-
-
 def get_projects():
-    return [str(p) for p in project_setting().get('projects', [])]
+    from ..config import commonSetting
+    return [str(project) for project in commonSetting().get('DataBase', [])]
 
 
 def get_types():
-    return [str(t) for t in project_setting().get('type', [])]
+    from ..config import commonSetting
+    return [str(asset_type) for asset_type in commonSetting().get('type', [])]
 
 
 def _login():
@@ -60,9 +57,9 @@ def _login():
             pass
     # 兜底：SMConfig
     try:
-        from config import SMConfig
-        return (SMConfig.SMConfig().getPrefsValue("Info/user", ""),
-                SMConfig.SMConfig().getPrefsValue("Info/password", ""))
+        from ..config import SMConfig
+        return (SMConfig().getPrefsValue("Info/user", ""),
+                SMConfig().getPrefsValue("Info/password", ""))
     except Exception:
         return '', ''
 
@@ -135,7 +132,7 @@ def open_asset_dir(project, asset_type, name):
 def import_asset(project, asset_type, name):
     """把选中资产的骨骼网格 FBX 导入 UE，返回状态串。"""
     import unreal
-    from utils import assetFunctions
+    from ..utils import assetFunctions
 
     r = _find_asset(project, asset_type, name)
     if not r or not r['folder']:

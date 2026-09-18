@@ -8,6 +8,7 @@ import configparser
 from PySide6 import QtCore
 
 scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/')
+_COMMON_SETTING_CACHE = None
 
 
 def am_Temp():
@@ -28,24 +29,40 @@ def sm_Temp():
 
 
 def serverTempPath():
-    return 'Y:/ACTools/tools/sm_config'
+    # 唯一通用配置源：不要再回退到包内 projectSetting.json/commonSetting.py。
+    return r'Y:\MCCTools\config\ShotManager_config'
 
 
-def projectSetting():
-    Json = '%s/projectSetting.json' % scriptsPath
+def commonSettingPath():
+    return os.path.join(serverTempPath(), 'commonSetting.json')
+
+
+def commonSetting():
+    """读取 ShotManager 通用配置。"""
+    global _COMMON_SETTING_CACHE
+    if _COMMON_SETTING_CACHE is not None:
+        return _COMMON_SETTING_CACHE
+
+    Json = commonSettingPath()
     if os.path.exists(Json):
-        f = open(Json, 'rb')
-        data = f.read()
-        f.close()
         try:
-            decode_json = json.loads(data)
-            return decode_json
+            with open(Json, 'rb') as f:
+                data = json.loads(f.read())
+            if not isinstance(data, dict):
+                raise TypeError('common setting is not a dict: %s' % Json)
+
+            required_keys = ('DataBase', 'rootPath', 'type')
+            missing_keys = [key for key in required_keys if key not in data]
+            if missing_keys:
+                raise KeyError('common setting is missing %s: %s' %
+                               (', '.join(missing_keys), Json))
+
+            _COMMON_SETTING_CACHE = data
+            return _COMMON_SETTING_CACHE
         except Exception as e:
-            print('read %s data file error:%s!' % (Json, e))
-            return None
+            raise RuntimeError('Can not read common setting %s: %s' % (Json, e)) from e
     else:
-        print("there is not %s" % Json)
-        return None
+        raise FileNotFoundError('Common setting does not exist: %s' % Json)
 
 
 class SMConfig(object):

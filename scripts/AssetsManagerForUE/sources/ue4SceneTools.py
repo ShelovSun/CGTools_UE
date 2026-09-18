@@ -8,7 +8,7 @@
 import os, sys, unreal, subprocess
 from PySide6 import QtWidgets, QtUiTools, QtCore, QtGui
 from functools import partial
-from utils import jsonHelper, exportFunctions
+from ..utils import exportFunctions
 from imp import reload
 # reload(exportFunctions)
 WINDOW_NAME = 'UE4 Scene Tools'
@@ -49,11 +49,6 @@ class UE4SceneToolsUI(QtWidgets.QWidget):
         settings = QtCore.QSettings('ue4Scene_Tools', 'ue4Scene_Tools_Settings')
         settings.setValue('pos', self.pos())
         settings.setValue('size', self.size())
-
-    def projectSetting(self):
-        scriptsPath = self.scriptsPath.replace('ui', 'config')
-        data = jsonHelper.readDictFromFile('%s/projectSetting.json' % scriptsPath)
-        return data
 
     def getStyleSheet(self):
         scriptsPath = self.scriptsPath.replace('ui', 'qss')

@@ -19,7 +19,8 @@ if venv_path not in sys.path:
     sys.path.insert(0, venv_path)
 
 sys.path.append(scriptsPath.replace('sources', ''))
-from utils import jsonHelper, exportFunctions, assetFunctions, messageBox, myWidget, addItems
+from ..utils import exportFunctions, assetFunctions, messageBox, myWidget
+from ..config import commonSetting
 from PySide6 import QtWidgets, QtCore, QtGui
 
 
@@ -44,6 +45,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         # 同步搭建界面（纯代码，无 I/O）→ 窗口一显示即最终布局，不闪。
         self.build_ui()
         self.firstView()
+        self.viewThumbnail()
         # 数据加载(DB 查询)延迟到窗口显示后
         self.init_ui_thread = myWidget.MyThread()
         self.init_ui_thread.signal.connect(lambda: self.listWidgetAddItems(self.getItemsFromSQL()))
@@ -102,8 +104,6 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         self.scene_itemSize_Slider.setValue(120)
         self.scene_itemSize_Slider.setMaximumWidth(250)
         tool.addWidget(self.scene_itemSize_Slider)
-        self.scene_download_Bttn = self._toolBtn('download.png', u"下载资产到本地")
-        tool.addWidget(self.scene_download_Bttn)
         self.scene_refresh_Bttn = self._toolBtn('refresh.png', u"刷新")
         tool.addWidget(self.scene_refresh_Bttn)
         tool.addStretch(1)
@@ -116,6 +116,20 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         tool.addWidget(self.scene_key_line)
         centerV.addLayout(tool)
         self.main_listWgt = myWidget.MainQListWiget()
+        self.main_listWgt.setSortingEnabled(False)
+        self.main_listWgt.setListColumns(
+            (u"创建日期", u"场景名", u"中文名", u"制作人", u"状态", u"备注"),
+            (0, 1, 2, 3, 4, 8),
+            (90, 190, 120, 100, 90, 260),
+            (None, None, None, None, None, "note"),
+            ("center", "left", "left", "center", "center", "left"),
+        )
+        self.scene_list_header = myWidget.AssetListHeader(self.main_listWgt)
+        self.scene_list_header.setClickable(False)
+        self.scene_list_header.setSortIndicator(-1, False)
+        self.scene_list_header.hide()
+        self.main_listWgt.setListHeader(self.scene_list_header)
+        centerV.addWidget(self.scene_list_header)
         centerV.addWidget(self.main_listWgt, 1)
         self.main_splitter.addWidget(center)
 
@@ -188,7 +202,6 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         self.scene_displayThumb_bttn.clicked.connect(self.viewThumbnailChange)
         self.scene_itemSize_Slider.valueChanged.connect(self.setItemSize)
         self.scene_itemSize_Slider.sliderReleased.connect(self.rememberSettings)
-        self.scene_download_Bttn.clicked.connect(self.download_CGTicon_to_localTemp)
         self.scene_refresh_Bttn.clicked.connect(self.update_asset)
         self.scene_key_line.returnPressed.connect(self.sc_search)
         self.main_listWgt.itemSelectionChanged.connect(self.mainWightItemChanged)
@@ -196,11 +209,6 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         self.main_listWgt.customContextMenuRequested.connect(self.show_menu)
         self.exportScenePath_bttn.clicked.connect(self.getSceneExportPath)
         self.exportScene_bttn.clicked.connect(self.exportScene)
-
-    def projectSetting(self):
-        jsonPath = 'Y:/ACTools/CGTools/scripts/AssetsManagerForMaya'
-        data = jsonHelper.readDictFromFile('%s/config/projectSetting.json' % jsonPath)
-        return data
 
     def rememberSettings(self):
         """ 记忆窗口设置 """
@@ -250,13 +258,13 @@ class SceneToolsUI(QtWidgets.QMainWindow):
     def get_proj(self):
         # print("update_project")
         self.proj_comb.clear()
-        self.proj_comb.addItems(self.projectSetting()['projects'])
+        self.proj_comb.addItems(commonSetting()['DataBase'])
 
     def get_typ(self):
         # print("update_type")
         self.type_listWgt.clear()
         project = self.proj_comb.currentText()
-        pj_path = '{0}/{1}/{2}'.format(self.projectSetting()['rootPath'], project, 'Scenes')
+        pj_path = '{0}/{1}/{2}'.format(commonSetting()['rootPath'], project, 'Scenes')
         directory = QtCore.QDir(pj_path)
         type_list = directory.entryList(QtCore.QDir.NoDotAndDotDot | QtCore.QDir.AllEntries,
                                         QtCore.QDir.DirsFirst | QtCore.QDir.IgnoreCase)
@@ -339,10 +347,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         __project = str(self.proj_comb.currentText())
         # print(self.type_listWgt.selectedItems())
         __type = str(self.type_listWgt.selectedItems()[0].text())
-        __path = '%s/%s/%s/%s' % (self.projectSetting()['rootPath'],
-                                  __project,
-                                  self.projectSetting()['scenesFolder'],
-                                  __type)
+        __path = '%s/%s/Scenes/%s' % (commonSetting()['rootPath'], __project, __type)
         return __project, __type, __path
 
     def update_asset_int(self, modPath):
@@ -361,40 +366,19 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         if self.scene_isList:
             self.scene_displayThumb_bttn.setIcon(QtGui.QIcon('%s/icon/display_icon.png' % self.scriptsPath))
             self.scene_displayThumb_bttn.setToolTip("缩略图显示")
-            self.main_listWgt.setIconSize(QtCore.QSize(20, 20))
-            self.main_listWgt.setViewMode(QtWidgets.QListView.ListMode)
-            self.main_listWgt.setGridSize(QtCore.QSize(2000, 25))
-            self.main_listWgt.setSpacing(1)
         else:
             self.scene_displayThumb_bttn.setIcon(QtGui.QIcon('%s/icon/display_list.png' % self.scriptsPath))
             self.scene_displayThumb_bttn.setToolTip("表单显示")
-            self.main_listWgt.setIconSize(QtCore.QSize(itemSize, itemSize))
-            self.main_listWgt.setViewMode(QtWidgets.QListView.IconMode)
-            self.main_listWgt.setGridSize(QtCore.QSize(itemSize + 2, itemSize + 40))
-            self.main_listWgt.setSpacing(1)
+        self.main_listWgt.setIsList(self.scene_isList)
+        self.main_listWgt.setItemSize(itemSize)
+        self.main_listWgt.setMode()
+        self.scene_list_header.setVisible(self.scene_isList)
 
     def viewThumbnailChange(self):
         """切换  缩略图/表单  显示"""
-        itemSize = self.scene_itemSize_Slider.value()
-        if self.scene_isList:
-            self.scene_displayThumb_bttn.setIcon(QtGui.QIcon('%s/icon/display_list.png' % self.scriptsPath))
-            self.scene_displayThumb_bttn.setToolTip("表单显示")
-            self.main_listWgt.setIconSize(QtCore.QSize(itemSize, itemSize))
-            self.main_listWgt.setViewMode(QtWidgets.QListView.IconMode)
-            self.main_listWgt.setGridSize(QtCore.QSize(itemSize + 2, itemSize + 40))
-            self.main_listWgt.setSpacing(1)
-            self.update_asset()
-            self.scene_isList = False
-        else:
-            self.scene_displayThumb_bttn.setIcon(QtGui.QIcon('%s/icon/display_icon.png' % self.scriptsPath))
-            self.scene_displayThumb_bttn.setToolTip("缩略图显示")
-            self.main_listWgt.setIconSize(QtCore.QSize(20, 20))
-            self.main_listWgt.setViewMode(QtWidgets.QListView.ListMode)
-            self.main_listWgt.setGridSize(QtCore.QSize(2000, 25))
-            # self.main_listWgt.setStyleSheet("QListWidget:item{border: 1px solid #ffaa00};")
-            self.main_listWgt.setSpacing(1)
-            self.update_asset()
-            self.scene_isList = True
+        self.scene_isList = not self.scene_isList
+        self.viewThumbnail()
+        self.update_asset()
         self.rememberSettings()
 
     def setItemSize(self):
@@ -405,34 +389,6 @@ class SceneToolsUI(QtWidgets.QMainWindow):
             # self.projectChange()
             self.main_listWgt.setIconSize(QtCore.QSize(itemSize, itemSize))
             self.main_listWgt.setGridSize(QtCore.QSize(itemSize + 2, itemSize + 40))
-
-    def download_CGTicon_to_localTemp(self):
-        """
-        下载CGT的icon到本地
-        """
-        import cgtw2
-        t_tw = cgtw2.tw()
-        project, type, path = self.getPanelsData()
-        TW_proj = self.projectSetting()['projectdiction'][project]
-        t_asset_ids = t_tw.info.get_id(TW_proj, 'asset',
-                                       [['asset.maya', '=', u"完成"], 'and', ['asset.assetstapy', '=', type]])
-        TW_dictionInfo = t_tw.info.get(TW_proj, 'asset', t_asset_ids, ['asset.entity', 'asset.image', 'asset.cn_name'])
-        for id in TW_dictionInfo:
-            ids = [id['id']]
-            localPath = "{0}/{1}/Assets/{2}".format(self.tempPath, project, type)
-            if not os.path.exists(localPath):
-                os.makedirs(localPath)
-            try:
-                downloadInfo = t_tw.info.download_image(TW_proj, 'asset', ids, 'asset.image', is_small=False,
-                                                        local_dir=localPath)
-                rename = downloadInfo[0]['asset.image'][0].rsplit("/", 1)[0] + "/" + id['asset.entity'] + ".png"
-                if os.path.exists(rename):
-                    print(u"%s已经存在！" % rename)
-                else:
-                    os.rename(downloadInfo[0]['asset.image'][0], rename)
-            except:
-                print(u"下载%s失败！" % id['asset.entity'])
-        self.listWidgetAddItems_CGT(self.main_listWgt, project, type, keyWords="")
 
     def update_asset(self):
         """
@@ -449,30 +405,15 @@ class SceneToolsUI(QtWidgets.QMainWindow):
 
     def getItemsDict(self):
         """
-        从CGTW获取字典
+        从 PostgreSQL 获取场景数据。
         :return:{role_name:{'role_name': xx,
                         'project': xx,
                         'type': xx,
                         'zh_name': xx,
                         'icon_path': xx}}
         """
-        # __items_dict = {}
-        # __tab = "Scenes"
-        # __project, __type, __path = self.getPanelsData()
-        # print(__project, __type, __path)
-        # _projects = self.projectSetting()['projects']
-        # _types = self.get_typ()
-
         if self.isSQL:
             __items_dict = self.getItemsFromSQL()
-            # if not self.searchAll_cBox.isChecked():
-            #     __items_dict = addItems.getItemsDictFromCGTW(__tab, __project, __type)
-            # else:
-            #     for pj in _projects:
-            #         for ty in _types:
-            #             __items_dict.update(addItems.getItemsDictFromCGTW(__tab, pj, ty))
-        # else:
-        #     __items_dict = addItems.getItemsDictFromPath(__tab, __project, __type)
         return __items_dict
 
     def getItemsFromSQL(self):
@@ -487,7 +428,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         cur = None
         get_script = ''' 
                  SELECT "scene.date", "scene.name", "scene.zh_name", "scene.artist", "scene.status", 
-                 "scene.artist", "scene.status", "scene.icon" 
+                 "scene.artist", "scene.status", "scene.icon", "scene.note"
                  FROM public."scene"
                  WHERE
                  "scene.type" = '%s';
@@ -510,7 +451,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
 
     def listWidgetAddItems(self, new_dict=None):
         """
-        根据type，project，读取CGT资产数据库，设置主面板item显示
+        根据 type、project 显示 PostgreSQL 场景数据。
         """
         # print("listWidgetAddItems Scene", dict)
         listWgt = self.main_listWgt
@@ -527,6 +468,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         listWgt.setItemSize(self.scene_itemSize_Slider.value())
         listWgt.addItems(keyWords)
         listWgt.setMode()
+        self.scene_list_header.setVisible(is_list)
         end_time = time.time()
 
         self.infoMsg("info", 'Load Completed !  ' +
@@ -540,14 +482,19 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         currentSelected = self.main_listWgt.selectedItems()
         if currentSelected:
             item_data = currentSelected[0].itemData()
-            modPath = '{0}/{1}/Scenes/{2}/{3}/Mod'.format(self.projectSetting()['rootPath'], item_data['project'],
-                                                          item_data['type'], item_data['role_name'])
+            project, scene_type, unused_path = self.getPanelsData()
+            del unused_path
+            scene_name = str(item_data[1])
+            zh_name = "" if item_data[2] is None else str(item_data[2])
+            modPath = '{0}/{1}/Scenes/{2}/{3}/Mod'.format(
+                commonSetting()['rootPath'], project, scene_type, scene_name)
             '''根据item_data设置预览窗口显示'''
             self.Preview_label.clear()
-            self.Preview_label.setPreviewPixmap(item_data['icon_path'])
+            self.Preview_label.setPreviewPixmap(item_data[7])
 
             self.scene_title_label.clear()
-            self.scene_title_label.setText(u"Name：  " + item_data["role_name"] + u"\n中文名： " + item_data["zh_name"])
+            self.scene_title_label.setText(
+                u"Name：  " + scene_name + u"\n中文名： " + zh_name)
 
             self.update_asset_int(modPath)
 
@@ -558,9 +505,9 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         currentItem = self.main_listWgt.itemAt(point)
         if currentItem is not None:
             menu = QtWidgets.QMenu(self.main_listWgt)
-            show_action = QtGui.QAction('Show in Explorer', self)
+            show_action = QtGui.QAction('打开文件夹', self)
             show_action.setIcon(QtGui.QIcon("{}/icon/folder_white.png".format(self.scriptsPath)))
-            imp_action = QtGui.QAction('Import', self)
+            imp_action = QtGui.QAction('导入', self)
 
             menu.addAction(show_action)
             menu.addSeparator()
@@ -578,7 +525,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         except:
             self.infoMsg('warning', 'Please select Character!!!')
             return
-        mod_file_path = '%s/%s/Scenes/%s' % (self.projectSetting()['rootPath'], currentProject, currentType)
+        mod_file_path = '%s/%s/Scenes/%s' % (commonSetting()['rootPath'], currentProject, currentType)
         folder_path = os.path.dirname(mod_file_path)
         folder_info = QtCore.QFileInfo(folder_path)
         if folder_info.exists():
@@ -638,80 +585,6 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         搜索
         """
         self.listWidgetAddItems()
-        # project, type, path = self.getPanelsData()
-        # self.main_listWgt.clear()
-        # keyWords = self.scene_key_line.text().lower()
-        # if not self.scene_searchAll_cBox.isChecked():
-        #     self.listWidgetAddItems_CGT(project, type)
-        # else:
-        #     for i in self.projectSetting()['projects']:
-        #         self.listWidgetAddItems_CGT(i, type)
-
-    def listWidgetAddItems_CGT(self, project, type):
-        """
-        根据type，project，读取CGT资产数据库，icon优先读取本地数据（快速），设置主面板item显示
-        """
-        import cgtw2
-        t_tw = cgtw2.tw()
-        keyWords = self.scene_key_line.text()
-        self.main_listWgt.clear()
-        self.Preview_label.clear()
-        path = '{0}/{1}/{2}/{3}'.format(self.projectSetting()['rootPath'], project,
-                                        self.projectSetting()['scenesFolder'], type)
-        TW_proj = self.projectSetting()['projectdiction'][project]
-        t_asset_ids = t_tw.info.get_id(TW_proj, 'scenes',
-                                       [['scenes.maya', '=', u"完成"], 'and', ['scenes.scenesassetstype', '=', type]])
-        TW_dictionInfo = t_tw.info.get(TW_proj, 'scenes', t_asset_ids, ['scenes.entity', 'scenes.assetsnamecn'])
-        currentTypeItem = self.type_listWgt.currentItem()
-        if currentTypeItem:
-            for info in TW_dictionInfo:
-                item = QtWidgets.QListWidgetItem()
-                type_path = currentTypeItem.data(self.type_item_userRole)
-                icon_path = '{0}/{1}/Icon/{1}.png'.format(type_path, info['scenes.entity'])
-                asset_info = {'role_name': info['scenes.entity'], 'project': project, 'type': type}
-                starttime = time.time()
-                if info['scenes.entity'].lower().find(keyWords.lower()) != -1 or info['scenes.assetsnamecn'].find(
-                        keyWords) != -1:
-                    item.setData(self.asset_item_userRole, asset_info)
-                    if self.scene_isList:
-                        item.setText(info['scenes.entity'] + '   /   ' + info['scenes.assetsnamecn'])
-                    else:
-                        itemSize = self.scene_itemSize_Slider.value()
-                        if not QtCore.QFileInfo(icon_path).exists():
-                            icon_path = self.projectSetting()['defaultIcon']
-                        item.setText(info['scenes.entity'] + '\n' + info['scenes.assetsnamecn'])
-                        item.setIcon(QtGui.QIcon(QtGui.QPixmap(icon_path)))
-                        self.main_listWgt.setIconSize(QtCore.QSize(itemSize, itemSize))
-                        item.setTextAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom)
-                    self.main_listWgt.addItem(item)
-            endtime = time.time()
-            self.msg_icon_label.setPixmap(QtGui.QPixmap("%s/icon/info.png" % self.scriptsPath))
-            self.msg_label.setText('Completed !  ' + '   Path :  ' + path + '        Total :  ' + str(
-                self.main_listWgt.count()) + '        Cost :  ' + str(endtime - starttime) + ' sec')
-            self.viewThumbnail()
-
-    def addItems_CGT(self, role_name, icon_path, ch_name):
-        # item_data = self.itemDetail(role_name)
-        itemSize = self.scene_itemSize_Slider.value()
-        item = QtWidgets.QListWidgetItem()
-        item.setText(role_name + '   /   ' + ch_name)  # 设置文字
-
-        type_path = self.type_listWgt.currentItem().data(self.type_item_userRole)
-        assembly_file_path = '{0}/{1}/{2}/{1}_AD.ma'.format(type_path, role_name, 'Assembly')
-        icon_file_path = '{0}/{1}/{2}/{1}.png'.format(type_path, role_name, 'Icon')
-        mod_file_path = '{0}/{1}/{2}/{1}_mod.ma'.format(type_path, role_name, 'Mod')
-        asset_info = {'role_name': role_name, 'Assembly': assembly_file_path, 'Icon': icon_file_path,
-                      'Mod': mod_file_path}
-        item.setData(self.asset_item_userRole, asset_info)  # 记录信息
-
-        icon = QtGui.QIcon()
-        pixmap = QtGui.QPixmap(icon_path)  # 设置icon
-        icon.addPixmap(pixmap, QtGui.QIcon.Normal, QtGui.QIcon.Off)
-        item.setIcon(icon)
-        self.main_listWgt.setIconSize(QtCore.QSize(itemSize, itemSize))
-        item.setTextAlignment(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignBottom)
-        self.main_listWgt.addItem(item)
-
     def importFile(self):
         """
         导入Asset文件到UE
@@ -725,7 +598,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
             for item in currentSelected:
                 item_data = item.data(QtCore.Qt.UserRole)
                 role_name = item_data['role_name']
-                path = '{0}/{1}/Scenes/{2}/{3}/FBX'.format(self.projectSetting()['rootPath'],
+                path = '{0}/{1}/Scenes/{2}/{3}/FBX'.format(commonSetting()['rootPath'],
                                                            currentProject,
                                                            currentType,
                                                            role_name)
@@ -780,23 +653,18 @@ class SceneToolsUI(QtWidgets.QMainWindow):
 
     def detailPath(self):
         item_data = self.main_listWgt.currentItem().data(self.asset_item_userRole)
-        detailPaths = {'Assembly': '{0}/{1}/{2}/{3}/{4}/Assembly/{4}_AD.ma'.format(self.projectSetting()['rootPath'],
+        detailPaths = {'Assembly': '{0}/{1}/Scenes/{2}/{3}/Assembly/{3}_AD.ma'.format(commonSetting()['rootPath'],
                                                                                    item_data['project'],
-                                                                                   self.projectSetting()[
-                                                                                       'scenesFolder'],
                                                                                    item_data['type'],
                                                                                    item_data['role_name']),
-                       'Icon': '{0}/{1}/{2}/{3}/{4}/Icon/{4}.png'.format(self.projectSetting()['rootPath'],
+                       'Icon': '{0}/{1}/Scenes/{2}/{3}/Icon/{3}.png'.format(commonSetting()['rootPath'],
                                                                          item_data['project'],
-                                                                         self.projectSetting()['scenesFolder'],
                                                                          item_data['type'], item_data['role_name']),
-                       'GPU': '{0}/{1}/{2}/{3}/{4}/GPU/{4}_GPU.abc'.format(self.projectSetting()['rootPath'],
+                       'GPU': '{0}/{1}/Scenes/{2}/{3}/GPU/{3}_GPU.abc'.format(commonSetting()['rootPath'],
                                                                            item_data['project'],
-                                                                           self.projectSetting()['scenesFolder'],
                                                                            item_data['type'], item_data['role_name']),
-                       'Mod': '{0}/{1}/{2}/{3}/{4}/Mod/{4}_mod.ma'.format(self.projectSetting()['rootPath'],
+                       'Mod': '{0}/{1}/Scenes/{2}/{3}/Mod/{3}_mod.ma'.format(commonSetting()['rootPath'],
                                                                           item_data['project'],
-                                                                          self.projectSetting()['scenesFolder'],
                                                                           item_data['type'], item_data['role_name'])}
         return detailPaths
 
