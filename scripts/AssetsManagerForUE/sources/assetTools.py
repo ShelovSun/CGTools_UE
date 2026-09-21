@@ -188,7 +188,8 @@ class AssetToolsUI(QtWidgets.QWidget):
         root.setSpacing(2)
 
         self.mainWindow_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        self.mainWindow_splitter.setHandleWidth(3)
+        self.mainWindow_splitter.setObjectName("AssetMainSplitter")
+        self.mainWindow_splitter.setHandleWidth(5)
         self.mainWindow_splitter.setChildrenCollapsible(False)
         root.addWidget(self.mainWindow_splitter, 1)
 
@@ -264,16 +265,41 @@ class AssetToolsUI(QtWidgets.QWidget):
         right = QtWidgets.QWidget()
         rightV = QtWidgets.QVBoxLayout(right)
         rightV.setContentsMargins(0, 0, 0, 0)
-        rightV.setSpacing(2)
-        self._right_layout = rightV
+        rightV.setSpacing(0)
+        self.detail_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self.detail_splitter.setObjectName("AssetDetailsSplitter")
+        self.detail_splitter.setHandleWidth(5)
+        self.detail_splitter.setChildrenCollapsible(False)
+
+        self._preview_host = QtWidgets.QWidget()
+        self._preview_host_layout = QtWidgets.QVBoxLayout(self._preview_host)
+        self._preview_host_layout.setContentsMargins(0, 0, 0, 0)
+        self._preview_host_layout.setSpacing(0)
         self.preview_wgt = None
         self.action_wgt = None
         self._preview_placeholder = QtWidgets.QLabel(u"选择资产后加载 FBX 预览")
         self._preview_placeholder.setAlignment(QtCore.Qt.AlignCenter)
-        self._preview_placeholder.setMinimumHeight(350)
+        self._preview_placeholder.setMinimumHeight(160)
         self._preview_placeholder.setStyleSheet(
             "background:#242528; color:#858585; border:1px solid #151515;")
-        rightV.addWidget(self._preview_placeholder, 1)
+        self._preview_host_layout.addWidget(self._preview_placeholder, 1)
+
+        self._action_host = QtWidgets.QWidget()
+        self._action_host_layout = QtWidgets.QVBoxLayout(self._action_host)
+        self._action_host_layout.setContentsMargins(0, 0, 0, 0)
+        self._action_host_layout.setSpacing(0)
+        self._action_placeholder = QtWidgets.QLabel(u"选择资产后显示动作库")
+        self._action_placeholder.setAlignment(QtCore.Qt.AlignCenter)
+        self._action_placeholder.setStyleSheet(
+            "background:#232427; color:#707070; border:1px solid #151515;")
+        self._action_host_layout.addWidget(self._action_placeholder, 1)
+
+        self.detail_splitter.addWidget(self._preview_host)
+        self.detail_splitter.addWidget(self._action_host)
+        self.detail_splitter.setStretchFactor(0, 3)
+        self.detail_splitter.setStretchFactor(1, 2)
+        self.detail_splitter.setSizes([340, 220])
+        rightV.addWidget(self.detail_splitter, 1)
         self.mainWindow_splitter.addWidget(right)
 
         self.mainWindow_splitter.setSizes([120, 500, 350])
@@ -310,6 +336,10 @@ class AssetToolsUI(QtWidgets.QWidget):
         self.main_listWgt.assetDropRequested.connect(self.placeImportedAsset)
         self.main_listWgt.assetDragRejected.connect(
             lambda text: self.infoMsg("warning", text))
+        self.detail_splitter.splitterMoved.connect(
+            lambda _position, _index: self.rememberSettings())
+        self.mainWindow_splitter.splitterMoved.connect(
+            lambda _position, _index: self.rememberSettings())
 
     def _toolBtn(self, icon_name, tip):
         """工具栏小按钮：25x25、扁平透明、22 图标。"""
@@ -330,7 +360,9 @@ class AssetToolsUI(QtWidgets.QWidget):
             from ..utils.fbxpreview.am_actionWidget import AssetActionWidget
 
             preview = PreviewGLWidget(isPlayer=False)
-            preview.setMinimumHeight(350)
+            preview.setMinimumHeight(160)
+            preview.setSizePolicy(
+                QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
             action = AssetActionWidget()
             action.setSizePolicy(
                 QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
@@ -338,11 +370,15 @@ class AssetToolsUI(QtWidgets.QWidget):
             action.importActionRequested.connect(self.importActionFile)
 
             if self._preview_placeholder is not None:
-                self._right_layout.removeWidget(self._preview_placeholder)
+                self._preview_host_layout.removeWidget(self._preview_placeholder)
                 self._preview_placeholder.deleteLater()
                 self._preview_placeholder = None
-            self._right_layout.insertWidget(0, preview)
-            self._right_layout.insertWidget(1, action, 1)
+            if self._action_placeholder is not None:
+                self._action_host_layout.removeWidget(self._action_placeholder)
+                self._action_placeholder.deleteLater()
+                self._action_placeholder = None
+            self._preview_host_layout.addWidget(preview, 1)
+            self._action_host_layout.addWidget(action, 1)
             self.preview_wgt = preview
             self.action_wgt = action
             return True
@@ -357,6 +393,8 @@ class AssetToolsUI(QtWidgets.QWidget):
         settings.setValue('thumbSize', self.itemSize_Slider.value())
         settings.setValue('project', self.project_comb.currentIndex())
         settings.setValue('typ', self.type_listWgt.currentRow())
+        settings.setValue('detailSplitterSizes', self.detail_splitter.sizes())
+        settings.setValue('mainSplitterSizes', self.mainWindow_splitter.sizes())
 
     def readSettings(self):
         settings = QtCore.QSettings('AssetsUE', 'AssetsUESettings')
@@ -364,12 +402,27 @@ class AssetToolsUI(QtWidgets.QWidget):
         thumbSize = settings.value('thumbSize')
         project = settings.value('project')
         typ = settings.value('typ')
+        splitter_sizes = settings.value('detailSplitterSizes')
+        main_splitter_sizes = settings.value('mainSplitterSizes')
 
         if isList is not None:
             if isList == 'true':
                 self.isList = True
             else:
                 self.isList = False
+
+        if isinstance(splitter_sizes, (list, tuple)) and len(splitter_sizes) == 2:
+            try:
+                sizes = [max(1, int(value)) for value in splitter_sizes]
+                self.detail_splitter.setSizes(sizes)
+            except (TypeError, ValueError):
+                pass
+        if isinstance(main_splitter_sizes, (list, tuple)) and len(main_splitter_sizes) == 3:
+            try:
+                sizes = [max(1, int(value)) for value in main_splitter_sizes]
+                self.mainWindow_splitter.setSizes(sizes)
+            except (TypeError, ValueError):
+                pass
 
         return thumbSize, project, typ
 
@@ -803,6 +856,10 @@ class AssetToolsUI(QtWidgets.QWidget):
                 item.setUEState("error", str(exc))
                 self.infoMsg("error", str(exc))
                 return
+        # Revalidate on the explicit load click with SHA-1.  The lightweight
+        # background card scan intentionally compares sizes only.
+        plan = ue_asset_service.query_filesystem_state(
+            plan, verify_content=True)
         # ``files`` 可能只有 .uexp/.ubulk 等 sidecar；没有 .uasset/.umap
         # 仍然不是一个可加载的 UE 包，不能把孤立 sidecar 复制进工程。
         if not plan.get("files") or not plan.get("package_object_paths"):
@@ -822,6 +879,8 @@ class AssetToolsUI(QtWidgets.QWidget):
         key = str(item.itemData()[7])
         self._copy_item_key = key
         item.setUEProgress(0, u"准备加载 UE 最终资产…")
+        for warning in ue_asset_service.prepare_plan_overwrites(plan):
+            self.infoMsg("warning", warning)
         thread = QtCore.QThread()
         worker = ue_asset_service.AssetCopyWorker(plan)
         worker.moveToThread(thread)
@@ -880,8 +939,20 @@ class AssetToolsUI(QtWidgets.QWidget):
             item.setUEState(plan.get("state"), plan.get("message"), plan)
             if plan.get("state") == "ready":
                 self.infoMsg("info", plan.get("message"))
+            elif plan.get("state") == "partial":
+                self.infoMsg("warning", plan.get("message"))
             else:
                 self.infoMsg("error", plan.get("message"))
+            if plan.get("state") in ("ready", "partial"):
+                located, object_path = (
+                    ue_asset_service.sync_plan_to_content_browser(plan))
+                if located:
+                    self.infoMsg(
+                        "info", u"加载完成，已在内容浏览器中定位：{0}".format(
+                            object_path))
+                else:
+                    self.infoMsg(
+                        "warning", u"加载完成，但没有找到可在内容浏览器中定位的资产")
         except Exception as exc:
             item.setUEState("error", str(exc), plan)
             self.infoMsg("error", u"UE 注册资产失败：{0}".format(exc))

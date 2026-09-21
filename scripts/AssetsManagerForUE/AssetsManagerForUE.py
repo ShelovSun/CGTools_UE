@@ -31,6 +31,13 @@ if scriptsPath not in sys.path:
 # 4. 这里只导入轻量配置。各功能模块在对应 Tab 第一次打开时再导入，
 # 避免点击菜单时把数据库、FBX/OpenGL 预览和所有工具一次性冷加载。
 from .config import SMConfig, commonSettingPath
+from .utils.ue_window_style import (
+    UEWindowFrameOverlay,
+    UEWindowResizeGrip,
+    UEWindowTitleBar,
+    apply_ue_stylesheet,
+    unreal_window_icon,
+)
 
 
 class AssetsManagerUI(QtWidgets.QWidget):
@@ -41,8 +48,11 @@ class AssetsManagerUI(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super(AssetsManagerUI, self).__init__(parent)
 
+        self.setObjectName("AssetsManagerWindow")
+        self.setWindowFlags(
+            self.windowFlags() | QtCore.Qt.FramelessWindowHint)
         self.setWindowTitle('Assets Manager ' + self.VERSION)
-        self.setWindowIcon(QtGui.QIcon('%s/icon/blank_ch.png' % self.scriptsPath))
+        self.setWindowIcon(unreal_window_icon())
 
         login = self.readLoginSetting()
         self.user = login.get('user', '')
@@ -92,10 +102,24 @@ class AssetsManagerUI(QtWidgets.QWidget):
     def build_ui(self):
         """纯代码搭建主窗：资产/场景/蓝图/特效/组件五个懒加载页。"""
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(1, 3, 1, 1)
+        root.setContentsMargins(1, 1, 1, 1)
+        root.setSpacing(0)
+
+        self.title_bar = UEWindowTitleBar(
+            self,
+            self.windowTitle(),
+            close_callback=self.close,
+            allow_maximize=True,
+        )
+        root.addWidget(self.title_bar)
 
         self.tabWidget = QtWidgets.QTabWidget()
         root.addWidget(self.tabWidget)
+
+        self._resize_grip = UEWindowResizeGrip(self)
+        self._positionResizeGrip()
+        self._resize_grip.raise_()
+        self._frame_overlay = UEWindowFrameOverlay(self)
 
         self._tab_initialized = set()
         self._tab_build_pending = set()
@@ -108,8 +132,8 @@ class AssetsManagerUI(QtWidgets.QWidget):
         self.tabWidget.addTab(self.asset_page, u"资产")
         self.tabWidget.addTab(self.scene_page, u"场景")
         self.tabWidget.addTab(self.blueprint_page, u"蓝图")
-        self.tabWidget.addTab(self.vfx_page, u"特效")
         self.tabWidget.addTab(self.component_page, u"组件")
+        self.tabWidget.addTab(self.vfx_page, u"特效")
 
         '''风格外观 / 记忆的窗口位置大小与上次 tab'''
         pos, size, tab = self.readSettings()
@@ -174,10 +198,26 @@ class AssetsManagerUI(QtWidgets.QWidget):
         return setting_data
 
     def getStyleSheet(self):
-        style_sheet_path = '%s/qss/UE5.qss' % self.scriptsPath
-        with open(style_sheet_path) as (file):
-            str = file.read()
-        self.setStyleSheet(str)
+        apply_ue_stylesheet(self)
+
+    def _positionResizeGrip(self):
+        grip = getattr(self, "_resize_grip", None)
+        if grip is None:
+            return
+        grip.move(
+            max(0, self.width() - grip.width() - 2),
+            max(0, self.height() - grip.height() - 2),
+        )
+
+    def resizeEvent(self, event):
+        super(AssetsManagerUI, self).resizeEvent(event)
+        self._positionResizeGrip()
+        grip = getattr(self, "_resize_grip", None)
+        if grip is not None:
+            grip.raise_()
+        frame = getattr(self, "_frame_overlay", None)
+        if frame is not None:
+            frame.raise_()
 
     def rememberSettings(self):
         settings = QtCore.QSettings('AssetsManagerUE', 'AssetsManagerUESettings')
@@ -203,7 +243,7 @@ class AssetsManagerUI(QtWidgets.QWidget):
     def _stop_child_threads(self):
         """停止各 tab 子界面持有的 QThread（MyThread 等），让旧窗口能被回收。"""
         for page in (self.asset_page, self.scene_page, self.blueprint_page,
-                     self.vfx_page, self.component_page):
+                     self.component_page, self.vfx_page):
             layout = page.layout() if page is not None else None
             if layout is None:
                 continue
@@ -242,7 +282,7 @@ class AssetsManagerUI(QtWidgets.QWidget):
             self._tab_build_pending.discard(idx)
             return
         pages = (self.asset_page, self.scene_page, self.blueprint_page,
-                 self.vfx_page, self.component_page)
+                 self.component_page, self.vfx_page)
         if idx not in range(len(pages)):
             self._tab_build_pending.discard(idx)
             return
@@ -261,11 +301,11 @@ class AssetsManagerUI(QtWidgets.QWidget):
                 from .sources import blueprintTools
                 widget = blueprintTools.BlueprintToolsUI()
             elif idx == 3:
-                from .sources import vfxTools
-                widget = vfxTools.VfxToolsUI()
-            else:
                 from .sources import componentTools
                 widget = componentTools.ComponentToolsUI()
+            else:
+                from .sources import vfxTools
+                widget = vfxTools.VfxToolsUI()
 
             while layout.count():
                 old = layout.takeAt(0).widget()

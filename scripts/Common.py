@@ -202,21 +202,21 @@ def create_folder_contextMenu():
 
 def create_asset_contextMenu():
     """
-    V create AssetContextMenu（下面可以规定确定类型才有菜单：SoundWave，LevelSequence，CameraAnim...）
+    V create AssetContextMenu（下面可以规定确定类型才有菜单：SoundWave，LevelSequence，CameraAnim...）测试通过可行
     :return:
     """
-    print("######### 加载内容库右键菜单 #########")
-    menus = unreal.ToolMenus.get()
-    menu_name = "ContentBrowser.AssetContextMenu"
-    menu = menus.find_menu(menu_name)
-    # Set the button type and label
-    entry = unreal.ToolMenuEntry(type=unreal.MultiBlockType.MENU_ENTRY)
-    entry.set_label(u"发布UE资产")
-    # Set button command, add button
-    entry.set_icon("EditorStyle", "ContentBrowser.AssetActions.Migrate")  # 未出现图标，没解决
-    entry.set_string_command(unreal.ToolMenuStringCommandType.PYTHON, "",
-                             u"import UEPublisher.ue_publisher as Pub;Pub.showWin()")
-    menu.add_menu_entry('CommonAssetActions', entry)
+    # print("######### 加载内容库右键菜单 #########")
+    # menus = unreal.ToolMenus.get()
+    # menu_name = "ContentBrowser.AssetContextMenu"
+    # menu = menus.find_menu(menu_name)
+    # # Set the button type and label
+    # entry = unreal.ToolMenuEntry(type=unreal.MultiBlockType.MENU_ENTRY)
+    # entry.set_label(u"内容浏览器右键测试")
+    # # Set button command, add button
+    # entry.set_icon("EditorStyle", "ContentBrowser.AssetActions.Migrate")  # 未出现图标，没解决
+    # entry.set_string_command(unreal.ToolMenuStringCommandType.PYTHON, "",
+    #                          u"import UEPublisher.ue_publisher as Pub;Pub.showWin()")
+    # menu.add_menu_entry('CommonAssetActions', entry)
 
 
 def create_sequence_contextMenu():

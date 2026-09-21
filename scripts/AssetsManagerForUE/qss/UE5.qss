@@ -454,3 +454,114 @@ QRadioButton::enabled
     color: rgb(243, 243, 243);
 }
 
+
+/* -------------------------------------------------------------------------
+   Reusable Unreal-style top-level window chrome.
+   Create UEWindowTitleBar / UEWindowFrameOverlay in Python, then call
+   apply_ue_stylesheet(window). New windows should not duplicate these rules.
+   ------------------------------------------------------------------------- */
+
+QWidget[ueFramelessWindow="true"]
+{
+    background-color: #202020;
+    border: none;
+}
+
+QWidget#UEWindowTitleBar
+{
+    background-color: #151515;
+    border: none;
+    border-bottom: 1px solid #292929;
+    qproperty-titleBackgroundColor: #151515;
+    qproperty-separatorColor: #292929;
+}
+
+QWidget#UEWindowTitleSide,
+QLabel#UEWindowLogo
+{
+    background: transparent;
+    border: none;
+}
+
+QLabel#UEWindowTitle
+{
+    background: transparent;
+    border: none;
+    color: #d0d0d0;
+    font-size: 13px;
+    font-weight: normal;
+    padding: 0px;
+}
+
+QPushButton#UEWindowCloseButton
+{
+    background: transparent;
+    border: none;
+    border-radius: 0px;
+    margin: 0px;
+    padding: 0px;
+    qproperty-normalGlyphColor: #bdbdbd;
+    qproperty-hoverGlyphColor: #ffffff;
+}
+
+QPushButton#UEWindowCloseButton:hover
+{
+    background: #c42b1c;
+    border: none;
+}
+
+QPushButton#UEWindowCloseButton:pressed
+{
+    background: #9e2117;
+    border: none;
+}
+
+QWidget#UEWindowFrameOverlay
+{
+    background: transparent;
+    border: none;
+    qproperty-outerBorderColor: #050505;
+    qproperty-outerBorderWidth: 2;
+    qproperty-highlightBorderColor: #484848;
+    qproperty-innerBorderColor: #111111;
+}
+
+QSizeGrip#UEWindowResizeGrip
+{
+    background: transparent;
+    border: none;
+    qproperty-gripColor: #747474;
+}
+
+QSplitter#AssetDetailsSplitter::handle:vertical,
+QSplitter#SceneDetailsSplitter::handle:vertical
+{
+    height: 5px;
+    background: #151515;
+    border-top: 1px solid #454545;
+    border-bottom: 1px solid #050505;
+}
+
+QSplitter#AssetDetailsSplitter::handle:vertical:hover,
+QSplitter#SceneDetailsSplitter::handle:vertical:hover
+{
+    background: #315d78;
+    border-top-color: #65a8cf;
+}
+
+QSplitter#AssetMainSplitter::handle:horizontal,
+QSplitter#SceneMainSplitter::handle:horizontal
+{
+    width: 5px;
+    background: #151515;
+    border-left: 1px solid #050505;
+    border-right: 1px solid #454545;
+}
+
+QSplitter#AssetMainSplitter::handle:horizontal:hover,
+QSplitter#SceneMainSplitter::handle:horizontal:hover
+{
+    background: #315d78;
+    border-right-color: #65a8cf;
+}
+
