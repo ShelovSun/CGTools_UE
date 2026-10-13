@@ -1694,6 +1694,8 @@ class Item(QtWidgets.QListWidgetItem):
 
     def paintUEStatus(self, painter, option):
         """绘制独立于 FBX 悬停播放线的 UE 包状态线与复制进度。"""
+        if self._ue_state == "folder":
+            return
         colors = {
             "scanning": QtGui.QColor(115, 125, 135, 235),
             "missing": QtGui.QColor(220, 55, 55, 245),

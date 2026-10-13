@@ -26,6 +26,25 @@ COMPONENT_ROOT_CANDIDATES = (
 )
 COPY_CHUNK_SIZE = 4 * 1024 * 1024
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
+COMPONENT_EXCLUDED_DIRECTORIES = frozenset((
+    "intermediate",
+    "saved",
+    "deriveddatacache",
+    ".vs",
+    "__pycache__",
+    ".git",
+    ".svn",
+))
+COMPONENT_EXCLUDED_FILE_EXTENSIONS = frozenset((
+    ".rsp",
+    ".obj",
+    ".pch",
+    ".tlog",
+    ".idb",
+    ".ipdb",
+    ".iobj",
+    ".tmp",
+))
 
 
 def _forward(path):
@@ -44,6 +63,27 @@ def _inside(parent, child, allow_equal=False):
     except ValueError:
         return False
     return common == parent and (allow_equal or child != parent)
+
+
+def _is_excluded_component_directory(name):
+    """过滤 Unreal/IDE 生成的缓存目录，不影响 Binaries 等正式插件内容。"""
+    return str(name or "").strip().lower() in COMPONENT_EXCLUDED_DIRECTORIES
+
+
+def _is_excluded_component_file(filename):
+    """兜底过滤散落在缓存目录之外的编译中间文件。"""
+    extension = os.path.splitext(str(filename or ""))[1].lower()
+    return extension in COMPONENT_EXCLUDED_FILE_EXTENSIONS
+
+
+def _remove_empty_directory(path):
+    """仅删除空目录；存在其他待重启组件时保持 staging 根目录不变。"""
+    if not path:
+        return
+    try:
+        os.rmdir(path)
+    except OSError:
+        pass
 
 
 def _sha1(path, cancelled=None):
@@ -161,7 +201,16 @@ def build_component_plan(category_name, component_folder, plugins_dir,
     for root, dirnames, filenames in os.walk(component_folder):
         if cancelled and cancelled():
             raise RuntimeError(u"操作已取消")
+        # 必须原地修改 dirnames，阻止 os.walk 继续进入开发机构建缓存。
+        dirnames[:] = [
+            name for name in dirnames
+            if not _is_excluded_component_directory(name)
+        ]
         dirnames.sort(key=str.lower)
+        filenames = [
+            name for name in filenames
+            if not _is_excluded_component_file(name)
+        ]
         filenames.sort(key=str.lower)
         relative_root = os.path.relpath(root, component_folder)
         if relative_root not in ("", "."):
@@ -233,6 +282,7 @@ def query_component_state(plan, cancelled=None):
 
 
 def scan_component_library(candidates, plugins_dir, cancelled=None):
+    """递归扫描分类文件夹；直接含 .uplugin 的目录是组件，分类在该层停止。"""
     root_path = ""
     errors = []
     for candidate in candidates:
@@ -248,49 +298,58 @@ def scan_component_library(candidates, plugins_dir, cancelled=None):
         detail = u"（{0}）".format(errors[-1]) if errors else ""
         raise RuntimeError(u"无法访问组件库：{0}{1}".format(candidates[0], detail))
 
-    categories = []
-    category_names = sorted(
-        (name for name in os.listdir(root_path)
-         if os.path.isdir(os.path.join(root_path, name))),
-        key=str.lower,
-    )
-    for category_name in category_names:
+    def scan_directory(folder, ancestors):
         if cancelled and cancelled():
             raise RuntimeError(u"操作已取消")
-        category_folder = os.path.join(root_path, category_name)
-        components = []
-        component_names = sorted(
-            (name for name in os.listdir(category_folder)
-             if os.path.isdir(os.path.join(category_folder, name))),
-            key=str.lower,
-        )
-        for component_name in component_names:
-            if cancelled and cancelled():
-                raise RuntimeError(u"操作已取消")
-            folder = os.path.join(category_folder, component_name)
+        relative_path = _forward(os.path.relpath(folder, root_path))
+        try:
+            modified = int(os.path.getmtime(folder))
+        except OSError:
+            modified = 0
+        directory = {
+            "name": os.path.basename(folder),
+            "path": relative_path,
+            "folder": folder,
+            "modified": modified,
+            "categories": [],
+            "components": [],
+        }
+        with os.scandir(folder) as entries:
+            entries = sorted(entries, key=lambda entry: entry.name.lower())
+        # 只检查本层描述文件；父目录不会因后代含插件而被误判为组件。
+        if relative_path != "." and any(
+                entry.name.lower().endswith(".uplugin") and entry.is_file()
+                for entry in entries):
+            category_name = _forward(os.path.relpath(
+                os.path.dirname(folder), root_path))
             plan = build_component_plan(
                 category_name, folder, plugins_dir, cancelled=cancelled)
-            try:
-                modified = int(os.path.getmtime(folder))
-            except OSError:
-                modified = 0
-            components.append({
-                "name": component_name,
+            directory.update({
                 "category": category_name,
-                "folder": folder,
                 "icon": plan.get("icon") or "",
-                "modified": modified,
                 "plan": plan,
             })
-        categories.append({
-            "name": category_name,
-            "folder": category_folder,
-            "components": components,
-        })
+            return directory
+
+        ancestors = ancestors | {os.path.normcase(os.path.realpath(folder))}
+        for entry in entries:
+            if cancelled and cancelled():
+                raise RuntimeError(u"操作已取消")
+            if not entry.is_dir():
+                continue
+            if os.path.normcase(os.path.realpath(entry.path)) in ancestors:
+                continue
+            child = scan_directory(entry.path, ancestors)
+            key = "components" if "plan" in child else "categories"
+            directory[key].append(child)
+        return directory
+
+    library = scan_directory(root_path, set())
     return {
         "root": root_path,
         "plugins_dir": _normal(plugins_dir),
-        "categories": categories,
+        "categories": library["categories"],
+        "components": library["components"],
     }
 
 
@@ -340,6 +399,7 @@ class ComponentCopyWorker(QtCore.QObject):
     def run(self):
         temp_files = []
         created_files = []
+        staging_root = ""
         staging_folder = ""
         try:
             source_folder, plugins_dir, target_folder = self._validate_plan()
@@ -404,6 +464,7 @@ class ComponentCopyWorker(QtCore.QObject):
                     raise RuntimeError(u"复制过程中同名组件目录被其他进程创建")
                 os.replace(staging_folder, target_folder)
                 staging_folder = ""
+                _remove_empty_directory(staging_root)
             else:
                 # partial 只补齐缺失文件，不覆盖当前进程中可能被加载的文件。
                 for entry in files:
@@ -451,6 +512,7 @@ class ComponentCopyWorker(QtCore.QObject):
                     shutil.rmtree(staging_folder)
                 except OSError:
                     pass
+            _remove_empty_directory(staging_root)
             self.failed.emit(str(exc))
 
 
@@ -462,6 +524,7 @@ def discard_staged_component(staging_folder, plugins_dir):
     try:
         if os.path.isdir(staging_folder):
             shutil.rmtree(staging_folder)
+        _remove_empty_directory(staging_root)
         return True
     except OSError:
         return False

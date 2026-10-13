@@ -193,6 +193,14 @@ class _MarkdownBrowser(QtWidgets.QTextBrowser):
         QtGui.QDesktopServices.openUrl(target)
 
 
+class _ComponentCardList(myWidget.MainQListWiget):
+    def mouseDoubleClickEvent(self, event):
+        if event.button() != QtCore.Qt.LeftButton:
+            event.accept()
+            return
+        super(_ComponentCardList, self).mouseDoubleClickEvent(event)
+
+
 class _ScanSignals(QtCore.QObject):
     loaded = QtCore.Signal(int, object)
     failed = QtCore.Signal(int, str)
@@ -239,13 +247,17 @@ class ComponentToolsUI(QtWidgets.QWidget):
         self._scan_task = None
         self._library_payload = {}
         self._categories = {}
+        self._category_items = {}
+        self._component_items = {}
+        self._categories_by_folder = {}
         self._components_by_folder = {}
         self._copy_thread = None
         self._copy_worker = None
         self._copy_folder = ""
         self._copy_stage_replacement = False
         self._current_document_path = ""
-        self._fallback_icon = "%s/icon/Default.png" % self.scriptsPath
+        self._fallback_icon = "%s/icon/component.png" % self.scriptsPath
+        self._folder_icon = "%s/icon/floder.png" % self.scriptsPath
         self._buildUI()
         QtCore.QTimer.singleShot(0, self.refreshLibrary)
 
@@ -268,8 +280,17 @@ class ComponentToolsUI(QtWidgets.QWidget):
         category_label.setStyleSheet(
             "font-weight:bold; color:#d7d7d7; padding:4px 5px; background:#252628;")
         left_layout.addWidget(category_label)
-        self.category_list = QtWidgets.QListWidget()
-        self.category_list.setSpacing(3)
+        self.category_list = QtWidgets.QTreeWidget()
+        self.category_list.setHeaderHidden(True)
+        self.category_list.setIndentation(16)
+        self.category_list.setIconSize(QtCore.QSize(16, 16))
+        self.category_list.setUniformRowHeights(True)
+        self.category_list.setStyleSheet(
+            "QTreeWidget{background:#1a1a1a; color:#b1b1b1; font-size:13px; border:0;}"
+            "QTreeWidget::item{padding:5px 2px;}"
+            "QTreeWidget::item:selected{background:#343a40; color:#f3f3f3;}"
+            "QTreeWidget::item:hover{background:#303030;}"
+        )
         self.category_list.setMinimumWidth(145)
         left_layout.addWidget(self.category_list, 1)
         self.content_splitter.addWidget(left)
@@ -281,6 +302,9 @@ class ComponentToolsUI(QtWidgets.QWidget):
 
         toolbar = QtWidgets.QHBoxLayout()
         toolbar.setSpacing(2)
+        self.parent_button = self._toolButton("back.png", u"返回上一级文件夹")
+        self.parent_button.setEnabled(False)
+        toolbar.addWidget(self.parent_button)
         self.display_button = self._toolButton("display_list.png", u"表单显示")
         toolbar.addWidget(self.display_button)
         self.size_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
@@ -301,18 +325,18 @@ class ComponentToolsUI(QtWidgets.QWidget):
         toolbar.addWidget(self.load_button)
         self.search_edit = QtWidgets.QLineEdit()
         self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.setPlaceholderText(u"搜索当前分类的组件…")
+        self.search_edit.setPlaceholderText(u"搜索当前文件夹中的文件夹或组件…")
         self.search_edit.addAction(
             QtGui.QIcon("%s/icon/search.png" % self.scriptsPath),
             QtWidgets.QLineEdit.LeadingPosition)
         toolbar.addWidget(self.search_edit, 1)
         center_layout.addLayout(toolbar)
 
-        self.card_list = myWidget.MainQListWiget()
+        self.card_list = _ComponentCardList()
         self.card_list.setSortingEnabled(False)
         self.card_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.card_list.setListColumns(
-            (u"修改日期", u"组件名", u"分类", u"组件目录"),
+            (u"修改日期", u"名称", u"分类", u"目录"),
             (0, 1, 2, 8),
             (135, 230, 140, 520),
             ("datetime", None, None, None),
@@ -394,6 +418,7 @@ class ComponentToolsUI(QtWidgets.QWidget):
         self._updateDisplayButton()
 
         self.category_list.currentItemChanged.connect(self._categoryChanged)
+        self.parent_button.clicked.connect(self._goToParentCategory)
         self.display_button.clicked.connect(self.toggleDisplayMode)
         self.size_slider.valueChanged.connect(self._sizeChanged)
         self.size_slider.sliderReleased.connect(self._rememberSettings)
@@ -403,6 +428,7 @@ class ComponentToolsUI(QtWidgets.QWidget):
         self.search_edit.textChanged.connect(self._searchTextChanged)
         self.card_list.customContextMenuRequested.connect(self._showContextMenu)
         self.card_list.itemSelectionChanged.connect(self._selectionChanged)
+        self.card_list.itemDoubleClicked.connect(self._enterFolder)
         self.card_list.assetDragRejected.connect(self._dragRejected)
         self.documentation_external_button.clicked.connect(
             self._openCurrentDocumentExternally)
@@ -428,7 +454,9 @@ class ComponentToolsUI(QtWidgets.QWidget):
         generation = self._scan_generation
         if self._scan_task is not None:
             self._scan_task.cancel()
+            self._scan_task = None
         self.category_list.setEnabled(False)
+        self.parent_button.setEnabled(False)
         self.refresh_button.setEnabled(False)
         self.load_button.setEnabled(False)
         self.card_list.clear()
@@ -438,6 +466,7 @@ class ComponentToolsUI(QtWidgets.QWidget):
         except Exception as exc:
             self.category_list.setEnabled(True)
             self.refresh_button.setEnabled(True)
+            self._updateParentButton()
             self.infoMsg("error", str(exc))
             return
         task = _ComponentScanTask(
@@ -452,33 +481,55 @@ class ComponentToolsUI(QtWidgets.QWidget):
             return
         self._scan_task = None
         self._library_payload = payload or {}
-        categories = self._library_payload.get("categories") or []
-        self._categories = {value["name"]: value for value in categories}
+        self._categories = {}
+        self._category_items = {}
+        self._component_items = {}
+        self._categories_by_folder = {}
         self._components_by_folder = {}
-        for category in categories:
-            for component in category.get("components") or []:
-                self._components_by_folder[os.path.normcase(component["folder"])] = component
-
         self.category_list.blockSignals(True)
         self.category_list.clear()
-        selected_row = 0
-        folder_icon = QtGui.QIcon("%s/icon/floder.png" % self.scriptsPath)
-        for row, category in enumerate(categories):
-            item = QtWidgets.QListWidgetItem(category["name"])
-            item.setData(QtCore.Qt.UserRole, category["name"])
-            item.setToolTip(category["folder"])
-            item.setIcon(folder_icon)
-            self.category_list.addItem(item)
-            if category["name"] == self._preferred_category:
-                selected_row = row
+        folder_icon = QtGui.QIcon(self._folder_icon)
+        component_icon = QtGui.QIcon(self._fallback_icon)
+
+        def add_category(category, parent=None):
+            category_path = category["path"]
+            self._categories[category_path] = category
+            self._categories_by_folder[os.path.normcase(category["folder"])] = category
+            item = QtWidgets.QTreeWidgetItem([category["name"]])
+            item.setData(0, QtCore.Qt.UserRole, category_path)
+            item.setData(0, QtCore.Qt.UserRole + 1, category["folder"])
+            item.setToolTip(0, category["folder"])
+            item.setIcon(0, folder_icon)
+            if parent is None:
+                self.category_list.addTopLevelItem(item)
+            else:
+                parent.addChild(item)
+            self._category_items[category_path] = item
+            for child in category.get("categories") or []:
+                add_category(child, item)
+            for component in category.get("components") or []:
+                self._components_by_folder[os.path.normcase(component["folder"])] = component
+                component_item = QtWidgets.QTreeWidgetItem([component["name"]])
+                component_item.setData(0, QtCore.Qt.UserRole, component["path"])
+                component_item.setData(0, QtCore.Qt.UserRole + 1, component["folder"])
+                component_item.setToolTip(0, component["folder"])
+                component_item.setIcon(0, component_icon)
+                item.addChild(component_item)
+                self._component_items[component["path"]] = component_item
+
+        root_category = {
+            "name": u"组件库",
+            "path": ".",
+            "folder": self._library_payload.get("root") or "",
+            "categories": self._library_payload.get("categories") or [],
+            "components": self._library_payload.get("components") or [],
+        }
+        add_category(root_category)
+        self.category_list.collapseAll()
         self.category_list.blockSignals(False)
         self.category_list.setEnabled(True)
         self.refresh_button.setEnabled(True)
-        if categories:
-            self.category_list.setCurrentRow(selected_row)
-        else:
-            self.card_list.clear()
-            self.infoMsg("warning", u"组件库中没有分类文件夹")
+        self._navigateToCategory(self._preferred_category or ".")
 
     def _scanFailed(self, generation, error):
         if generation != self._scan_generation:
@@ -486,7 +537,13 @@ class ComponentToolsUI(QtWidgets.QWidget):
         self._scan_task = None
         self.category_list.setEnabled(True)
         self.refresh_button.setEnabled(True)
+        self.parent_button.setEnabled(False)
         self.load_button.setEnabled(False)
+        self._categories = {}
+        self._category_items = {}
+        self._component_items = {}
+        self._categories_by_folder = {}
+        self._components_by_folder = {}
         self.category_list.clear()
         self.card_list.clear()
         self.infoMsg("error", error)
@@ -496,17 +553,80 @@ class ComponentToolsUI(QtWidgets.QWidget):
         if current is None:
             self.card_list.clear()
             return
-        self._preferred_category = str(current.data(QtCore.Qt.UserRole) or current.text())
+        # 目录和组件均使用相对路径作为标识，允许不同层级出现同名节点。
+        self._preferred_category = str(current.data(0, QtCore.Qt.UserRole) or ".")
+        self.search_edit.blockSignals(True)
+        self.search_edit.clear()
+        self.search_edit.blockSignals(False)
         self._rememberSettings()
+        self._updateParentButton()
         self._rebuildCards()
 
     def _currentCategory(self):
         item = self.category_list.currentItem()
         if item is None:
             return ""
-        return str(item.data(QtCore.Qt.UserRole) or item.text())
+        if str(item.data(0, QtCore.Qt.UserRole)) in self._component_items:
+            item = item.parent()
+        return str(item.data(0, QtCore.Qt.UserRole) or ".")
+
+    def _navigateToCategory(self, category_path):
+        item = self._category_items.get(category_path)
+        if item is None:
+            item = self._component_items.get(category_path)
+        if item is None:
+            item = self._category_items.get(".")
+        if item is None:
+            return
+        self._selectTreeItem(item)
+
+    def _selectTreeItem(self, item, rebuild=True):
+        """定位树节点；卡片同步选择时不重建当前列表，保留筛选和滚动位置。"""
+        parent = item.parent()
+        while parent is not None:
+            parent.setExpanded(True)
+            parent = parent.parent()
+        if rebuild:
+            self.category_list.setCurrentItem(item)
+        elif self.category_list.currentItem() != item:
+            signals_blocked = self.category_list.blockSignals(True)
+            try:
+                self.category_list.setCurrentItem(item)
+            finally:
+                self.category_list.blockSignals(signals_blocked)
+            self._preferred_category = str(item.data(0, QtCore.Qt.UserRole) or ".")
+            self._rememberSettings()
+        self.category_list.scrollToItem(item)
+
+    def _enterFolder(self, item):
+        if self._scan_task is not None or self._operationIsRunning():
+            return
+        category = self._categories_by_folder.get(self._folderForItem(item))
+        if category is not None:
+            self._navigateToCategory(category["path"])
+
+    def _goToParentCategory(self):
+        current = self._category_items.get(self._currentCategory())
+        if current is not None and current.parent() is not None:
+            self._navigateToCategory(str(current.parent().data(0, QtCore.Qt.UserRole)))
+
+    def _updateParentButton(self):
+        current = self._category_items.get(self._currentCategory())
+        self.parent_button.setEnabled(
+            current is not None and current.parent() is not None
+            and self.category_list.isEnabled()
+            and not self._operationIsRunning())
 
     def _rebuildCards(self):
+        # clear() 可能在删除旧卡片前发出选择变化；重建期间不要把树选回旧组件。
+        signals_blocked = self.card_list.blockSignals(True)
+        try:
+            self._populateCards()
+        finally:
+            self.card_list.blockSignals(signals_blocked)
+        self._selectionChanged()
+
+    def _populateCards(self):
         category_name = self._currentCategory()
         category = self._categories.get(category_name)
         self.card_list.clear()
@@ -515,14 +635,19 @@ class ComponentToolsUI(QtWidgets.QWidget):
             return
         keyword = self.search_edit.text().strip().lower()
         rows = []
-        for component in category.get("components") or []:
-            if keyword and keyword not in component["name"].lower():
-                continue
-            icon_path = component.get("icon") or self._fallback_icon
+        entries = ((category.get("categories") or [])
+                   + (category.get("components") or []))
+        entries = [entry for entry in entries
+                   if not keyword or keyword in entry["name"].lower()]
+        category_label = category_name if category_name != "." else category["name"]
+        for entry in entries:
+            is_component = "plan" in entry
+            icon_path = ((entry.get("icon") or self._fallback_icon)
+                         if is_component else self._folder_icon)
             rows.append((
-                component.get("modified", 0), component["name"], category_name,
+                entry.get("modified", 0), entry["name"], category_label,
                 "", "", "", "", icon_path,
-                component["folder"], category_name, component["folder"],
+                entry["folder"], category_name, entry["folder"],
             ))
 
         self.card_list.setItems(rows)
@@ -543,13 +668,21 @@ class ComponentToolsUI(QtWidgets.QWidget):
                     plan,
                 )
                 item.setUEMainObjectPath("")
-        self._selectionChanged()
-        states = {}
-        for component in category.get("components") or []:
-            state = (component.get("plan") or {}).get("state") or "missing"
-            states[state] = states.get(state, 0) + 1
-        self.infoMsg("info", u"{0}：{1} 个组件；已加载 {2} 个".format(
-            category_name, len(rows), states.get("ready", 0)))
+            else:
+                item.setUEState(
+                    "folder", u"左键双击进入文件夹：{0}".format(item.itemData()[10]))
+        selected = self.category_list.currentItem()
+        selected_path = str(selected.data(0, QtCore.Qt.UserRole)) if selected else ""
+        if selected_path in self._component_items:
+            component_item = self._component_items[selected_path]
+            item = self._itemForFolder(component_item.data(0, QtCore.Qt.UserRole + 1))
+            if item is not None:
+                self.card_list.setCurrentItem(item)
+                self.card_list.scrollToItem(item)
+        components = [entry for entry in entries if "plan" in entry]
+        ready_count = sum((entry["plan"].get("state") == "ready") for entry in components)
+        self.infoMsg("info", u"{0}：{1} 个文件夹，{2} 个组件；已加载 {3} 个".format(
+            category_label, len(entries) - len(components), len(components), ready_count))
 
     def _searchTextChanged(self, text):
         if not text:
@@ -557,13 +690,16 @@ class ComponentToolsUI(QtWidgets.QWidget):
 
     # --------------------------------------------------------------- 卡片状态
     def _componentForItem(self, item):
+        return self._components_by_folder.get(self._folderForItem(item))
+
+    @staticmethod
+    def _folderForItem(item):
         if item is None:
-            return None
+            return ""
         try:
-            folder = os.path.normcase(str(item.itemData()[10]))
+            return os.path.normcase(str(item.itemData()[10]))
         except (IndexError, TypeError, RuntimeError):
-            return None
-        return self._components_by_folder.get(folder)
+            return ""
 
     def _itemForFolder(self, folder):
         key = os.path.normcase(str(folder or ""))
@@ -604,8 +740,17 @@ class ComponentToolsUI(QtWidgets.QWidget):
             item.setDragEnabled(False)
 
     def _selectionChanged(self):
+        selected = self.card_list.currentItem()
+        component = self._componentForItem(selected)
+        if selected is not None:
+            tree_item = (self._component_items.get(component["path"]) if component
+                         else self._category_items.get(self._currentCategory()))
+            if tree_item is not None:
+                self._selectTreeItem(tree_item, rebuild=False)
+        self._updateParentButton()
         self.load_button.setEnabled(
-            self.card_list.currentItem() is not None
+            component is not None
+            and self._scan_task is None
             and not self._operationIsRunning())
 
     def _operationIsRunning(self):
@@ -614,6 +759,7 @@ class ComponentToolsUI(QtWidgets.QWidget):
     def _setOperationControls(self, enabled):
         self.category_list.setEnabled(bool(enabled))
         self.refresh_button.setEnabled(bool(enabled))
+        self._updateParentButton()
         if enabled:
             self._selectionChanged()
         else:
@@ -626,6 +772,13 @@ class ComponentToolsUI(QtWidgets.QWidget):
             return
         self.card_list.setCurrentItem(item)
         menu = QtWidgets.QMenu(self)
+        if self._folderForItem(item) in self._categories_by_folder:
+            open_action = menu.addAction(u"进入文件夹")
+            open_action.setEnabled(self._scan_task is None and not self._operationIsRunning())
+            open_action.triggered.connect(
+                lambda checked=False, selected=item: self._enterFolder(selected))
+            menu.exec_(self.card_list.viewport().mapToGlobal(point))
+            return
         load_action = QtGui.QAction(u"加载组件", self)
         load_action.setToolTip(u"复制整个组件文件夹到当前 UE 工程 Plugins")
         load_action.setEnabled(not self._operationIsRunning())
@@ -972,7 +1125,9 @@ class ComponentToolsUI(QtWidgets.QWidget):
             return
         settings = QtCore.QSettings("AssetsManagerUE", "ComponentLibrary")
         settings.setValue("thumbSize", self.size_slider.value())
-        settings.setValue("category", self._currentCategory())
+        current = self.category_list.currentItem()
+        settings.setValue("category", str(current.data(0, QtCore.Qt.UserRole))
+                          if current is not None else "")
         settings.setValue("isList", self.isList)
 
     def infoMsg(self, icon, text):
