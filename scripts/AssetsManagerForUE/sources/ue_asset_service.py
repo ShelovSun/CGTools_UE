@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import time
 import uuid
 
@@ -52,16 +53,32 @@ def asset_root_from_item_data(item_data):
 
 
 def find_source_content_root(asset_root):
-    """返回服务器 UE 发布内容根；找不到任何 UE 包时返回空字符串。"""
-    ue_root = os.path.join(os.path.normpath(str(asset_root or "")), "UE")
+    """检查固定发布路径；源资产不可访问时抛错，不能误判为没有发布包。"""
+    asset_root = os.path.normpath(str(asset_root or ""))
+    if not stat.S_ISDIR(os.stat(asset_root).st_mode):
+        raise NotADirectoryError(asset_root)
+    ue_root = os.path.join(asset_root, "UE")
+    try:
+        ue_is_dir = stat.S_ISDIR(os.stat(ue_root).st_mode)
+    except FileNotFoundError:
+        # NAS 在两次检查之间断开时，也不能显示“没有 UE”。
+        os.stat(asset_root)
+        return ""
+    if not ue_is_dir:
+        return ""
     content_root = os.path.join(ue_root, "Content")
-    if os.path.isdir(content_root):
+    try:
+        content_is_dir = stat.S_ISDIR(os.stat(content_root).st_mode)
+    except FileNotFoundError:
+        content_is_dir = False
+    if content_is_dir:
         return os.path.normpath(content_root)
-    if os.path.isdir(ue_root):
-        for _root, _dirs, files in os.walk(ue_root):
-            if any(os.path.splitext(name)[1].lower() in PRIMARY_EXTENSIONS for name in files):
-                return os.path.normpath(ue_root)
-    return ""
+    # 兼容旧发布格式，交给建计划时统一扫描，避免递归遍历两次。
+    return os.path.normpath(ue_root)
+
+
+def _raise_walk_error(error):
+    raise error
 
 
 def _project_content_dir(project_content_dir=None):
@@ -141,13 +158,16 @@ def build_import_plan(asset_root, project_content_dir=None):
         "manifest": {},
         "state": "missing",
         "message": u"没有找到 UE 发布目录",
+        "source_available": False,
+        "ue_directory_exists": bool(source_root),
+        "source_message": u"服务器没有 UE 发布目录，无法加载资产",
     }
     if not source_root:
         return plan
 
     manifest = _read_manifest(asset_root, source_root)
     plan["manifest"] = manifest
-    for root, dirs, names in os.walk(source_root):
+    for root, dirs, names in os.walk(source_root, onerror=_raise_walk_error):
         dirs.sort(key=str.lower)
         for name in sorted(names, key=str.lower):
             extension = os.path.splitext(name)[1].lower()
@@ -164,10 +184,7 @@ def build_import_plan(asset_root, project_content_dir=None):
                 inside_target = False
             if not inside_target:
                 continue
-            try:
-                size = os.path.getsize(source)
-            except OSError:
-                size = 0
+            size = os.path.getsize(source)
             entry = {
                 "source": _forward(source),
                 "target": _forward(target),
@@ -184,6 +201,10 @@ def build_import_plan(asset_root, project_content_dir=None):
     configured_main = (manifest.get("mainObjectPath") or manifest.get("main_object_path")
                        or manifest.get("mainPackage") or manifest.get("main_package"))
     plan["main_object_path"] = _normalize_object_path(configured_main)
+    plan["source_available"] = bool(plan["package_object_paths"])
+    plan["source_message"] = (
+        u"服务器有 UE 发布主包，可加载资产" if plan["source_available"]
+        else u"UE 发布目录中没有 .uasset 或 .umap 主包，无法加载资产")
     # 实时编辑器中先准备 sidecar，最后才让 .uasset/.umap 出现在 Content 目录。
     plan["files"].sort(key=lambda entry: (
         entry["extension"] in PRIMARY_EXTENSIONS,
@@ -928,13 +949,45 @@ def place_asset_at_cursor(object_path, screen_position=None):
 
 
 def sync_to_content_browser(object_path):
+    """Focus the asset's folder, then select the asset in Content Browser."""
+    object_path = _normalize_object_path(object_path)
     if unreal is None or not object_path:
         return False
-    asset = unreal.EditorAssetLibrary.load_asset(object_path)
-    if not asset:
+    try:
+        registry = unreal.AssetRegistryHelpers.get_asset_registry()
+        # SyncBrowserToObjects silently returns while the registry is loading.
+        # Let the UI retry after the next Slate tick instead of reporting success.
+        if registry.is_loading_assets():
+            return False
+        asset = unreal.EditorAssetLibrary.load_asset(object_path)
+        if asset is None:
+            return False
+        utility = getattr(unreal, "EditorUtilityLibrary", None)
+        sync_folders = getattr(utility, "sync_browser_to_folders", None)
+        if callable(sync_folders):
+            sync_folders([object_path.rsplit("/", 1)[0]])
+        unreal.EditorAssetLibrary.sync_browser_to_objects([object_path])
+        return True
+    except Exception:
         return False
-    unreal.EditorAssetLibrary.sync_browser_to_objects([object_path])
-    return True
+
+
+def open_asset_editor(object_path):
+    """Open/focus the UE asset editor using the Python-exposed subsystem API."""
+    object_path = _normalize_object_path(object_path)
+    if unreal is None or not object_path:
+        return False, u"没有可打开的 UE 资源"
+    try:
+        asset = unreal.EditorAssetLibrary.load_asset(object_path)
+        if asset is None:
+            return False, u"UE 无法加载 {0}".format(object_path)
+        subsystem = unreal.get_editor_subsystem(unreal.AssetEditorSubsystem)
+        # The singular OpenEditorForAsset is C++ only in UE 5.7.
+        if not subsystem.open_editor_for_assets([asset]):
+            return False, u"UE 未能打开资源编辑器：{0}".format(object_path)
+        return True, ""
+    except Exception as exc:
+        return False, u"打开资源编辑器失败：{0}".format(exc)
 
 
 def sync_plan_to_content_browser(plan):
@@ -996,6 +1049,9 @@ class AssetStateWorker(QtCore.QObject):
                         "state": "error",
                         "message": str(exc),
                         "main_object_path": "",
+                        "source_available": None,
+                        "ue_directory_exists": None,
+                        "source_message": u"无法确认服务器 UE 发布文件：{0}".format(exc),
                     }
                 self.itemScanned.emit(self._generation, str(key), plan)
         finally:

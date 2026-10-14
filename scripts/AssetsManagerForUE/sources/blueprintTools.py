@@ -17,6 +17,7 @@ except ImportError:
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..utils import messageBox, myWidget
+from ..utils.source_folder_menu import add_open_source_folder_action
 from . import ue_asset_service
 
 
@@ -580,15 +581,21 @@ class BlueprintToolsUI(QtWidgets.QWidget):
             return
         self.card_list.setCurrentItem(item)
         menu = QtWidgets.QMenu(self)
+        add_open_source_folder_action(menu, os.path.dirname(str(item.itemData()[8])))
+        menu.addSeparator()
         load_action = QtGui.QAction(u"加载蓝图", self)
+        available = self._scan_task is None and not self._operationIsRunning()
+        load_action.setEnabled(available)
         load_action.setToolTip(u"加载该卡片所属分类的全部蓝图文件")
         locate_action = QtGui.QAction(u"在内容浏览器中定位", self)
         open_action = QtGui.QAction(u"打开资源", self)
+        open_action.setToolTip(u"在 UE 中打开所选资源的蓝图编辑器")
+        menu.setToolTipsVisible(True)
         menu.addAction(load_action)
         menu.addSeparator()
         menu.addAction(locate_action)
         menu.addAction(open_action)
-        ready = item.ueState() == "ready" and bool(item.ueMainObjectPath())
+        ready = available and item.ueState() == "ready" and bool(item.ueMainObjectPath())
         locate_action.setEnabled(ready)
         open_action.setEnabled(ready)
         load_action.triggered.connect(
@@ -907,15 +914,12 @@ class BlueprintToolsUI(QtWidgets.QWidget):
         if not object_path or unreal is None:
             self.infoMsg("warning", u"该蓝图尚未加载")
             return
-        try:
-            asset = unreal.EditorAssetLibrary.load_asset(object_path)
-            if asset is None:
-                raise RuntimeError(u"UE 无法加载 {0}".format(object_path))
-            subsystem = unreal.get_editor_subsystem(unreal.AssetEditorSubsystem)
-            subsystem.open_editor_for_asset(asset)
-            self.infoMsg("info", u"已打开：{0}".format(object_path))
-        except Exception as exc:
-            self.infoMsg("error", u"打开蓝图失败：{0}".format(exc))
+        success, error = ue_asset_service.open_asset_editor(object_path)
+        if success:
+            self.infoMsg("info", u"已在 UE 中打开蓝图编辑器：{0}".format(object_path))
+        else:
+            self.infoMsg("error", error)
+            QtWidgets.QMessageBox.warning(self, u"打开蓝图失败", error)
 
     def _placeBlueprint(self, payload):
         object_path = (payload or {}).get("object_path", "")

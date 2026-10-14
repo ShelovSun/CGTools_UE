@@ -37,10 +37,10 @@ def commonSettingPath():
     return os.path.join(serverTempPath(), 'commonSetting.json')
 
 
-def commonSetting():
+def commonSetting(force_reload=False):
     """读取 ShotManager 通用配置。"""
     global _COMMON_SETTING_CACHE
-    if _COMMON_SETTING_CACHE is not None:
+    if _COMMON_SETTING_CACHE is not None and not force_reload:
         return _COMMON_SETTING_CACHE
 
     Json = commonSettingPath()
@@ -63,6 +63,17 @@ def commonSetting():
             raise RuntimeError('Can not read common setting %s: %s' % (Json, e)) from e
     else:
         raise FileNotFoundError('Common setting does not exist: %s' % Json)
+
+
+def databaseHost(settings=None):
+    """数据库地址只取自通用配置；连接时重读，使编辑 host 后立即生效。"""
+    data = commonSetting(force_reload=True) if settings is None else settings
+    value = data.get('host') if isinstance(data, dict) else None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            'commonSetting.json 的 host 必须是非空字符串，请在 {0} 中配置数据库地址。'.format(
+                commonSettingPath()))
+    return value.strip()
 
 
 class SMConfig(object):

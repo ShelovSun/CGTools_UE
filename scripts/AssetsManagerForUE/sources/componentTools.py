@@ -9,6 +9,7 @@ import os
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..utils import messageBox, myWidget
+from ..utils.source_folder_menu import add_open_source_folder_action
 from . import component_service
 
 
@@ -772,6 +773,8 @@ class ComponentToolsUI(QtWidgets.QWidget):
             return
         self.card_list.setCurrentItem(item)
         menu = QtWidgets.QMenu(self)
+        add_open_source_folder_action(menu, str(item.itemData()[10]))
+        menu.addSeparator()
         if self._folderForItem(item) in self._categories_by_folder:
             open_action = menu.addAction(u"进入文件夹")
             open_action.setEnabled(self._scan_task is None and not self._operationIsRunning())

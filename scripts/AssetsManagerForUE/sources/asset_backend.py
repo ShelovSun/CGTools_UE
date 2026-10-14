@@ -26,8 +26,7 @@ _VENV = "Y:/MCCTools/src/venv/Lib/site-packages"
 if os.path.isdir(_VENV) and _VENV not in sys.path:
     sys.path.insert(0, _VENV)
 
-# 与 assetTools.py 保持一致的常量
-_DB_HOST = '10.0.203.34'
+# 数据库 host 与 Qt 界面一样，连接时读取通用配置。
 _DB_PORT = '5432'
 
 
@@ -74,6 +73,7 @@ def query_assets(project, asset_type):
     folder = icon 路径里 '/Icon/' 之前的部分（即资产根目录，和 importFile 取法一致）。
     """
     import psycopg2
+    from ..config import databaseHost
     user, password = _login()
     sql = (
         'SELECT "asset.date","asset.name","asset.zh_name","asset.mod_artist",'
@@ -84,7 +84,7 @@ def query_assets(project, asset_type):
     rows = []
     try:
         conn = psycopg2.connect(database=project, user=user, password=password,
-                                host=_DB_HOST, port=_DB_PORT)
+                                host=databaseHost(), port=_DB_PORT)
         cur = conn.cursor()
         cur.execute(sql)
         for r in cur.fetchall():

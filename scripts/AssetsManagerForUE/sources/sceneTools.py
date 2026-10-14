@@ -27,7 +27,7 @@ from ..utils.ue_window_style import (
     apply_ue_stylesheet,
     unreal_window_icon,
 )
-from ..config import commonSetting
+from ..config import commonSetting, databaseHost
 from . import ue_asset_service
 from PySide6 import QtWidgets, QtCore, QtGui
 
@@ -280,7 +280,6 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         self.asset_item_userRole = QtCore.Qt.UserRole
         self.type_item_userRole = QtCore.Qt.UserRole + 1
         self.isSQL = isSQL
-        self.host = "10.0.203.34"
         self.user = user
         self.password = password
         self.scene_isList = False
@@ -724,6 +723,9 @@ class SceneToolsUI(QtWidgets.QMainWindow):
     def sort_scene_ui(self):
         """Scene sorting menu; selecting the active field reverses it."""
         menu = QtWidgets.QMenu(self)
+        current_column, reverse = self._current_sort
+        sort_icon = QtGui.QIcon('%s/icon/%s' % (
+            self.scriptsPath, 'sort_down.png' if reverse else 'sort_up.png'))
         sort_columns = [
             (u'按日期排序', 0),
             (u'按场景名排序', 1),
@@ -734,6 +736,9 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         ]
         for name, column in sort_columns:
             action = QtGui.QAction(name, self)
+            if column == current_column:
+                action.setIcon(sort_icon)
+                action.setIconVisibleInMenu(True)
             action.triggered.connect(
                 lambda checked=False, col=column: self._do_scene_sort(col))
             menu.addAction(action)
@@ -812,7 +817,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
                  "scene.type" = '%s';
                  ''' % _type
         try:
-            conn = psycopg2.connect(database=_project, user=self.user, password=self.password, host=self.host,
+            conn = psycopg2.connect(database=_project, user=self.user, password=self.password, host=databaseHost(),
                                     port="5432")
             cur = conn.cursor()
             cur.execute(get_script)
@@ -1028,6 +1033,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
             item = self.main_listWgt.item(index)
             key = self._itemKey(item)
             asset_root = self._assetRootForItem(item)
+            item.setUESourceAvailability(None, u"正在检查服务器 UE 发布文件…")
             item.setUEState("scanning", u"正在检查 UE 发布资产…")
             requests.append((key, asset_root))
         if not requests:
@@ -1057,6 +1063,13 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         self._state_jobs = [
             job for job in self._state_jobs if job[0] is not finished_thread]
 
+    @staticmethod
+    def _setItemUEPlan(item, plan):
+        item.setUESourceAvailability(
+            plan.get("source_available"), plan.get("source_message"),
+            ue_directory_exists=plan.get("ue_directory_exists"))
+        item.setUEState(plan.get("state"), plan.get("message"), plan)
+
     def _applyUEState(self, generation, key, plan):
         if generation != self._state_generation:
             return
@@ -1073,7 +1086,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
                         u"UE 包已在工程中；未找到可直接拖放的 Actor 蓝图或网格体")
             except Exception:
                 pass
-        item.setUEState(plan.get("state"), plan.get("message"), plan)
+        self._setItemUEPlan(item, plan)
 
     def _chooseConflictFiles(self, plan):
         """让用户逐项决定冲突文件是覆盖服务器版本还是保留工程版本。"""
@@ -1371,6 +1384,8 @@ class SceneToolsUI(QtWidgets.QMainWindow):
                 plan = ue_asset_service.build_import_plan(
                     self._assetRootForItem(item))
             except Exception as exc:
+                item.setUESourceAvailability(
+                    None, u"无法确认服务器 UE 发布文件：{0}".format(exc))
                 item.setUEState("error", str(exc))
                 self.infoMsg("error", str(exc))
                 return
@@ -1380,6 +1395,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         # choices, so every differing file receives an overwrite/keep policy.
         plan = ue_asset_service.query_filesystem_state(
             plan, verify_content=True)
+        self._setItemUEPlan(item, plan)
 
         if not plan.get("files") or not plan.get("package_object_paths"):
             message = plan.get("message") or u"没有找到该资产的 UE 发布文件"
@@ -1452,7 +1468,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         try:
             item.setUEProgress(100, u"正在刷新 UE Asset Registry…")
             plan = ue_asset_service.refresh_asset_registry(plan)
-            item.setUEState(plan.get("state"), plan.get("message"), plan)
+            self._setItemUEPlan(item, plan)
             if plan.get("state") == "ready":
                 self.infoMsg("info", plan.get("message"))
             elif plan.get("state") == "partial":

@@ -986,6 +986,12 @@ class Item(QtWidgets.QListWidgetItem):
         self._ue_message = u"正在检查 UE 发布资产…"
         self._ue_plan = {}
         self._ue_main_object_path = ""
+        # 资产/场景页显式启用 UE 目录文字标记，加载可用性仍单独记录。
+        self._ue_source_badge_enabled = False
+        self._ue_source_available = None
+        self._ue_directory_exists = None
+        self._ue_source_message = ""
+        self._ue_label_font = None
 
         self._worker = ImageWorker()
         self._worker.setAutoDelete(False)
@@ -1128,11 +1134,35 @@ class Item(QtWidgets.QListWidgetItem):
         if plan is not None:
             self._ue_plan = plan
             self._ue_main_object_path = str(plan.get("main_object_path") or "")
-        try:
-            self.setToolTip(self._ue_message)
-        except Exception:
-            pass
+        self._updateUEToolTip()
         self.repaintItem()
+
+    def setUESourceAvailability(self, available, message="", ue_directory_exists=None):
+        self._ue_source_badge_enabled = True
+        self._ue_source_available = available if isinstance(available, bool) else None
+        self._ue_directory_exists = ue_directory_exists
+        if ue_directory_exists is True and self._ue_label_font is None:
+            self._ue_label_font = QtGui.QFont()
+            self._ue_label_font.setPixelSize(11)
+            self._ue_label_font.setBold(True)
+        self._ue_source_message = str(message or "")
+        self._updateUEToolTip()
+        self.repaintItem()
+
+    def ueSourceAvailability(self):
+        return self._ue_source_available
+
+    def ueSourceMessage(self):
+        return self._ue_source_message
+
+    def ueDirectoryExists(self):
+        return self._ue_directory_exists
+
+    def _updateUEToolTip(self):
+        messages = [self._ue_message]
+        if self._ue_source_badge_enabled and self._ue_source_message:
+            messages.insert(0, self._ue_source_message)
+        self.setToolTip("\n".join(message for message in messages if message))
 
     def ueState(self):
         return self._ue_state
@@ -1142,10 +1172,7 @@ class Item(QtWidgets.QListWidgetItem):
         self._ue_state = "importing"
         if message:
             self._ue_message = str(message)
-            try:
-                self.setToolTip(self._ue_message)
-            except Exception:
-                pass
+            self._updateUEToolTip()
         self.repaintItem()
 
     def ueProgress(self):
@@ -1685,12 +1712,28 @@ class Item(QtWidgets.QListWidgetItem):
                 if self.imageSequence():
                     self.paintPlayhead(painter, option)
                 self.paintUEStatus(painter, option)
+                self.paintUESourceAvailability(painter, option)
             finally:
                 painter.restore()
             self.paintSelectionOutline(painter, option)
 
         finally:
             painter.restore()
+
+    def paintUESourceAvailability(self, painter, option):
+        """确认有 UE 目录时，在右上角绘制 UE；主包是否可加载另行判断。"""
+        if not self._ue_source_badge_enabled or self._ue_directory_exists is not True:
+            return
+        icon_rect = self.iconRect(option)
+        if icon_rect.width() < 32 or icon_rect.height() < 24:
+            return
+        label_rect = QtCore.QRect(icon_rect.right() - 27, icon_rect.top() + 4, 24, 16)
+        painter.save()
+        painter.fillRect(label_rect, QtGui.QColor(0, 0, 0, 180))
+        painter.setPen(QtGui.QColor(100, 255, 140))
+        painter.setFont(self._ue_label_font)
+        painter.drawText(label_rect, QtCore.Qt.AlignCenter, "UE")
+        painter.restore()
 
     def paintUEStatus(self, painter, option):
         """绘制独立于 FBX 悬停播放线的 UE 包状态线与复制进度。"""

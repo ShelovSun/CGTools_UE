@@ -122,7 +122,7 @@ import AssetsManagerForUE.euw_bridge  # 注册 EUW 蓝图节点
 
 - 登录信息：后端复用 `%APPDATA%/ShotManagerTemp/setting.json` 里的 user/password 连数据库
   （和 Qt 版同源）。没登录过就先用一次 Qt 版登录，或确认该文件存在。
-- 数据库 `10.0.203.34:5432` 在 UE 机器上可达；查询失败时 `Bp Asset Names` 返回空串、状态栏可显示空。
+- 数据库地址读取 `commonSetting.json` 的 `host`（当前为 `smnas.diandian.info`），端口为 `5432`；查询失败时 `Bp Asset Names` 返回空串、状态栏可显示空。
 
 ## 下一步（确认这切片跑通后再做）
 

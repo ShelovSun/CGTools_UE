@@ -67,9 +67,15 @@ QMenu::item
     padding: 2px 20px 2px 20px;
 }
 
-QMenu::item:selected
+QMenu::item:selected:enabled
 {
     color: #000000;
+}
+
+QMenu::item:disabled
+{
+    color: #777777;
+    background-color: transparent;
 }
 
 QLineEdit

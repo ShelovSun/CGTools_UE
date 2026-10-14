@@ -15,6 +15,7 @@ except ImportError:
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..utils import messageBox, myWidget
+from ..utils.source_folder_menu import add_open_source_folder_action
 from . import ue_asset_service
 
 
@@ -23,6 +24,8 @@ VFX_CONTENT_CANDIDATES = (
     r"\\fznas.diandian.info\AC\MCCTools\src\UE574\VFX\Content",
 )
 VFX_LIBRARY_RELATIVE = "VFX"
+# 仅过滤浏览界面：按完整文件夹名匹配（忽略大小写），依赖迁移仍读取原始 Content。
+VFX_HIDDEN_FOLDER_NAMES = frozenset(("m_f", "mat", "mesh", "tex"))
 VFX_CLASS_LABELS = {
     "NiagaraSystem": u"Niagara系统",
     "ParticleSystem": u"Cascade粒子系统（已弃用）",
@@ -49,6 +52,35 @@ def _thumbnail_paths(source_file):
                         "AssetsManagerVfxThumbnails")
     png = os.path.join(root, digest + ".png")
     return png, png + ".no_thumbnail"
+
+
+class _VfxCardList(myWidget.MainQListWiget):
+    def mouseDoubleClickEvent(self, event):
+        if event.button() != QtCore.Qt.LeftButton:
+            event.accept()
+            return
+        super(_VfxCardList, self).mouseDoubleClickEvent(event)
+
+
+def _vfx_tree_icon():
+    """树节点统一使用粒子图标，不依赖 SVG 插件或资源缩略图。"""
+    pixmap = QtGui.QPixmap(32, 32)
+    pixmap.fill(QtCore.Qt.transparent)
+    painter = QtGui.QPainter(pixmap)
+    painter.setRenderHint(QtGui.QPainter.Antialiasing)
+    painter.setPen(QtCore.Qt.NoPen)
+    painter.setBrush(QtGui.QColor("#f0a64a"))
+    painter.drawPolygon(QtGui.QPolygonF([
+        QtCore.QPointF(16, 3), QtCore.QPointF(19, 12),
+        QtCore.QPointF(28, 16), QtCore.QPointF(19, 19),
+        QtCore.QPointF(16, 29), QtCore.QPointF(12, 19),
+        QtCore.QPointF(3, 16), QtCore.QPointF(12, 12),
+    ]))
+    painter.drawEllipse(QtCore.QPointF(6, 6), 2, 2)
+    painter.drawEllipse(QtCore.QPointF(26, 6), 2, 2)
+    painter.drawEllipse(QtCore.QPointF(26, 26), 2, 2)
+    painter.end()
+    return QtGui.QIcon(pixmap)
 
 
 class _ScanSignals(QtCore.QObject):
@@ -89,59 +121,67 @@ class _LibraryScanTask(QtCore.QRunnable):
             if not os.path.isdir(library_root):
                 raise RuntimeError(u"没有找到特效目录：{0}".format(library_root))
 
-            categories = []
-            category_names = sorted(
-                (name for name in os.listdir(library_root)
-                 if os.path.isdir(os.path.join(library_root, name))),
-                key=str.lower)
-            for category_name in category_names:
-                if self.cancelled:
-                    return
-                category_folder = os.path.join(library_root, category_name)
-                assets = []
-                # 与内容浏览器选中文件夹一致：卡片只列当前分类根部的 uasset；
-                # Materials/Textures 等子目录不摊平成卡片，但依赖迁移会递归收集它们。
-                for filename in sorted(os.listdir(category_folder), key=str.lower):
-                    if self.cancelled:
-                        return
-                    source_file = os.path.abspath(os.path.join(category_folder, filename))
-                    if (not os.path.isfile(source_file)
-                            or os.path.splitext(filename)[1].lower() != ".uasset"):
-                        continue
-                    relative = os.path.relpath(source_file, content_root)
-                    object_path = ue_asset_service.object_path_for_source_file(
-                        source_file, content_root)
-                    try:
-                        modified = int(os.path.getmtime(source_file))
-                    except OSError:
-                        modified = 0
-                    thumbnail, no_thumbnail = _thumbnail_paths(source_file)
-                    plan = ue_asset_service.build_single_package_import_plan(
-                        source_file, content_root, self.project_content_dir)
-                    assets.append({
-                        "name": os.path.splitext(filename)[0],
-                        "source_file": source_file,
-                        "relative": _forward(relative),
-                        "object_path": object_path,
-                        "modified": modified,
-                        "thumbnail": thumbnail,
-                        "no_thumbnail": no_thumbnail,
-                        "plan": plan,
-                    })
-                categories.append({
-                    "name": category_name,
-                    "folder": category_folder,
-                    "content_root": content_root,
-                    "assets": assets,
-                })
-
-            self.signals.loaded.emit(self.generation, {
-                "content_root": content_root,
-                "library_root": library_root,
-                "categories": categories,
-            })
+            library = self._scanDirectory(library_root, content_root, library_root, set())
+            if not self.cancelled:
+                library.update({"content_root": content_root, "library_root": library_root})
+                self.signals.loaded.emit(self.generation, library)
         except Exception as exc:
-            self.signals.failed.emit(self.generation, str(exc))
+            if not self.cancelled:
+                self.signals.failed.emit(self.generation, str(exc))
+
+    def _scanDirectory(self, folder, content_root, library_root, ancestors):
+        if self.cancelled:
+            raise RuntimeError(u"操作已取消")
+        try:
+            modified = int(os.path.getmtime(folder))
+        except OSError:
+            modified = 0
+        directory = {
+            "name": os.path.basename(folder),
+            "path": _forward(os.path.relpath(folder, library_root)),
+            "folder": folder,
+            "modified": modified,
+            "categories": [],
+            "assets": [],
+        }
+        with os.scandir(folder) as entries:
+            entries = sorted(entries, key=lambda entry: entry.name.lower())
+        ancestors = ancestors | {os.path.normcase(os.path.realpath(folder))}
+        for entry in entries:
+            if self.cancelled:
+                raise RuntimeError(u"操作已取消")
+            if entry.is_dir():
+                if entry.name.casefold() in VFX_HIDDEN_FOLDER_NAMES:
+                    continue
+                # Windows junction / 符号链接不能再次进入祖先目录。
+                if os.path.normcase(os.path.realpath(entry.path)) not in ancestors:
+                    directory["categories"].append(self._scanDirectory(
+                        entry.path, content_root, library_root, ancestors))
+                continue
+            if not entry.is_file() or os.path.splitext(entry.name)[1].lower() != ".uasset":
+                continue
+            source_file = os.path.abspath(entry.path)
+            thumbnail, no_thumbnail = _thumbnail_paths(source_file)
+            try:
+                modified = int(entry.stat().st_mtime)
+            except OSError:
+                modified = 0
+            directory["assets"].append({
+                "name": os.path.splitext(entry.name)[0],
+                # 保留扩展名，避免同一目录中同名文件夹与特效节点冲突。
+                "path": _forward(os.path.relpath(source_file, library_root)),
+                "category": directory["path"],
+                "source_file": source_file,
+                "relative": _forward(os.path.relpath(source_file, content_root)),
+                "object_path": ue_asset_service.object_path_for_source_file(
+                    source_file, content_root),
+                "modified": modified,
+                "thumbnail": thumbnail,
+                "no_thumbnail": no_thumbnail,
+                "plan": ue_asset_service.build_single_package_import_plan(
+                    source_file, content_root, self.project_content_dir),
+            })
+        return directory
 
 
 class VfxToolsUI(QtWidgets.QWidget):
@@ -157,14 +197,21 @@ class VfxToolsUI(QtWidgets.QWidget):
         self._scan_task = None
         self._library_payload = {}
         self._categories = {}
+        self._category_items = {}
+        self._asset_items = {}
+        self._categories_by_folder = {}
         self._assets_by_source = {}
+        self._rebuilding_cards = False
         self._copy_thread = None
         self._copy_worker = None
         self._copy_source = ""
         self._thumbnail_generation = 0
         self._thumbnail_queue = []
         self._thumbnail_bridge_error_reported = False
+        self._browser_sync_generation = 0
         self._fallback_icon = "%s/icon/Default.png" % self.scriptsPath
+        self._folder_icon = "%s/icon/floder.png" % self.scriptsPath
+        self._effect_icon = _vfx_tree_icon()
         self._buildUI()
         QtCore.QTimer.singleShot(0, self.refreshLibrary)
 
@@ -186,8 +233,17 @@ class VfxToolsUI(QtWidgets.QWidget):
         category_label.setStyleSheet(
             "font-weight:bold; color:#d7d7d7; padding:4px 5px; background:#252628;")
         left_layout.addWidget(category_label)
-        self.category_list = QtWidgets.QListWidget()
-        self.category_list.setSpacing(3)
+        self.category_list = QtWidgets.QTreeWidget()
+        self.category_list.setHeaderHidden(True)
+        self.category_list.setIndentation(16)
+        self.category_list.setIconSize(QtCore.QSize(16, 16))
+        self.category_list.setUniformRowHeights(True)
+        self.category_list.setStyleSheet(
+            "QTreeWidget{background:#1a1a1a; color:#b1b1b1; font-size:13px; border:0;}"
+            "QTreeWidget::item{padding:5px 2px;}"
+            "QTreeWidget::item:selected{background:#343a40; color:#f3f3f3;}"
+            "QTreeWidget::item:hover{background:#303030;}"
+        )
         self.category_list.setMinimumWidth(145)
         left_layout.addWidget(self.category_list, 1)
         splitter.addWidget(left)
@@ -198,6 +254,9 @@ class VfxToolsUI(QtWidgets.QWidget):
         center_layout.setSpacing(3)
         toolbar = QtWidgets.QHBoxLayout()
         toolbar.setSpacing(2)
+        self.parent_button = self._toolButton("back.png", u"返回上一级文件夹")
+        self.parent_button.setEnabled(False)
+        toolbar.addWidget(self.parent_button)
         self.display_button = self._toolButton("display_list.png", u"表单显示")
         toolbar.addWidget(self.display_button)
         self.size_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
@@ -218,18 +277,18 @@ class VfxToolsUI(QtWidgets.QWidget):
         toolbar.addWidget(self.load_button)
         self.search_edit = QtWidgets.QLineEdit()
         self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.setPlaceholderText(u"搜索当前分类的特效…")
+        self.search_edit.setPlaceholderText(u"搜索当前文件夹中的文件夹或特效…")
         self.search_edit.addAction(
             QtGui.QIcon("%s/icon/search.png" % self.scriptsPath),
             QtWidgets.QLineEdit.LeadingPosition)
         toolbar.addWidget(self.search_edit, 1)
         center_layout.addLayout(toolbar)
 
-        self.card_list = myWidget.MainQListWiget()
+        self.card_list = _VfxCardList()
         self.card_list.setSortingEnabled(False)
         self.card_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.card_list.setListColumns(
-            (u"修改日期", u"特效名", u"类型", u"服务器文件"),
+            (u"修改日期", u"名称", u"类型", u"服务器路径"),
             (0, 1, 2, 8),
             (135, 220, 190, 520),
             ("datetime", None, None, None),
@@ -269,6 +328,7 @@ class VfxToolsUI(QtWidgets.QWidget):
         self._updateDisplayButton()
 
         self.category_list.currentItemChanged.connect(self._categoryChanged)
+        self.parent_button.clicked.connect(self._goToParentCategory)
         self.display_button.clicked.connect(self.toggleDisplayMode)
         self.size_slider.valueChanged.connect(self._sizeChanged)
         self.size_slider.sliderReleased.connect(self._rememberSettings)
@@ -278,6 +338,7 @@ class VfxToolsUI(QtWidgets.QWidget):
         self.search_edit.textChanged.connect(self._searchTextChanged)
         self.card_list.customContextMenuRequested.connect(self._showContextMenu)
         self.card_list.itemSelectionChanged.connect(self._selectionChanged)
+        self.card_list.itemDoubleClicked.connect(self._enterFolder)
         self.card_list.assetDropRequested.connect(self._placeVfx)
         self.card_list.assetDragRejected.connect(self._dragRejected)
 
@@ -297,11 +358,17 @@ class VfxToolsUI(QtWidgets.QWidget):
             return
         self._rememberSettings()
         self._scan_generation += 1
+        self._browser_sync_generation += 1
         generation = self._scan_generation
         if self._scan_task is not None:
             self._scan_task.cancel()
+            self._scan_task = None
+        self._thumbnail_generation += 1
+        self._thumbnail_queue = []
         self.category_list.setEnabled(False)
         self.refresh_button.setEnabled(False)
+        self.parent_button.setEnabled(False)
+        self.load_button.setEnabled(False)
         self.card_list.clear()
         self.infoMsg("info", u"正在后台扫描服务器特效库…")
         try:
@@ -309,6 +376,7 @@ class VfxToolsUI(QtWidgets.QWidget):
         except Exception as exc:
             self.category_list.setEnabled(True)
             self.refresh_button.setEnabled(True)
+            self._updateParentButton()
             self.infoMsg("error", str(exc))
             return
         task = _LibraryScanTask(
@@ -321,25 +389,33 @@ class VfxToolsUI(QtWidgets.QWidget):
     def _scanFinished(self, generation, payload):
         if generation != self._scan_generation:
             return
-        self._scan_task = None
-        self._library_payload = payload or {}
-        categories = self._library_payload.get("categories") or []
+        payload = payload or {}
+        directories = []
+
+        def collect(directory):
+            directories.append(directory)
+            for child in directory.get("categories") or []:
+                collect(child)
+
+        collect(payload)
 
         # 文件系统线程只负责快速枚举，真实资产类型必须由 UE Asset Registry
         # 在主线程批量读取。只保留可作为完整特效使用的 NiagaraSystem 和旧版
         # Cascade ParticleSystem；材质、贴图、Emitter、模块等仍由依赖迁移带入。
         all_assets = [
             asset
-            for category in categories
+            for category in directories
             for asset in (category.get("assets") or [])
         ]
         filtered_count = 0
         if all_assets:
             self.infoMsg("info", u"正在识别 Niagara 和 Cascade 特效类型…")
             QtWidgets.QApplication.processEvents()
+            if generation != self._scan_generation:
+                return
             class_names, error = ue_asset_service.get_external_asset_class_names(
                 [asset["source_file"] for asset in all_assets],
-                self._library_payload.get("content_root") or "")
+                payload.get("content_root") or "")
             if generation != self._scan_generation:
                 return
             if error:
@@ -349,62 +425,165 @@ class VfxToolsUI(QtWidgets.QWidget):
                 short_name = str(class_name).rsplit(".", 1)[-1].rsplit("/", 1)[-1]
                 asset["asset_class"] = short_name
                 asset["type_label"] = VFX_CLASS_LABELS.get(short_name, "")
-            for category in categories:
+            for category in directories:
                 original_assets = category.get("assets") or []
                 category["assets"] = [
                     asset for asset in original_assets if asset.get("type_label")]
                 filtered_count += len(original_assets) - len(category["assets"])
+        self._scan_task = None
+        self._library_payload = payload
         self._library_payload["filtered_asset_count"] = filtered_count
-
-        self._categories = {value["name"]: value for value in categories}
+        self._categories = {}
+        self._category_items = {}
+        self._asset_items = {}
+        self._categories_by_folder = {}
         self._assets_by_source = {}
-        for category in categories:
-            for asset in category.get("assets") or []:
-                self._assets_by_source[os.path.normcase(asset["source_file"])] = asset
         self.category_list.blockSignals(True)
         self.category_list.clear()
-        selected_row = 0
-        for row, category in enumerate(categories):
-            item = QtWidgets.QListWidgetItem(category["name"])
-            item.setData(QtCore.Qt.UserRole, category["name"])
-            item.setToolTip(category["folder"])
-            item.setIcon(QtGui.QIcon("%s/icon/folder.svg" % self.scriptsPath))
-            self.category_list.addItem(item)
-            if category["name"] == self._preferred_category:
-                selected_row = row
+        folder_icon = QtGui.QIcon(self._folder_icon)
+
+        def add_category(category, parent=None):
+            path = category["path"]
+            self._categories[path] = category
+            self._categories_by_folder[os.path.normcase(category["folder"])] = category
+            item = QtWidgets.QTreeWidgetItem([category["name"]])
+            item.setData(0, QtCore.Qt.UserRole, path)
+            item.setToolTip(0, category["folder"])
+            item.setIcon(0, folder_icon)
+            if parent is None:
+                self.category_list.addTopLevelItem(item)
+            else:
+                parent.addChild(item)
+            self._category_items[path] = item
+            for child in category.get("categories") or []:
+                add_category(child, item)
+            for asset in category.get("assets") or []:
+                self._assets_by_source[os.path.normcase(asset["source_file"])] = asset
+                asset_item = QtWidgets.QTreeWidgetItem([asset["name"]])
+                asset_item.setData(0, QtCore.Qt.UserRole, asset["path"])
+                asset_item.setData(0, QtCore.Qt.UserRole + 1, asset["source_file"])
+                asset_item.setToolTip(0, u"{0}\n{1}".format(
+                    asset["type_label"], asset["source_file"]))
+                asset_item.setIcon(0, self._effect_icon)
+                item.addChild(asset_item)
+                self._asset_items[asset["path"]] = asset_item
+
+        root_category = dict(payload)
+        root_category.update({"name": u"特效库", "path": ".",
+                              "folder": payload.get("library_root") or ""})
+        add_category(root_category)
+        self.category_list.collapseAll()
         self.category_list.blockSignals(False)
         self.category_list.setEnabled(True)
         self.refresh_button.setEnabled(True)
-        if categories:
-            self.category_list.setCurrentRow(selected_row)
-        else:
-            self.card_list.clear()
-            self.infoMsg("warning", u"特效目录中没有分类文件夹")
+        self._navigateToCategory(self._preferred_category or ".")
 
     def _scanFailed(self, generation, error):
         if generation != self._scan_generation:
             return
         self._scan_task = None
+        self._thumbnail_generation += 1
+        self._thumbnail_queue = []
         self.category_list.setEnabled(True)
         self.refresh_button.setEnabled(True)
+        self._library_payload = {}
+        self._categories = {}
+        self._category_items = {}
+        self._asset_items = {}
+        self._categories_by_folder = {}
+        self._assets_by_source = {}
         self.category_list.clear()
         self.card_list.clear()
+        self.parent_button.setEnabled(False)
+        self.load_button.setEnabled(False)
         self.infoMsg("error", error)
 
     def _currentCategory(self):
         item = self.category_list.currentItem()
-        return str(item.data(QtCore.Qt.UserRole) or item.text()) if item else ""
+        if item is None:
+            return ""
+        if str(item.data(0, QtCore.Qt.UserRole)) in self._asset_items:
+            item = item.parent()
+        return str(item.data(0, QtCore.Qt.UserRole) or ".")
 
     def _categoryChanged(self, current, previous=None):
         del previous
         if current is None:
             self.card_list.clear()
             return
-        self._preferred_category = str(current.data(QtCore.Qt.UserRole) or current.text())
+        self._preferred_category = str(current.data(0, QtCore.Qt.UserRole) or ".")
+        self.search_edit.blockSignals(True)
+        self.search_edit.clear()
+        self.search_edit.blockSignals(False)
         self._rememberSettings()
+        self._updateParentButton()
         self._rebuildCards()
 
+    def _navigateToCategory(self, category_path):
+        item = self._category_items.get(category_path)
+        if item is None:
+            item = self._asset_items.get(category_path)
+        if item is None:
+            item = self._category_items.get(".")
+        if item is not None:
+            self._selectTreeItem(item)
+
+    def _selectTreeItem(self, item, rebuild=True):
+        parent = item.parent()
+        while parent is not None:
+            parent.setExpanded(True)
+            parent = parent.parent()
+        if rebuild:
+            self.category_list.setCurrentItem(item)
+        elif self.category_list.currentItem() != item:
+            signals_blocked = self.category_list.blockSignals(True)
+            try:
+                self.category_list.setCurrentItem(item)
+            finally:
+                self.category_list.blockSignals(signals_blocked)
+            self._preferred_category = str(item.data(0, QtCore.Qt.UserRole) or ".")
+            self._rememberSettings()
+        self.category_list.scrollToItem(item)
+
+    @staticmethod
+    def _sourceForItem(item):
+        if item is None:
+            return ""
+        try:
+            return os.path.normcase(str(item.itemData()[8]))
+        except (IndexError, TypeError, RuntimeError):
+            return ""
+
+    def _enterFolder(self, item):
+        if self._scan_task is not None or self._operationIsRunning():
+            return
+        category = self._categories_by_folder.get(self._sourceForItem(item))
+        if category is not None:
+            self._navigateToCategory(category["path"])
+
+    def _goToParentCategory(self):
+        current = self._category_items.get(self._currentCategory())
+        if current is not None and current.parent() is not None:
+            self._navigateToCategory(str(current.parent().data(0, QtCore.Qt.UserRole)))
+
+    def _updateParentButton(self):
+        current = self._category_items.get(self._currentCategory())
+        self.parent_button.setEnabled(
+            current is not None and current.parent() is not None
+            and self.category_list.isEnabled()
+            and not self._operationIsRunning())
+
     def _rebuildCards(self):
+        signals_blocked = self.card_list.blockSignals(True)
+        self._rebuilding_cards = True
+        try:
+            self._populateCards()
+        finally:
+            self._rebuilding_cards = False
+            self.card_list.blockSignals(signals_blocked)
+        self._selectionChanged()
+
+    def _populateCards(self):
         category_name = self._currentCategory()
         category = self._categories.get(category_name)
         self.card_list.clear()
@@ -413,6 +592,14 @@ class VfxToolsUI(QtWidgets.QWidget):
             return
         keyword = self.search_edit.text().strip().lower()
         rows = []
+        visible_folders = [
+            child for child in category.get("categories") or []
+            if not keyword or keyword in child["name"].lower()]
+        for child in visible_folders:
+            rows.append((
+                child.get("modified", 0), child["name"], u"文件夹",
+                "", "", "", "", self._folder_icon,
+                child["folder"], category_name, ""))
         visible_assets = []
         for asset in category.get("assets") or []:
             type_label = asset.get("type_label") or ""
@@ -431,8 +618,21 @@ class VfxToolsUI(QtWidgets.QWidget):
         self.card_list.setItemSize(self.size_slider.value())
         self.card_list.addItems("")
         self.card_list.setMode()
+        for index in range(self.card_list.count()):
+            item = self.card_list.item(index)
+            if self._sourceForItem(item) in self._categories_by_folder:
+                item.setDragEnabled(False)
+                item.setUEMainObjectPath("")
+                item.setUEState("folder", u"左键双击进入文件夹：{0}".format(item.itemData()[8]))
         for asset in visible_assets:
             self._applyAssetState(asset)
+        selected = self.category_list.currentItem()
+        path = str(selected.data(0, QtCore.Qt.UserRole)) if selected else ""
+        if path in self._asset_items:
+            item = self._itemForSource(self._asset_items[path].data(0, QtCore.Qt.UserRole + 1))
+            if item is not None:
+                self.card_list.setCurrentItem(item)
+                self.card_list.scrollToItem(item)
         self._queueThumbnails(visible_assets)
         ready_count = sum(
             1 for asset in visible_assets
@@ -440,8 +640,9 @@ class VfxToolsUI(QtWidgets.QWidget):
         hidden_count = int(self._library_payload.get("filtered_asset_count") or 0)
         hidden_text = (u"；已隐藏 {0} 个非系统资源".format(hidden_count)
                        if hidden_count else "")
-        self.infoMsg("info", u"{0}：{1} 个 Niagara/Cascade 特效；已加载 {2} 个{3}".format(
-            category_name, len(rows), ready_count, hidden_text))
+        category_label = category_name if category_name != "." else category["name"]
+        self.infoMsg("info", u"{0}：{1} 个文件夹，{2} 个 Niagara/Cascade 特效；已加载 {3} 个{4}".format(
+            category_label, len(visible_folders), len(visible_assets), ready_count, hidden_text))
 
     def _searchTextChanged(self, text):
         if not text:
@@ -449,12 +650,7 @@ class VfxToolsUI(QtWidgets.QWidget):
 
     # --------------------------------------------------------------- 卡片状态
     def _assetForItem(self, item):
-        if item is None:
-            return None
-        try:
-            return self._assets_by_source.get(os.path.normcase(str(item.itemData()[8])))
-        except (IndexError, TypeError, RuntimeError):
-            return None
+        return self._assets_by_source.get(self._sourceForItem(item))
 
     def _itemForSource(self, source_file):
         source_key = os.path.normcase(str(source_file))
@@ -488,8 +684,20 @@ class VfxToolsUI(QtWidgets.QWidget):
             item.setUEProgress(percent, message)
 
     def _selectionChanged(self):
+        if self._rebuilding_cards:
+            return
+        selected = self.card_list.currentItem()
+        asset = self._assetForItem(selected)
+        if selected is not None:
+            tree_item = (self._asset_items.get(asset["path"]) if asset
+                         else self._category_items.get(self._currentCategory()))
+            if tree_item is not None:
+                self._selectTreeItem(tree_item, rebuild=False)
+        self._updateParentButton()
         self.load_button.setEnabled(
-            self.card_list.currentItem() is not None
+            asset is not None
+            and self._scan_task is None
+            and self.category_list.isEnabled()
             and not self._operationIsRunning())
 
     def _operationIsRunning(self):
@@ -498,6 +706,7 @@ class VfxToolsUI(QtWidgets.QWidget):
     def _setOperationControls(self, enabled):
         self.category_list.setEnabled(bool(enabled))
         self.refresh_button.setEnabled(bool(enabled))
+        self._updateParentButton()
         if enabled:
             self._selectionChanged()
         else:
@@ -558,15 +767,30 @@ class VfxToolsUI(QtWidgets.QWidget):
             return
         self.card_list.setCurrentItem(item)
         menu = QtWidgets.QMenu(self)
+        source = str(item.itemData()[8])
+        is_folder = self._sourceForItem(item) in self._categories_by_folder
+        add_open_source_folder_action(menu, source if is_folder else os.path.dirname(source))
+        menu.addSeparator()
+        available = self._scan_task is None and not self._operationIsRunning()
+        if is_folder:
+            enter_action = menu.addAction(u"进入文件夹")
+            enter_action.setEnabled(available)
+            enter_action.triggered.connect(
+                lambda checked=False, selected=item: self._enterFolder(selected))
+            menu.exec_(self.card_list.viewport().mapToGlobal(point))
+            return
         load_action = QtGui.QAction(u"加载特效", self)
+        load_action.setEnabled(available)
         load_action.setToolTip(u"迁移该特效及其引用的材质、贴图和其他资产包")
         locate_action = QtGui.QAction(u"在内容浏览器中定位", self)
         open_action = QtGui.QAction(u"打开资源", self)
+        open_action.setToolTip(u"在 UE 中打开所选特效的 Niagara 或 Cascade 编辑器")
+        menu.setToolTipsVisible(True)
         menu.addAction(load_action)
         menu.addSeparator()
         menu.addAction(locate_action)
         menu.addAction(open_action)
-        ready = item.ueState() == "ready" and bool(item.ueMainObjectPath())
+        ready = available and item.ueState() == "ready" and bool(item.ueMainObjectPath())
         locate_action.setEnabled(ready)
         open_action.setEnabled(ready)
         load_action.triggered.connect(
@@ -679,15 +903,8 @@ class VfxToolsUI(QtWidgets.QWidget):
         asset["plan"] = plan
         self._applyAssetState(asset)
         if plan.get("state") == "ready":
-            object_path = plan.get("main_object_path") or asset.get("object_path") or ""
-            if object_path and ue_asset_service.sync_to_content_browser(object_path):
-                self.infoMsg(
-                    "info", u"{0}：迁移完成，已在内容浏览器中定位，可以拖入关卡".format(
-                        asset["name"]))
-            else:
-                self.infoMsg(
-                    "warning", u"{0}：迁移完成，但内容浏览器自动定位失败".format(
-                        asset["name"]))
+            self.infoMsg("info", u"{0}：加载完成，正在内容浏览器中定位…".format(asset["name"]))
+            self._queueBrowserSync(asset)
         else:
             QtWidgets.QMessageBox.warning(
                 self, u"加载特效失败", plan.get("message") or u"UE 无法注册该特效")
@@ -711,11 +928,39 @@ class VfxToolsUI(QtWidgets.QWidget):
         self._setOperationControls(True)
 
     # -------------------------------------------------------------- 使用资源
+    def _queueBrowserSync(self, asset):
+        self._browser_sync_generation += 1
+        generation = self._browser_sync_generation
+        source_key = os.path.normcase(asset["source_file"])
+        # Allow the copy-finished signal and the context menu to finish before
+        # focusing Slate, so Qt does not immediately take the focus back.
+        QtCore.QTimer.singleShot(80, lambda: self._syncVfxBrowser(source_key, generation))
+
+    def _syncVfxBrowser(self, source_key, generation, attempt=0):
+        if generation != self._browser_sync_generation:
+            return
+        asset = self._assets_by_source.get(source_key)
+        if asset is None or (asset.get("plan") or {}).get("state") != "ready":
+            return
+        # Always locate the selected effect rather than one of its dependencies.
+        object_path = asset.get("object_path") or ""
+        if ue_asset_service.sync_to_content_browser(object_path):
+            self.infoMsg("info", u"{0}：已在内容浏览器中定位，可以拖入关卡".format(asset["name"]))
+        elif attempt < 19:
+            QtCore.QTimer.singleShot(
+                150, lambda: self._syncVfxBrowser(source_key, generation, attempt + 1))
+        else:
+            self.infoMsg("warning", u"{0}：特效已加载，但内容浏览器定位失败：{1}".format(
+                asset["name"], object_path))
+
     def locateVfx(self, item=None):
         item = item or self.card_list.currentItem()
-        object_path = item.ueMainObjectPath() if item is not None else ""
-        if not object_path or not ue_asset_service.sync_to_content_browser(object_path):
-            self.infoMsg("warning", u"该特效尚未加载，或内容浏览器无法定位它")
+        asset = self._assetForItem(item)
+        if asset is None or item.ueState() != "ready" or not item.ueMainObjectPath():
+            self.infoMsg("warning", u"该特效尚未加载")
+            return
+        self.infoMsg("info", u"正在内容浏览器中定位：{0}".format(asset["name"]))
+        self._queueBrowserSync(asset)
 
     def openVfx(self, item=None):
         item = item or self.card_list.currentItem()
@@ -723,15 +968,12 @@ class VfxToolsUI(QtWidgets.QWidget):
         if not object_path or unreal is None:
             self.infoMsg("warning", u"该特效尚未加载")
             return
-        try:
-            asset = unreal.EditorAssetLibrary.load_asset(object_path)
-            if asset is None:
-                raise RuntimeError(u"UE 无法加载 {0}".format(object_path))
-            unreal.get_editor_subsystem(
-                unreal.AssetEditorSubsystem).open_editor_for_asset(asset)
-            self.infoMsg("info", u"已打开：{0}".format(object_path))
-        except Exception as exc:
-            self.infoMsg("error", u"打开特效失败：{0}".format(exc))
+        success, error = ue_asset_service.open_asset_editor(object_path)
+        if success:
+            self.infoMsg("info", u"已在 UE 中打开特效编辑器：{0}".format(object_path))
+        else:
+            self.infoMsg("error", error)
+            QtWidgets.QMessageBox.warning(self, u"打开特效失败", error)
 
     def _placeVfx(self, payload):
         object_path = (payload or {}).get("object_path", "")
@@ -786,7 +1028,8 @@ class VfxToolsUI(QtWidgets.QWidget):
             return
         settings = QtCore.QSettings("AssetsManagerUE", "VfxLibrary")
         settings.setValue("thumbSize", self.size_slider.value())
-        settings.setValue("category", self._currentCategory())
+        item = self.category_list.currentItem()
+        settings.setValue("category", str(item.data(0, QtCore.Qt.UserRole)) if item else "")
         settings.setValue("isList", self.isList)
 
     def infoMsg(self, icon, text):
@@ -794,6 +1037,7 @@ class VfxToolsUI(QtWidgets.QWidget):
 
     def shutdownThreads(self):
         self._scan_generation += 1
+        self._browser_sync_generation += 1
         self._thumbnail_generation += 1
         self._thumbnail_queue = []
         if self._scan_task is not None:
