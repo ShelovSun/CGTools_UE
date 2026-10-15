@@ -435,6 +435,9 @@ class MainQListWiget(QtWidgets.QListWidget):
     dragSignal = QtCore.Signal()
     assetDropRequested = QtCore.Signal(object)
     assetDragRejected = QtCore.Signal(str)
+    statusChangeRequested = QtCore.Signal(object, int, str)
+    detailEditRequested = QtCore.Signal(object, int, object)
+    cellEditorsInvalidated = QtCore.Signal()
 
     DEF_SPACING = 8
     TEXT_AREA_HEIGHT = 48
@@ -466,6 +469,12 @@ class MainQListWiget(QtWidgets.QListWidget):
         self._listFieldIndices = list(self.LIST_FIELD_INDICES)
         self._listFormatters = list(self.LIST_FORMATTERS)
         self._listAlignments = list(self.LIST_ALIGNMENTS)
+        self._statusColumns = {}
+        self._detailColumns = {}
+        self._uePublishedStatusField = None
+        self._statusEditingEnabled = False
+        self._statusPress = None
+        self._statusMenu = None
         # 不使用系统 QDrag：UE Slate 视口不是 Qt drop target，会显示“禁止拖放”光标。
         # 改用 QWidget 隐式鼠标捕获 + 自绘预览，并在松手时把屏幕坐标交给 C++。
         self.setDragEnabled(False)
@@ -505,6 +514,7 @@ class MainQListWiget(QtWidgets.QListWidget):
 
     def _onScroll(self, value=None):
         """滚动事件：50ms 防抖，把一次连续滚动合并成一次可见区刷新。"""
+        self._closeStatusMenu()
         self._scrollTimer.stop()
         self._scrollTimer.start(50)
 
@@ -586,6 +596,104 @@ class MainQListWiget(QtWidgets.QListWidget):
     def listAlignments(self):
         return tuple(self._listAlignments)
 
+    def setUEPublishedStatusField(self, field_index):
+        """Enable the publication badge only on database asset/scene lists."""
+        self._uePublishedStatusField = field_index
+        self.viewport().update()
+
+    def uePublishedStatusField(self):
+        return self._uePublishedStatusField
+
+    def setStatusColumns(self, columns):
+        """Opt in only the database-backed pages to status dropdowns."""
+        self._statusColumns = dict(columns)
+
+    def setDetailColumns(self, columns):
+        """Text cells use double-click; artist cells open a grouped selector."""
+        self._detailColumns = dict(columns)
+
+    def setStatusEditingEnabled(self, enabled):
+        self._statusEditingEnabled = bool(enabled)
+        if not enabled:
+            self._closeStatusMenu()
+        self.viewport().update()
+
+    def _closeStatusMenu(self):
+        if self._statusMenu is not None:
+            self._statusMenu.close()
+            self._statusMenu = None
+        self._statusPress = None
+        self.cellEditorsInvalidated.emit()
+
+    def _statusCellAt(self, point):
+        return self._cellAt(point, self._statusColumns)
+
+    def _cellAt(self, point, fields):
+        if not self.isList() or not self._statusEditingEnabled:
+            return None
+        item = self.itemAt(point)
+        if item is None:
+            return None
+        rect = self.visualItemRect(item)
+        x = rect.x()
+        for field, width in zip(self.listFieldIndices(), self.listColumnWidths()):
+            cell = QtCore.QRect(x, rect.y(), width, rect.height() - 3)
+            if cell.contains(point) and field in fields:
+                return item, field, cell
+            x += width
+        return None
+
+    def _openDetailEditor(self, item, field, cell):
+        self._closeStatusMenu()
+        anchor = QtCore.QRect(self.viewport().mapToGlobal(cell.topLeft()), cell.size())
+        self.detailEditRequested.emit(tuple(item.itemData()), field, anchor)
+
+    def _showStatusMenu(self, item, field, cell):
+        self._closeStatusMenu()
+        index = QtCore.QPersistentModelIndex(self.indexFromItem(item))
+        menu = QtWidgets.QMenu(self)
+        menu.setAttribute(QtCore.Qt.WA_DeleteOnClose)
+        self._statusMenu = menu
+        current = item.itemData()[field]
+        for value in self._statusColumns[field]:
+            action = menu.addAction(value)
+            action.setCheckable(True)
+            action.setChecked(value == current)
+            action.triggered.connect(
+                lambda _checked=False, value=value:
+                self._requestStatusChange(index, field, value))
+        menu.aboutToHide.connect(lambda: self._statusMenuHidden(menu))
+        menu.popup(self.viewport().mapToGlobal(cell.bottomLeft()))
+
+    def _statusMenuHidden(self, menu):
+        if self._statusMenu is menu:
+            self._statusMenu = None
+        menu.deleteLater()
+
+    def _requestStatusChange(self, index, field, value):
+        if index.isValid() and self.isList() and self._statusEditingEnabled:
+            item = self.item(index.row())
+            self.statusChangeRequested.emit(tuple(item.itemData()), field, value)
+
+    def updateStatusData(self, name, indices, value):
+        """Update cached and visible rows without rebuilding previews/selection."""
+        def updated(row):
+            if len(row) > 1 and str(row[1]) == name:
+                row = list(row)
+                for index in indices:
+                    if index < len(row):
+                        row[index] = value
+                return tuple(row)
+            return row
+        self.setItems([updated(row) for row in self.items()])
+        for i in range(self.count()):
+            item = self.item(i)
+            row = item.itemData()
+            new_row = updated(row)
+            if new_row is not row:
+                item.setItemData(new_row)
+        self.viewport().update()
+
     def setListColumns(self, headers, field_indices, widths,
                        formatters=None, alignments=None):
         """为当前页面设置列表模式的列名、数据下标和显示格式。"""
@@ -645,8 +753,19 @@ class MainQListWiget(QtWidgets.QListWidget):
     def mousePressEvent(self, event):
         super(MainQListWiget, self).mousePressEvent(event)
         if event.button() == QtCore.Qt.LeftButton:
-            self._assetDragStart = QtCore.QPoint(event.pos())
-            self._assetDragItem = self.itemAt(event.pos())
+            point = event.position().toPoint()
+            hit = self._cellAt(point, set(self._statusColumns) | set(self._detailColumns))
+            self._statusPress = None
+            if hit is not None:
+                item, field, _cell = hit
+                self._statusPress = (
+                    QtCore.QPersistentModelIndex(self.indexFromItem(item)),
+                    field, point)
+                self._assetDragStart = None
+                self._assetDragItem = None
+                return
+            self._assetDragStart = point
+            self._assetDragItem = self.itemAt(point)
             self._assetDragActive = False
             self._assetDragRejectedOnce = False
 
@@ -718,6 +837,8 @@ class MainQListWiget(QtWidgets.QListWidget):
         self._assetDragActive = False
 
     def mouseReleaseEvent(self, event):
+        status_press = self._statusPress
+        self._statusPress = None
         was_dragging = self._assetDragActive
         item = self._assetDragItem
         global_pos = self._eventGlobalPos(event)
@@ -737,6 +858,30 @@ class MainQListWiget(QtWidgets.QListWidget):
         self._assetDragStart = None
         self._assetDragItem = None
         self._assetDragRejectedOnce = False
+        if event.button() == QtCore.Qt.LeftButton and status_press is not None:
+            index, field, start = status_press
+            point = event.position().toPoint()
+            hit = self._cellAt(point, set(self._statusColumns) | set(self._detailColumns))
+            if (index.isValid() and hit is not None and hit[1] == field
+                    and self.row(hit[0]) == index.row()
+                    and (point - start).manhattanLength()
+                    < QtWidgets.QApplication.startDragDistance()):
+                if field in self._statusColumns:
+                    self._showStatusMenu(*hit)
+                elif self._detailColumns.get(field) == "artist":
+                    self._openDetailEditor(*hit)
+
+    def mouseDoubleClickEvent(self, event):
+        hit = self._cellAt(event.position().toPoint(), self._detailColumns)
+        if (event.button() == QtCore.Qt.LeftButton and hit is not None
+                and self._detailColumns[hit[1]] == "text"):
+            self.setCurrentItem(hit[0])
+            self._assetDragStart = None
+            self._assetDragItem = None
+            self._openDetailEditor(*hit)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def mouseMoveEvent(self, e):
         if (self._assetDragItem is not None and self._assetDragStart is not None
@@ -802,6 +947,7 @@ class MainQListWiget(QtWidgets.QListWidget):
         return self._isList
 
     def setIsList(self, value):
+        self._closeStatusMenu()
         self._isList = value
 
     def itemSize(self):
@@ -865,6 +1011,7 @@ class MainQListWiget(QtWidgets.QListWidget):
         重写 clear：清空前把所有 item 标记为不可视，使线程池中尚未执行的加载任务
         在排到时立即跳过（见 ImageWorker.run），避免旧数据的解码拖慢新数据。
         """
+        self._closeStatusMenu()
         for i in range(self.count()):
             try:
                 item = self.item(i)
@@ -986,8 +1133,7 @@ class Item(QtWidgets.QListWidgetItem):
         self._ue_message = u"正在检查 UE 发布资产…"
         self._ue_plan = {}
         self._ue_main_object_path = ""
-        # 资产/场景页显式启用 UE 目录文字标记，加载可用性仍单独记录。
-        self._ue_source_badge_enabled = False
+        # Server package availability is independent of database publication status.
         self._ue_source_available = None
         self._ue_directory_exists = None
         self._ue_source_message = ""
@@ -1138,13 +1284,8 @@ class Item(QtWidgets.QListWidgetItem):
         self.repaintItem()
 
     def setUESourceAvailability(self, available, message="", ue_directory_exists=None):
-        self._ue_source_badge_enabled = True
         self._ue_source_available = available if isinstance(available, bool) else None
         self._ue_directory_exists = ue_directory_exists
-        if ue_directory_exists is True and self._ue_label_font is None:
-            self._ue_label_font = QtGui.QFont()
-            self._ue_label_font.setPixelSize(11)
-            self._ue_label_font.setBold(True)
         self._ue_source_message = str(message or "")
         self._updateUEToolTip()
         self.repaintItem()
@@ -1158,9 +1299,21 @@ class Item(QtWidgets.QListWidgetItem):
     def ueDirectoryExists(self):
         return self._ue_directory_exists
 
+    def isUEPublished(self):
+        widget = self.itemsWidget()
+        if widget is None:
+            return False
+        field = widget.uePublishedStatusField()
+        if field is None:
+            return False
+        try:
+            return self.itemData()[field] == "UE"
+        except (IndexError, KeyError, TypeError):
+            return False
+
     def _updateUEToolTip(self):
         messages = [self._ue_message]
-        if self._ue_source_badge_enabled and self._ue_source_message:
+        if self._ue_source_message:
             messages.insert(0, self._ue_source_message)
         self.setToolTip("\n".join(message for message in messages if message))
 
@@ -1712,7 +1865,7 @@ class Item(QtWidgets.QListWidgetItem):
                 if self.imageSequence():
                     self.paintPlayhead(painter, option)
                 self.paintUEStatus(painter, option)
-                self.paintUESourceAvailability(painter, option)
+                self.paintUEPublished(painter, option)
             finally:
                 painter.restore()
             self.paintSelectionOutline(painter, option)
@@ -1720,13 +1873,17 @@ class Item(QtWidgets.QListWidgetItem):
         finally:
             painter.restore()
 
-    def paintUESourceAvailability(self, painter, option):
-        """确认有 UE 目录时，在右上角绘制 UE；主包是否可加载另行判断。"""
-        if not self._ue_source_badge_enabled or self._ue_directory_exists is not True:
+    def paintUEPublished(self, painter, option):
+        """Show UE directly from the database model/scene status, before any scan."""
+        if not self.isUEPublished():
             return
         icon_rect = self.iconRect(option)
         if icon_rect.width() < 32 or icon_rect.height() < 24:
             return
+        if self._ue_label_font is None:
+            self._ue_label_font = QtGui.QFont()
+            self._ue_label_font.setPixelSize(11)
+            self._ue_label_font.setBold(True)
         label_rect = QtCore.QRect(icon_rect.right() - 27, icon_rect.top() + 4, 24, 16)
         painter.save()
         painter.fillRect(label_rect, QtGui.QColor(0, 0, 0, 180))
@@ -2120,6 +2277,7 @@ class Item(QtWidgets.QListWidgetItem):
                 u"未开始": QtGui.QColor(205, 72, 72, 235),
                 u"制作中": QtGui.QColor(199, 132, 52, 235),
                 u"已完成": QtGui.QColor(106, 108, 111, 235),
+                "UE": QtGui.QColor(0, 85, 170),
             }
 
             columns = zip(field_indices, widths, formatters, alignments)
@@ -2144,19 +2302,34 @@ class Item(QtWidgets.QListWidgetItem):
                     # 备注在库中以 $ 分隔多条记录；表格中单行紧凑显示。
                     text = text.replace("$", "  |  ")
 
-                if text in status_colors:
+                is_status_cell = items_widget.listHeaders()[column].endswith(u"状态")
+                if is_status_cell and text in status_colors:
                     painter.fillRect(cell.adjusted(1, 1, -1, -1), status_colors[text])
 
-                text_rect = cell.adjusted(6, 0, -6, 0)
+                editable = (field_index in items_widget._statusColumns
+                            or items_widget._detailColumns.get(field_index) == "artist")
+                text_rect = cell.adjusted(6, 0, -17 if editable else -6, 0)
                 elided = metrics.elidedText(text, QtCore.Qt.ElideRight,
                                             max(0, text_rect.width()))
                 if cell_alignment == "center":
                     alignment = QtCore.Qt.AlignCenter
                 else:
                     alignment = QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
-                painter.setPen(QtGui.QColor(244, 244, 244) if isSelected
-                               else QtGui.QColor(220, 220, 220))
+                if is_status_cell and text == "UE":
+                    painter.setPen(QtGui.QColor(255, 255, 255))
+                else:
+                    painter.setPen(QtGui.QColor(244, 244, 244) if isSelected
+                                   else QtGui.QColor(220, 220, 220))
                 painter.drawText(text_rect, alignment, elided)
+                if editable:
+                    painter.setPen(QtCore.Qt.NoPen)
+                    painter.setBrush(QtGui.QColor(
+                        255, 255, 255, 230 if items_widget._statusEditingEnabled else 90))
+                    cx, cy = cell.right() - 9, cell.center().y()
+                    painter.drawPolygon(QtGui.QPolygon([
+                        QtCore.QPoint(cx - 3, cy - 1),
+                        QtCore.QPoint(cx + 3, cy - 1),
+                        QtCore.QPoint(cx, cy + 3)]))
                 painter.setPen(QtGui.QColor(70, 71, 73))
                 painter.drawLine(cell.right(), cell.top(), cell.right(), cell.bottom())
                 x += width

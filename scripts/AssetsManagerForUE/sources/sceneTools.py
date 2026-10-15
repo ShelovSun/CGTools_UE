@@ -28,7 +28,7 @@ from ..utils.ue_window_style import (
     unreal_window_icon,
 )
 from ..config import commonSetting, databaseHost
-from . import ue_asset_service
+from . import ue_asset_service, status_edit_service
 from PySide6 import QtWidgets, QtCore, QtGui
 
 
@@ -292,6 +292,9 @@ class SceneToolsUI(QtWidgets.QMainWindow):
 
         # 同步搭建界面（纯代码，无 I/O）→ 窗口一显示即最终布局，不闪。
         self.build_ui()
+        self._status_editor = status_edit_service.StatusEditor(
+            self, "scene", self._statusContext)
+        self._status_editor.saved.connect(self._detailSaved)
         self.firstView()
         self.viewThumbnail()
         # 数据加载(DB 查询)延迟到窗口显示后
@@ -402,6 +405,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         tool.addWidget(self.scene_key_line, 1)
         centerV.addLayout(tool)
         self.main_listWgt = myWidget.MainQListWiget()
+        self.main_listWgt.setUEPublishedStatusField(4)  # scene.status
         self.main_listWgt.setSortingEnabled(False)
         self.main_listWgt.setListColumns(
             (u"创建日期", u"场景名", u"中文名", u"制作人", u"状态", u"备注"),
@@ -777,6 +781,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         """
         根据type，project，设置主面板item显示
         """
+        self._status_editor.setLoading()
         project, _type, path = self.getPanelsData()
         if os.path.exists(str(path)):
             self.update_scene_thread = myWidget.MyThread()
@@ -784,7 +789,20 @@ class SceneToolsUI(QtWidgets.QMainWindow):
             self.infoMsg("info", "Loading...")
             self.update_scene_thread.start()
         else:
-            self.main_listWgt.clear()
+            self.listWidgetAddItems([])
+
+    def _statusContext(self):
+        current_type = self.type_listWgt.currentItem()
+        return (str(self.proj_comb.currentText()),
+                str(current_type.text()) if current_type is not None else "")
+
+    def _detailSaved(self, request):
+        if (request[3] == 2 and request[:2] == self._statusContext()
+                and request[:2] == self._status_editor.context
+                and self.preview_wgt is not None):
+            selected = self.main_listWgt.currentItem()
+            if selected is not None and str(selected.itemData()[1]) == request[2]:
+                self.preview_wgt.setTitle(request[2], request[4])
 
     def getItemsDict(self):
         """
@@ -847,6 +865,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         start_time = time.time()
         if new_dict is not None:
             listWgt.setItems(new_dict or [])
+            self._status_editor.setContext(*self._statusContext())
         data = list(listWgt.items() or [])
         if data:
             self._sort_scene_data(data)
@@ -1633,6 +1652,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
 
     def shutdownThreads(self):
         """停止场景页的 UE 包扫描/迁移任务，防止关闭窗口时销毁运行中线程。"""
+        self._status_editor.shutdown()
         self._state_generation += 1
         jobs = list(self._state_jobs)
         for thread, worker in jobs:

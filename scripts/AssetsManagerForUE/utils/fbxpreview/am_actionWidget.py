@@ -5,8 +5,8 @@
 递归列出资产 ``Action`` 目录下的所有 ``.fbx`` 动作文件。点击某动作 -> 发 actionActivated,
 由主面板通知 PreviewGLWidget 把该动作的骨骼动画套用到绑定文件上循环播放。
 
-约定:绑定文件位于 ``.../<asset>/FBX/<asset>.fbx``,动作目录为把路径中的 ``/FBX/`` 换成
-``/Action/`` 后的目录(``.../<asset>/Action``)。动作文件一般只含骨骼动画、无网格。
+绑定文件位于 ``.../<project>/Assets/<type>/<asset>/FBX/<asset>.fbx``，动作库位于
+``.../<project>/Animations/<type>/<asset>/Action``。动作文件一般只含骨骼动画、无网格。
 """
 
 import datetime
@@ -29,11 +29,13 @@ class AssetActionWidget(QtWidgets.QWidget):
     """
 
     actionActivated = QtCore.Signal(str)
+    loadActionRequested = QtCore.Signal(str)
     importActionRequested = QtCore.Signal(str)
 
     def __init__(self, parent=None):
         super(AssetActionWidget, self).__init__(parent)
         self._action_dir = ""
+        self._load_busy = False
         self._build_ui()
         self.clear()
 
@@ -102,6 +104,9 @@ class AssetActionWidget(QtWidgets.QWidget):
         outer.addWidget(self._list, 1)
 
     # ------------------------------------------------------------------ 对外接口
+    def setLoadBusy(self, busy):
+        self._load_busy = bool(busy)
+
     def clear(self):
         """清空动作列表,显示占位提示。"""
         self._action_dir = ""
@@ -114,7 +119,7 @@ class AssetActionWidget(QtWidgets.QWidget):
         self._list.blockSignals(False)
 
     def setAsset(self, rig_fbx_path):
-        """根据绑定文件路径(.../FBX/<asset>.fbx)填充其 Action 目录下的动作列表(递归)。"""
+        """根据绑定文件路径填充 Animations 下该资产的 Action 动作列表(递归)。"""
         self._search.blockSignals(True)
         self._search.clear()
         self._search.blockSignals(False)
@@ -154,16 +159,17 @@ class AssetActionWidget(QtWidgets.QWidget):
 
     # ------------------------------------------------------------------ 内部
     def _derive_action_dir(self, rig_fbx_path):
-        """绑定文件路径 -> 动作目录:把 '/FBX/' 换成 '/Action/' 取所在目录。
-        无 '/FBX/' 锚点时回退到资产根下的 'Action'。"""
+        """模型留在 Assets；动作统一读取同一项目的 Animations 目录。"""
         if not rig_fbx_path:
             return ""
-        p = rig_fbx_path.replace("\\", "/")
-        if "/FBX/" in p:
-            return os.path.dirname(p.replace("/FBX/", "/Action/", 1))
-        # 回退:.../<asset>/<file>.fbx -> .../<asset>/Action
-        root = os.path.dirname(os.path.dirname(p))
-        return (root + "/Action") if root else ""
+        path = str(rig_fbx_path).replace("\\", "/")
+        fbx_index = path.lower().rfind("/fbx/")
+        asset_root = path[:fbx_index] if fbx_index >= 0 else os.path.dirname(path)
+        # 只替换资产根上方的 Assets 层，保留项目、类型、资产名及盘符/UNC 前缀。
+        parts = asset_root.rsplit("/", 3)
+        if len(parts) == 4 and parts[1].lower() == "assets":
+            asset_root = "/".join((parts[0], "Animations", parts[2], parts[3]))
+        return asset_root + "/Action" if asset_root else ""
 
     def _scan_actions(self, action_dir):
         """递归收集 .fbx，返回相对路径、全路径、修改时间戳和字节数。"""
@@ -296,13 +302,20 @@ class AssetActionWidget(QtWidgets.QWidget):
         menu = QtWidgets.QMenu(self._list)
         open_folder_action = menu.addAction(u"打开文件夹")
         open_folder_action.setEnabled(os.path.isdir(folder))
-        import_action = menu.addAction(u"导入动作")
-        import_action.setEnabled(os.path.isfile(path))
+        package_path = os.path.splitext(path)[0] + ".uasset"
+        load_action = menu.addAction(u"加载动作")
+        load_action.setEnabled(not self._load_busy and os.path.isfile(package_path))
+        load_action.setToolTip(u"加载同名 UE 动画包：{0}".format(package_path))
+        import_action = menu.addAction(u"导入动作FBX")
+        import_action.setEnabled(not self._load_busy and os.path.isfile(path))
+        menu.setToolTipsVisible(True)
 
-        chosen = menu.exec(self._list.viewport().mapToGlobal(point))
+        chosen = menu.exec_(self._list.viewport().mapToGlobal(point))
         if chosen == open_folder_action:
             self._open_action_folder(path)
-        elif chosen == import_action:
+        elif chosen == load_action and load_action.isEnabled():
+            self.loadActionRequested.emit(package_path.replace("\\", "/"))
+        elif chosen == import_action and import_action.isEnabled():
             self.importActionRequested.emit(path.replace("\\", "/"))
 
     @staticmethod

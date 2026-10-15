@@ -190,8 +190,12 @@ class AssetCardAvailabilityTests(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         return {action.text(): action for action in captured[0].actions()}
 
-    def test_load_menu_availability_and_directory_label_have_separate_rules(self):
-        rows = [self.row(name) for name in ("red", "green", "gray", "empty", "sidecars")]
+    def test_load_menu_checks_packages_independently_of_database_badge(self):
+        rows = []
+        for name in ("red", "green", "gray", "empty", "sidecars"):
+            row = list(self.row(name))
+            row[4] = "" if name == "green" else "UE"
+            rows.append(tuple(row))
         self.package("green")
         (self.root / "empty/UE").mkdir()
         self.package("sidecars", "UE/Content/Hero.uexp")
@@ -206,6 +210,7 @@ class AssetCardAvailabilityTests(unittest.TestCase):
             item = self.item(name)
             self.assertIs(item.ueSourceAvailability(), available)
             self.assertIs(item.ueDirectoryExists(), directory_exists)
+            self.assertEqual(item.isUEPublished(), name != "green")
             actions = self.menu_actions(item)
             self.assertEqual(actions["加载资产"].isEnabled(), available is True)
             self.assertFalse(actions["在内容浏览器中定位"].isEnabled())
@@ -360,37 +365,61 @@ class AssetCardAvailabilityTests(unittest.TestCase):
         self.assertIs(self.item("Hero").ueSourceAvailability(), True)
 
     def test_badge_is_opt_in_and_project_errors_do_not_change_source_availability(self):
+        widget = myWidget.MainQListWiget()
         item = myWidget.Item()
-        item.setItemsWidget(self.ui.main_listWgt)
+        item.setItemsWidget(widget)
+        row = list(self.row("Hero"))
+        row[4] = "UE"
+        item.setItemData(tuple(row))
+        item.setUESourceAvailability(True, "server ready", ue_directory_exists=True)
+        # Other library pages do not opt into database badges.
+        self.assertFalse(item.isUEPublished())
+        self.assertFalse(self.badge_painted(item))
+        widget.setUEPublishedStatusField(4)
+        item.setUEState("error", "project copy failed")
+        self.assertTrue(item.isUEPublished())
+        self.assertTrue(self.badge_painted(item))
+        self.assertIs(item.ueSourceAvailability(), True)
+        self.assertIn("server ready", item.toolTip())
+        self.assertIn("project copy failed", item.toolTip())
+        widget.deleteLater()
+
+    def badge_painted(self, item):
         option = QtWidgets.QStyleOptionViewItem()
         option.rect = QtCore.QRect(0, 0, 124, 164)
         image = QtGui.QImage(124, 164, QtGui.QImage.Format_ARGB32)
         image.fill(QtCore.Qt.transparent)
         painter = QtGui.QPainter(image)
-        item.paintUESourceAvailability(painter, option)
+        item.paintUEPublished(painter, option)
         painter.end()
-        self.assertFalse(any(image.pixelColor(x, y).alpha() for x in range(124) for y in range(164)))
-        item.setUESourceAvailability(True, "server ready", ue_directory_exists=True)
-        item.setUEState("error", "project copy failed")
-        self.assertIs(item.ueSourceAvailability(), True)
-        self.assertIn("server ready", item.toolTip())
-        self.assertIn("project copy failed", item.toolTip())
+        return any(image.constBits())
 
-    def test_label_is_drawn_for_existing_empty_ue_directory_only(self):
+    def test_label_follows_model_status_and_ignores_directory_and_rig_status(self):
         item = myWidget.Item()
         item.setItemsWidget(self.ui.main_listWgt)
-        option = QtWidgets.QStyleOptionViewItem()
-        option.rect = QtCore.QRect(0, 0, 124, 164)
-        for directory_exists in (True, False, None):
-            # An existing empty directory is labelled even though it cannot load.
-            item.setUESourceAvailability(False, "no main package", ue_directory_exists=directory_exists)
-            image = QtGui.QImage(124, 164, QtGui.QImage.Format_ARGB32)
-            image.fill(QtCore.Qt.transparent)
-            painter = QtGui.QPainter(image)
-            item.paintUESourceAvailability(painter, option)
-            painter.end()
-            painted = any(image.pixelColor(x, y).alpha() for x in range(124) for y in range(164))
-            self.assertEqual(painted, directory_exists is True)
+        row = list(self.row("Hero"))
+        for status in (None, "", "未开始", "制作中", "已完成", "ue", " UE ", "UE"):
+            row[4], row[6] = status, "UE"
+            item.setItemData(tuple(row))
+            for directory_exists in (True, False, None):
+                with self.subTest(status=status, directory_exists=directory_exists):
+                    item.setUESourceAvailability(False, "no main package", ue_directory_exists=directory_exists)
+                    self.assertEqual(item.isUEPublished(), status == "UE")
+                    self.assertEqual(self.badge_painted(item), status == "UE")
+
+    def test_label_is_visible_before_scan_and_safe_for_missing_row_data(self):
+        item = myWidget.Item()
+        item.setItemsWidget(self.ui.main_listWgt)
+        row = list(self.row("Hero"))
+        row[4] = "UE"
+        item.setItemData(tuple(row))
+        self.assertIsNone(item.ueSourceAvailability())
+        self.assertIsNone(item.ueDirectoryExists())
+        self.assertTrue(self.badge_painted(item))
+        for row_data in ((), {}, None):
+            item._itemData = row_data
+            self.assertFalse(item.isUEPublished())
+            self.assertFalse(self.badge_painted(item))
 
 
 if __name__ == "__main__":

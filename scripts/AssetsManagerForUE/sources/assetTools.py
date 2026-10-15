@@ -19,7 +19,7 @@ from PySide6 import QtWidgets, QtCore, QtGui
 from functools import partial
 from ..utils import assetFunctions, messageBox, myWidget
 from ..config import commonSetting, databaseHost
-from . import ue_asset_service
+from . import action_service, asset_fbx_service, ue_asset_service, status_edit_service
 
 _FLAT = "border-style: flat; background: transparent;"
 _DRAINING_THREAD_JOBS = []
@@ -181,6 +181,9 @@ class AssetToolsUI(QtWidgets.QWidget):
 
         # 同步搭建界面（纯控件、无 I/O，秒级）→ 窗口一显示即最终布局，不闪。
         self.build_ui()
+        self._status_editor = status_edit_service.StatusEditor(
+            self, "asset", self._statusContext)
+        self._status_editor.saved.connect(self._statusSaved)
         # 网络配置、psycopg2 冷导入和第一次查询都交给真正的后台任务。
         # 0ms 定时器让本控件先返回给主窗口，窗口可先完成一次绘制。
         QtCore.QTimer.singleShot(0, self._startInitialLoad)
@@ -255,6 +258,7 @@ class AssetToolsUI(QtWidgets.QWidget):
 
         midV.addLayout(tool)
         self.main_listWgt = myWidget.MainQListWiget()
+        self.main_listWgt.setUEPublishedStatusField(4)  # asset.mod_status
         # 关掉 Qt 按 item 文字(资产名)的自动排序，否则会覆盖排序菜单选择的自定义顺序(日期/状态等)
         self.main_listWgt.setSortingEnabled(False)
         self.asset_list_header = myWidget.AssetListHeader(self.main_listWgt)
@@ -372,6 +376,7 @@ class AssetToolsUI(QtWidgets.QWidget):
             action.setSizePolicy(
                 QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
             action.actionActivated.connect(self.on_action_selected)
+            action.loadActionRequested.connect(self.loadActionFile)
             action.importActionRequested.connect(self.importActionFile)
 
             if self._preview_placeholder is not None:
@@ -669,6 +674,7 @@ class AssetToolsUI(QtWidgets.QWidget):
 
     def _requestAssetData(self):
         """后台刷新当前项目/类型；generation 防止慢查询覆盖较新的选择。"""
+        self._status_editor.setLoading()
         asset_type, project, _path = self.getTypeAndProject()
         if not self.isSQL or not project or not asset_type:
             self.listWidgetAddItems([])
@@ -699,6 +705,23 @@ class AssetToolsUI(QtWidgets.QWidget):
         except Exception:
             pass
 
+    def _statusContext(self):
+        current_type = self.type_listWgt.currentItem()
+        return (str(self.project_comb.currentText()),
+                str(current_type.text()) if current_type is not None else "")
+
+    def _statusSaved(self, request):
+        if (request[3] == 2 and request[:2] == self._statusContext()
+                and request[:2] == self._status_editor.context
+                and self.preview_wgt is not None):
+            selected = self.main_listWgt.currentItem()
+            if selected is not None and str(selected.itemData()[1]) == request[2]:
+                self.preview_wgt.setTitle(request[2], request[4])
+        # A read started before COMMIT must not restore the old field value.
+        if (request[:2] == self._statusContext()
+                and self._query_generation in self._query_tasks):
+            self._requestAssetData()
+
     def listWidgetAddItems(self, new_dict=None):
         """
         设置主面板FBX显示
@@ -711,6 +734,7 @@ class AssetToolsUI(QtWidgets.QWidget):
         start_time = time.time()
         if new_dict is not None:
             self.main_listWgt.setItems(new_dict)
+            self._status_editor.setContext(*self._statusContext())
         # 按当前排序状态排序数据（默认日期降序，最新在前），每次加载都生效
         _data = list(self.main_listWgt.items() or [])
         if _data:
@@ -1063,6 +1087,8 @@ class AssetToolsUI(QtWidgets.QWidget):
         self._copy_worker = None
         self._copy_item_key = ""
         self._copy_plan = None
+        if self.action_wgt is not None:
+            self.action_wgt.setLoadBusy(False)
 
     def locateUEAsset(self, item=None):
         item = item or self.main_listWgt.currentItem()
@@ -1086,6 +1112,7 @@ class AssetToolsUI(QtWidgets.QWidget):
 
     def shutdownThreads(self):
         """主窗口关闭前取消本页 I/O 任务，避免销毁仍在运行的 QThread。"""
+        self._status_editor.shutdown()
         self._state_closed = True
         self._state_requests.clear()
         self._state_pending.clear()
@@ -1191,22 +1218,90 @@ class AssetToolsUI(QtWidgets.QWidget):
             item_data = item.itemData()
             path = item_data[7].split('/Icon/')[0]
             role_name = item_data[1]
-            fbx_path = '%s/FBX/%s.fbx' % (path, role_name)
-            character_folder = '/Game/Assets/{1}/{0}/'.format(role_name, currentType)
-            material_folder = '/Game/Assets/{1}/{0}/Material/'.format(role_name, currentType)
-            texture_folder = '/Game/Assets/{1}/{0}/Texture/'.format(role_name, currentType)
-            AF = assetFunctions.AssetFunctions()
-            animation_mesh_task = AF.buildImportTask(fbx_path, character_folder, AF.buildSkeletalMeshImportOptions())
-            AF.executeImportTasks([animation_mesh_task])
-            if not unreal.EditorAssetLibrary.does_directory_exist(material_folder):
-                unreal.EditorAssetLibrary.make_directory(material_folder)
-            if not unreal.EditorAssetLibrary.does_directory_exist(texture_folder):
-                unreal.EditorAssetLibrary.make_directory(texture_folder)
-            self.repathAssets(character_folder)
+            asset_fbx_service.import_asset(path, currentType, role_name)
+
+    def loadActionFile(self, action_package=None):
+        """加载同名动画包；缺少角色/道具时，经确认一并加载其 UE 发布包。"""
+        if not action_package:
+            return
+        if self._copy_thread is not None and self._copy_thread.isRunning():
+            self.infoMsg("warning", u"已有资产或动作正在加载，请等待完成")
+            return
+        try:
+            context = action_service.action_context(action_package)
+            include_asset = not action_service.asset_exists(context)
+            if include_asset:
+                reply = QtWidgets.QMessageBox.question(
+                    self, u"先加载资产",
+                    u"当前工程中不存在资产“{0}”。\n\n目标目录：{1}\n\n是否先加载该资产，再继续加载动作？".format(
+                        context["asset_name"], context["game_folder"]),
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    QtWidgets.QMessageBox.Yes)
+                if reply != QtWidgets.QMessageBox.Yes:
+                    return
+            plan = action_service.build_import_plan(action_package, include_asset=include_asset)
+            if plan.get("state") == "conflict":
+                raise RuntimeError(u"工程内存在同名但内容不同的文件，本次未覆盖：\n{0}".format(
+                    "\n".join(plan.get("different_files", [])[:12])))
+            if plan.get("state") == "ready":
+                self._onActionCopyFinished(plan)
+                return
+            if self.action_wgt is not None:
+                self.action_wgt.setLoadBusy(True)
+            self.infoMsg("info", u"正在加载资产及动作…" if include_asset else u"正在加载动作…")
+            thread = QtCore.QThread()
+            worker = ue_asset_service.AssetCopyWorker(plan)
+            worker.moveToThread(thread)
+            thread.started.connect(worker.run)
+            worker.progress.connect(self._onActionCopyProgress)
+            worker.finished.connect(self._onActionCopyFinished)
+            worker.failed.connect(self._onActionCopyFailed)
+            worker.finished.connect(thread.quit)
+            worker.failed.connect(thread.quit)
+            worker.finished.connect(worker.deleteLater)
+            worker.failed.connect(worker.deleteLater)
+            thread.finished.connect(thread.deleteLater)
+            thread.finished.connect(self._onCopyThreadFinished)
+            self._copy_thread = thread
+            self._copy_worker = worker
+            thread.start()
+        except Exception as exc:
+            self._onActionCopyFailed(str(exc))
+
+    def _onActionCopyProgress(self, percent, relative):
+        if not self._state_closed:
+            self.infoMsg("info", u"加载动作 {0}%：{1}".format(percent, relative))
+
+    def _onActionCopyFinished(self, plan):
+        if self._state_closed:
+            return
+        try:
+            plan = action_service.register_import(plan)
+            prerequisite = plan.get("prerequisite_plan")
+            if prerequisite:
+                self._rememberUEPlan(prerequisite, supersede_scan=True)
+                root_key = self._sourceCacheKey(prerequisite["asset_root"])
+                for index in range(self.main_listWgt.count()):
+                    item = self.main_listWgt.item(index)
+                    if self._sourceCacheKey(ue_asset_service.asset_root_from_item_data(item.itemData())) == root_key:
+                        self._setItemUEPlan(item, prerequisite)
+            self.infoMsg("info", plan["message"])
+            object_path = plan["main_object_path"]
+            if not ue_asset_service.sync_to_content_browser(object_path):
+                QtCore.QTimer.singleShot(250, lambda: (
+                    ue_asset_service.sync_to_content_browser(object_path)
+                    if not self._state_closed else None))
+        except Exception as exc:
+            self._onActionCopyFailed(str(exc))
+
+    def _onActionCopyFailed(self, message):
+        if not self._state_closed:
+            self.infoMsg("error", message)
+            QtWidgets.QMessageBox.warning(self, u"加载动作失败", str(message))
 
     def importActionFile(self, action_fbx=None):
         """
-        导入动作到 UE 该资产的 Action 文件夹下（作 AnimSequence）。由右侧动作库右键"导入动作"触发，传动作 .fbx 全路径。
+        导入动作到 UE 该资产的 Action 文件夹下（作 AnimSequence）。由右侧动作库右键"导入动作FBX"触发，传动作 .fbx 全路径。
         """
         if not action_fbx:
             return
@@ -1235,19 +1330,7 @@ class AssetToolsUI(QtWidgets.QWidget):
         """
         移动Material和Texture
         """
-        editorAssetLib = unreal.EditorAssetLibrary()
-        assets_list = editorAssetLib.list_assets(character_folder)
-        for asset in assets_list:
-            assetData = editorAssetLib.find_asset_data(asset)
-            assetName = assetData.get_asset().get_name()
-            assetPathName = assetData.get_asset().get_path_name()
-            assetClassName = assetData.get_asset().get_class().get_name()
-            if assetClassName == 'Material' or assetClassName == 'MaterialInstanceConstant':
-                targetPathName = '{0}/Material/{1}.{1}'.format(character_folder.rsplit('/', 1)[0], assetName)
-                editorAssetLib.rename_asset(assetPathName, targetPathName)
-            elif assetClassName == 'Texture2D':
-                targetPathName = '{0}/Texture/{1}.{1}'.format(character_folder.rsplit('/', 1)[0], assetName)
-                editorAssetLib.rename_asset(assetPathName, targetPathName)
+        asset_fbx_service.repath_assets(character_folder)
 
     def infoMsg(self, icon, text):
         """

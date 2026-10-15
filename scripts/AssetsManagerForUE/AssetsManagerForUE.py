@@ -44,7 +44,7 @@ class AssetsManagerUI(QtWidgets.QWidget):
     scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/')
     sm_temp = "{}/ShotManagerTemp".format(os.environ.get('APPDATA'))
     SM_SETTING_JSON = "{}/setting.json".format(sm_temp)
-    VERSION = "4.3.2"
+    VERSION = "4.3.5"
     def __init__(self, parent=None):
         super(AssetsManagerUI, self).__init__(parent)
 
