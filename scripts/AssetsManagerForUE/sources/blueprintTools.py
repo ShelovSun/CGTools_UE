@@ -292,6 +292,9 @@ class BlueprintToolsUI(QtWidgets.QWidget):
         self.card_list.customContextMenuRequested.connect(self._showContextMenu)
         self.card_list.itemSelectionChanged.connect(self._selectionChanged)
         self.card_list.assetDropRequested.connect(self._placeBlueprint)
+        self.card_list.setAssetDragResolver(
+            lambda item: ue_asset_service.resolve_local_drag_asset(
+                item.uePlan(), object_path=item.itemData()[10]))
         self.card_list.assetDragRejected.connect(self._dragRejected)
 
     def _toolButton(self, icon_name, tooltip):
@@ -493,7 +496,7 @@ class BlueprintToolsUI(QtWidgets.QWidget):
         message = plan.get("message") or u"等待加载整个分类"
         for item in self._itemsForCategory(category_name):
             item.setUEState(state, message, plan)
-            object_path = item.itemData()[10] if state == "ready" else ""
+            object_path = item.itemData()[10]
             item.setUEMainObjectPath(object_path)
         self._selectionChanged()
 
@@ -606,6 +609,10 @@ class BlueprintToolsUI(QtWidgets.QWidget):
             lambda checked=False, selected=item: self.openBlueprint(selected))
         menu.exec_(self.card_list.viewport().mapToGlobal(point))
 
+    def _chooseConflictFiles(self, plan):
+        from .sceneTools import choose_ue_conflict_files
+        return choose_ue_conflict_files(self, plan)
+
     def loadBlueprintCategory(self, item=None):
         if isinstance(item, bool):
             item = None
@@ -618,14 +625,22 @@ class BlueprintToolsUI(QtWidgets.QWidget):
             return
         category_name = str(item.itemData()[9])
         category = self._categories.get(category_name) or {}
-        plan = category.get("plan") or {}
+        try:
+            previous = category.get("plan") or {}
+            plan = ue_asset_service.build_folder_import_plan(
+                category["folder"], category["content_root"], previous.get("target_root"))
+            plan = ue_asset_service.query_filesystem_state(plan, verify_content=True)
+        except Exception as exc:
+            self.infoMsg("error", u"检查蓝图分类失败：{0}".format(exc))
+            return
+        category["plan"] = plan
+        self._applyCategoryState(category_name)
         if not plan.get("files"):
             self.infoMsg("warning", plan.get("message") or u"该分类中没有 Unreal 包文件")
             return
         if plan.get("state") == "conflict":
-            if self._confirmCategoryReplacement(category_name, plan):
-                self._startCategoryReplacement(category_name, plan)
-            return
+            if not self._chooseConflictFiles(plan):
+                return
         if plan.get("state") == "ready":
             self._registerCategoryPlan(category_name, plan)
             return
@@ -836,6 +851,10 @@ class BlueprintToolsUI(QtWidgets.QWidget):
             self._setOperationControls(True)
 
     def _startCategoryCopy(self, category_name, plan, message):
+        for warning in ue_asset_service.prepare_plan_overwrites(plan):
+            self.infoMsg("warning", warning)
+        if plan.get("overwrite_cancelled"):
+            return
         self._copy_category = category_name
         self._setCategoryProgress(category_name, 0, message)
         self._setOperationControls(False)
@@ -881,6 +900,8 @@ class BlueprintToolsUI(QtWidgets.QWidget):
             suffix = u"；原版本备份：{0}".format(backup_path) if backup_path else ""
             self.infoMsg("info", u"{0}：整个分类加载完成{1}".format(
                 category_name, suffix))
+        elif plan.get("state") in ("partial", "conflict", "missing"):
+            self.infoMsg("warning", plan.get("message") or u"蓝图分类尚未完整加载")
         else:
             self.infoMsg("error", plan.get("message") or u"蓝图分类加载失败")
 

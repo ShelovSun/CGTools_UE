@@ -69,7 +69,7 @@ def _login():
 def query_assets(project, asset_type):
     """
     返回该 项目/类型 下的资产列表：
-        [{name, zh_name, mod_status, rig_status, icon, folder}, ...]
+        [{name, zh_name, mod_status, rig_status, ue_status, ue_artist, icon, folder}, ...]
     folder = icon 路径里 '/Icon/' 之前的部分（即资产根目录，和 importFile 取法一致）。
     """
     import psycopg2
@@ -77,8 +77,9 @@ def query_assets(project, asset_type):
     user, password = _login()
     sql = (
         'SELECT "asset.date","asset.name","asset.zh_name","asset.mod_artist",'
-        '"asset.mod_status","asset.rig_artist","asset.rig_status","asset.icon" '
-        'FROM public."asset" WHERE "asset.type" = \'%s\';' % asset_type
+        '"asset.mod_status","asset.rig_artist","asset.rig_status","asset.icon",'
+        '"asset.ue_status","asset.ue_artist" '
+        'FROM public."asset" WHERE "asset.type" = %s;'
     )
     conn = cur = None
     rows = []
@@ -86,12 +87,13 @@ def query_assets(project, asset_type):
         conn = psycopg2.connect(database=project, user=user, password=password,
                                 host=databaseHost(), port=_DB_PORT)
         cur = conn.cursor()
-        cur.execute(sql)
+        cur.execute(sql, (asset_type,))
         for r in cur.fetchall():
             icon = r[7] or ''
             folder = icon.split('/Icon/')[0] if '/Icon/' in icon else ''
             rows.append({'name': r[1], 'zh_name': r[2],
                          'mod_status': r[4], 'rig_status': r[6],
+                         'ue_status': r[8], 'ue_artist': r[9],
                          'icon': icon, 'folder': folder})
     finally:
         if cur is not None:

@@ -300,6 +300,9 @@ class VfxLibraryTests(unittest.TestCase):
         thumbnail = Path(asset["thumbnail"])
         thumbnail.parent.mkdir(parents=True)
         shutil.copyfile(Path(vfxTools.VfxToolsUI.scriptsPath) / "icon/Default.png", thumbnail)
+        for entry in asset["plan"]["files"]:
+            Path(entry["target"]).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(entry["source"], entry["target"])
         asset["plan"]["state"] = "ready"
         ui = self.build_ui(path)
         item = ui.card_list.currentItem()
@@ -401,6 +404,9 @@ class VfxLibraryTests(unittest.TestCase):
         path = "Team1/火/NS_Fire.uasset"
         ui = self.build_ui(path)
         asset = ui._assetForItem(ui.card_list.currentItem())
+        for entry in asset["plan"]["files"]:
+            Path(entry["target"]).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(entry["source"], entry["target"])
         for copied in (False, True):
             registered = copy.deepcopy(asset["plan"])
             registered["state"] = "ready"

@@ -12,8 +12,8 @@ scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/')
 
 def projectSetting():
     data = {u'menu': {u'AssetsManager': {
-                          # 最终版已接管唯一正式入口；旧代码仅保存在 Build 备份目录。
-                          u'command': u"import AssetsManagerForUE.AssetsManagerForUE as AM;AM.showWindow()",
+                          # 先显示 UE 原生启动提示，再导入 PySide6 和工具主窗口。
+                          u'command': u"from AssetsManagerForUE import launcher as AM;AM.showWindow()",
                           u'section': u'Pipeline', 
                           u'type': u'PYTHON', 
                           u'label': u'AssetsManager'},
@@ -24,7 +24,7 @@ def projectSetting():
                       #     u'type': u'PYTHON', 
                       #     u'label': u'AssetsManager(原生可停靠)'},
                       u'ShotsManager': {
-                          u'command': u"import ShotsManagerForUE.ShotsManager_UE as SM;SM.showWin()",
+                          u'command': u"from ShotsManagerForUE import launcher as SM;SM.showWin()",
                           u'section': u'Pipeline', 
                           u'type': u'PYTHON', 
                           u'label': u'ShotsManager'},

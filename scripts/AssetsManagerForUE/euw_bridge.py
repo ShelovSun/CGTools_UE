@@ -26,7 +26,7 @@ except Exception:
 # =============================================================================
 def open_qt_window():
     """过渡用：用原来的 Qt 窗口打开 AssetsManager。"""
-    import AssetsManagerForUE.AssetsManagerForUE as AM
+    from AssetsManagerForUE import launcher as AM
     AM.showWindow()
 
 

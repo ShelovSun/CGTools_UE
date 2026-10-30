@@ -438,17 +438,19 @@ class MainQListWiget(QtWidgets.QListWidget):
     statusChangeRequested = QtCore.Signal(object, int, str)
     detailEditRequested = QtCore.Signal(object, int, object)
     cellEditorsInvalidated = QtCore.Signal()
+    stateScanPriorityChanged = QtCore.Signal()
 
     DEF_SPACING = 8
     TEXT_AREA_HEIGHT = 48
     LIST_ROW_HEIGHT = 25
     LIST_HEADERS = (u"创建日期", u"资产名", u"中文名", u"模型制作",
-                    u"模型状态", u"绑定制作", u"绑定状态", u"备注")
-    LIST_COLUMN_WIDTHS = (86, 180, 110, 78, 78, 78, 78, 180)
-    LIST_FIELD_INDICES = (0, 1, 2, 3, 4, 5, 6, 8)
-    LIST_FORMATTERS = (None, None, None, None, None, None, None, "note")
+                    u"模型状态", u"绑定制作", u"绑定状态", u"UE状态", u"UE制作", u"备注")
+    LIST_COLUMN_WIDTHS = (86, 180, 110, 78, 78, 78, 78, 78, 78, 180)
+    # Keep icon/note at indices 7/8 for the package, preview and loading services.
+    LIST_FIELD_INDICES = (0, 1, 2, 3, 4, 5, 6, 9, 10, 8)
+    LIST_FORMATTERS = (None, None, None, None, None, None, None, None, None, "note")
     LIST_ALIGNMENTS = ("center", "left", "left", "center",
-                       "center", "center", "center", "left")
+                       "center", "center", "center", "center", "center", "left")
 
     scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/').replace('widgets', '')
 
@@ -458,11 +460,13 @@ class MainQListWiget(QtWidgets.QListWidget):
         self._isList = False
         self._itemSize = 120
         self._currentItem = None
+        self._thumbnailViewportItems = {}
         self._assetDragStart = None
         self._assetDragItem = None
         self._assetDragActive = False
         self._assetDragRejectedOnce = False
         self._assetDragPreview = None
+        self._assetDragResolver = None
         self._listHeader = None
         self._listHeaders = list(self.LIST_HEADERS)
         self._listColumnWidths = list(self.LIST_COLUMN_WIDTHS)
@@ -472,6 +476,7 @@ class MainQListWiget(QtWidgets.QListWidget):
         self._statusColumns = {}
         self._detailColumns = {}
         self._uePublishedStatusField = None
+        self._uePublishedStatusValue = "UE"
         self._statusEditingEnabled = False
         self._statusPress = None
         self._statusMenu = None
@@ -484,6 +489,7 @@ class MainQListWiget(QtWidgets.QListWidget):
         self.setSortingEnabled(True)
         self.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.setResizeMode(QtWidgets.QListView.Adjust)
+        self.setUniformItemSizes(True)
         self.setTextElideMode(QtCore.Qt.ElideNone)
         self.setMouseTracking(True)
         self.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)  # 按像素平滑滚动(配合 wheelEvent 加速)
@@ -494,9 +500,45 @@ class MainQListWiget(QtWidgets.QListWidget):
         # 视口懒加载：滚动时优先加载"当前可见区"，而不是永远从上往下加载
         self.verticalScrollBar().valueChanged.connect(self._onScroll)
         self.horizontalScrollBar().valueChanged.connect(self._onScroll)
-        self._scrollTimer = QtCore.QTimer()
+        self._scrollTimer = QtCore.QTimer(self)
         self._scrollTimer.setSingleShot(True)
         self._scrollTimer.timeout.connect(self._updateVisibleItems)
+        self.currentItemChanged.connect(lambda *_: self.stateScanPriorityChanged.emit())
+
+    def visibleItemRows(self):
+        """Probe the viewport grid without walking all off-screen card rectangles."""
+        rect = self.viewport().rect()
+        if not self.count() or rect.isEmpty():
+            return []
+        # Half-cell and edge probes include clipped cards. Both display modes
+        # use a uniform grid, so work does not grow with off-screen row count.
+        grid = self.gridSize()
+        step_x = max(1, grid.width() // 2)
+        step_y = max(1, grid.height() // 2)
+        if grid.width() <= 0 or grid.height() <= 0:
+            step_x, step_y = max(1, self._itemSize // 2), self.LIST_ROW_HEIGHT // 2
+        xs = sorted(set(range(0, rect.width(), step_x)) | {rect.right()})
+        ys = sorted(set(range(0, rect.height(), step_y)) | {rect.bottom()})
+        rows = set()
+        for y in ys:
+            for x in xs:
+                index = self.indexAt(QtCore.QPoint(x, y))
+                if index.isValid():
+                    rows.add(index.row())
+        return sorted(rows)
+
+    def stateScanPriorityItems(self, include_remaining=True):
+        """Return current/visible cards; the scheduler can retain the remainder."""
+        current = self.currentItem()
+        visible = [self.item(row) for row in self.visibleItemRows()
+                   if self.item(row) is not current]
+        selected = [current] if current is not None and not current.isHidden() else []
+        priority = selected + visible
+        if not include_remaining:
+            return priority
+        seen = {id(item) for item in priority}
+        return priority + [self.item(row) for row in range(self.count())
+                           if id(self.item(row)) not in seen and not self.item(row).isHidden()]
 
     def wheelEvent(self, event):
         """
@@ -519,59 +561,33 @@ class MainQListWiget(QtWidgets.QListWidget):
         self._scrollTimer.start(50)
 
     def _updateVisibleItems(self):
-        """
-        计算当前可见区并按优先级触发缩略图加载 —— 解决"永远从上往下加载"的核心方法。
-        优先级：① 真正可见的 item ② 下方预取带 ③ 上方预取带。
-        快速滚动到新区域后新区域优先刷新；已划走的排队任务会在 worker 开跑前自动跳过。
-        列表模式不画缩略图，直接跳过。
-        """
-        if self.isList():
-            return
-        count = self.count()
-        if count == 0:
-            return
-
-        viewportRect = self.viewport().rect()
-
-        # 定位真正可见的区块 [first_visible, last_visible]（item 顺序自上而下）
-        firstVisible = -1
-        lastVisible = -1
-        for i in range(count):
-            itemRect = self.visualItemRect(self.item(i))
-            if viewportRect.intersects(itemRect):
-                if firstVisible == -1:
-                    firstVisible = i
-                lastVisible = i
-            elif firstVisible != -1:
-                break  # 已越过可见区域，提前结束扫描
-
-        if firstVisible == -1:
-            return
-
-        # 预取带：可视区上下各扩展约半屏
-        span = lastVisible - firstVisible + 1
-        pad = max(1, span // 2)
-        lo = max(0, firstVisible - pad)
-        hi = min(count - 1, lastVisible + pad)
-
-        # 先统一标记可视状态（autoload=False：此刻不排活，下面按优先级统一排）
-        for i in range(count):
-            item = self.item(i)
-            if item is not None:
-                item.setVisibleInViewport(lo <= i <= hi, autoload=False)
-
-        # 按优先级排活：① 真正可见 ② 下方预取 ③ 上方预取
-        def _req(i):
-            it = self.item(i)
-            if it is not None:
-                it.requestThumbnailLoad()
-        for i in range(firstVisible, lastVisible + 1):
-            _req(i)
-        for i in range(lastVisible + 1, hi + 1):
-            _req(i)
-        for i in range(lo, firstVisible):
-            _req(i)
-
+        """Update only cards entering/leaving the viewport and prefetch band."""
+        self.stateScanPriorityChanged.emit()
+        visible = [] if self.isList() else self.visibleItemRows()
+        first, last = (visible[0], visible[-1]) if visible else (0, -1)
+        pad = max(1, len(visible) // 2)
+        lo = max(0, first - pad)
+        hi = min(self.count() - 1, last + pad) if visible else -1
+        active = {}
+        for row in range(lo, hi + 1):
+            item = self.item(row)
+            if item is not None and not item.isHidden():
+                active[id(item)] = item
+        for key, item in self._thumbnailViewportItems.items():
+            if key not in active:
+                try:
+                    item.setVisibleInViewport(False, autoload=False)
+                except RuntimeError:  # Removed through takeItem/removeRow.
+                    pass
+        for key, item in active.items():
+            if key not in self._thumbnailViewportItems:
+                item.setVisibleInViewport(True, autoload=False)
+        self._thumbnailViewportItems = active
+        # Visible cards, lower prefetch band, then upper prefetch band.
+        for row in visible + list(range(last + 1, hi + 1)) + list(range(lo, first)):
+            item = self.item(row)
+            if item is not None and not item.isHidden():
+                item.requestThumbnailLoad()
         self.viewport().update()
 
     def dragLeaveEvent(self, e):
@@ -596,13 +612,17 @@ class MainQListWiget(QtWidgets.QListWidget):
     def listAlignments(self):
         return tuple(self._listAlignments)
 
-    def setUEPublishedStatusField(self, field_index):
+    def setUEPublishedStatusField(self, field_index, published_value="UE"):
         """Enable the publication badge only on database asset/scene lists."""
         self._uePublishedStatusField = field_index
+        self._uePublishedStatusValue = published_value
         self.viewport().update()
 
     def uePublishedStatusField(self):
         return self._uePublishedStatusField
+
+    def uePublishedStatusValue(self):
+        return self._uePublishedStatusValue
 
     def setStatusColumns(self, columns):
         """Opt in only the database-backed pages to status dropdowns."""
@@ -769,20 +789,29 @@ class MainQListWiget(QtWidgets.QListWidget):
             self._assetDragActive = False
             self._assetDragRejectedOnce = False
 
+    def setAssetDragResolver(self, resolver):
+        """在拖动开始时重新检查本地资源，不以服务器同步颜色作为门槛。"""
+        self._assetDragResolver = resolver
+
     def _beginAssetDrag(self, item, global_pos):
+        if self._assetDragRejectedOnce:
+            return False
         if not item.dragEnabled():
             if not self._assetDragRejectedOnce:
                 self.assetDragRejected.emit(u"该卡片不支持拖入关卡")
             self._assetDragRejectedOnce = True
             return False
-        if item.ueState() != "ready":
-            if not self._assetDragRejectedOnce:
-                self.assetDragRejected.emit(u"该资产尚未加载完成，请先点击【加载资产】")
-            self._assetDragRejectedOnce = True
-            return False
+        error = ""
+        if self._assetDragResolver is not None:
+            try:
+                object_path, error = self._assetDragResolver(item)
+            except Exception as exc:
+                object_path, error = "", u"检查本地资产失败：{0}".format(exc)
+            item.setUEMainObjectPath(object_path)
         if not item.ueMainObjectPath():
             if not self._assetDragRejectedOnce:
-                self.assetDragRejected.emit(u"该 UE 包没有可拖入关卡的 Actor 蓝图或网格体")
+                self.assetDragRejected.emit(
+                    error or u"当前工程中没有可拖入关卡的本地资产，请先点击【加载资产】")
             self._assetDragRejectedOnce = True
             return False
 
@@ -993,9 +1022,10 @@ class MainQListWiget(QtWidgets.QListWidget):
         # 批量添加期间关闭刷新，减少逐个 addItem 触发的重绘
         self.setUpdatesEnabled(False)
         try:
+            lower_keyword = keyWords.lower()
             for item in self._itemsDict:
-                _item = Item()
-                if item[1].lower().find(keyWords.lower()) != -1 or (item[2] and item[2].find(keyWords) != -1):
+                if lower_keyword in item[1].lower() or (item[2] and keyWords in item[2]):
+                    _item = Item()
                     _item.setItemData(item)
                     _item.setItemsWidget(self)
                     _item.setText(item[1])
@@ -1012,6 +1042,11 @@ class MainQListWiget(QtWidgets.QListWidget):
         在排到时立即跳过（见 ImageWorker.run），避免旧数据的解码拖慢新数据。
         """
         self._closeStatusMenu()
+        # Do not leave a hover movie/timer referencing a card deleted by search.
+        if self._currentItem is not None:
+            self._currentItem.stop()
+            self._currentItem = None
+        self._thumbnailViewportItems.clear()
         for i in range(self.count()):
             try:
                 item = self.item(i)
@@ -1145,6 +1180,7 @@ class Item(QtWidgets.QListWidgetItem):
         self._worker.setShouldLoad(lambda: self._isVisibleInViewport)
         self._worker.signals.skipped.connect(self._thumbnailLoadSkipped)
         self._workerStarted = False
+        self._ignorePendingThumbnail = False
         self._thumbnailLoading = False    # 缩略图是否正在后台解码，避免每次重绘重复入队
         self._pendingThumbnailPath = None  # 当前后台正在解码的路径，回调时据此写回 _srcPixmapPath
 
@@ -1307,7 +1343,7 @@ class Item(QtWidgets.QListWidgetItem):
         if field is None:
             return False
         try:
-            return self.itemData()[field] == "UE"
+            return self.itemData()[field] == widget.uePublishedStatusValue()
         except (IndexError, KeyError, TypeError):
             return False
 
@@ -1404,6 +1440,22 @@ class Item(QtWidgets.QListWidgetItem):
         if rect.isValid():
             widget.viewport().update(rect)
 
+    def setThumbnailImage(self, image):
+        """Install a fresh screenshot without a disk-cache hit or a list rebuild."""
+        if image is None or image.isNull():
+            return
+        if self._thumbnailLoading:
+            self._ignorePendingThumbnail = True
+        self.clearCache()
+        cached = image
+        if max(image.width(), image.height()) > self.MAX_ICON_SIZE * 2:
+            cached = image.scaled(self.MAX_ICON_SIZE * 2, self.MAX_ICON_SIZE * 2,
+                                  QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+        self._srcPixmap = QtGui.QPixmap.fromImage(cached)
+        self._srcPixmapPath = self.itemData()[7]
+        self._thumbnailIcon = QtGui.QIcon(self._srcPixmap)
+        self.repaintItem()
+
     def requestThumbnailLoad(self):
         """
         请求后台加载缩略图（进入可视区/预取或绘制时调用）。幂等：已缓存或正在加载则直接返回。
@@ -1441,6 +1493,7 @@ class Item(QtWidgets.QListWidgetItem):
         若期间又滚回可视区则重新排活。（skipped 信号经队列连接在主线程执行）
         """
         self._thumbnailLoading = False
+        self._ignorePendingThumbnail = False
         if self._isVisibleInViewport:
             self.requestThumbnailLoad()
 
@@ -1555,6 +1608,9 @@ class Item(QtWidgets.QListWidgetItem):
         :rtype: None
         """
         self._thumbnailLoading = False
+        if self._ignorePendingThumbnail:
+            self._ignorePendingThumbnail = False
+            return
         # 异步回调期间列表可能已被 clear/重排 -> 本 item 的 C++ 对象已销毁；
         # 用一次 C++ 方法探测（Python 属性访问探测不到），已删则整段放弃，避免 use-after-delete。
         try:
@@ -1874,7 +1930,7 @@ class Item(QtWidgets.QListWidgetItem):
             painter.restore()
 
     def paintUEPublished(self, painter, option):
-        """Show UE directly from the database model/scene status, before any scan."""
+        """Show UE from the page's configured database field, before any scan."""
         if not self.isUEPublished():
             return
         icon_rect = self.iconRect(option)
@@ -2545,10 +2601,15 @@ class Item(QtWidgets.QListWidgetItem):
         self._curFramePixmap = None   # 重置帧缓存，避免复用上一次悬停的旧帧
         self._lastFrameNumber = -1
         path = self.imageSequencePath() or self.thumbnailPath()
+        # A still icon has no hover movie. Avoid synchronous NAS stat calls for
+        # every PNG/JPEG card as the pointer moves over new search results.
+        if os.path.splitext(path)[1].lower() in {
+                ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp", ".exr"}:
+            return
         # print("path:", path)
         movie = None
 
-        if os.path.isfile(path) and path.lower().endswith(".gif"):
+        if path.lower().endswith(".gif") and os.path.isfile(path):
             movie = QtGui.QMovie(path)
             movie.setCacheMode(QtGui.QMovie.CacheAll)
             movie.frameChanged.connect(self.updateFrame)

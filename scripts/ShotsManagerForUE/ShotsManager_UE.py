@@ -36,8 +36,12 @@ SYSTEMP = os.environ['TMP'].replace('\\', '/')+'/'
 #     msg.exec_()
 
 class CGPipelineToolUEUI(QtWidgets.QWidget):
+    startupFinished = QtCore.Signal()
+    VERSION = "2.0.4"
+
     def __init__(self):
         super(CGPipelineToolUEUI, self).__init__()
+        self._startup_finished = False
         self.setLayout(QtWidgets.QHBoxLayout())
         self.layout().setContentsMargins(2, 2, 2, 2)
         self.idea_item_userRole = QtCore.Qt.UserRole
@@ -52,7 +56,7 @@ class CGPipelineToolUEUI(QtWidgets.QWidget):
         ui.close()
         self.layout().addWidget(self.ui)
         self.resize(900, 500)
-        self.setWindowTitle('ShotsManager v 2.0.3')
+        self.setWindowTitle('ShotsManager v ' + self.VERSION)
         self.getStyleSheet()
         pos, size, proj, eps, shot = self.readSettings()
         if pos is not None and size is not None:
@@ -91,6 +95,13 @@ class CGPipelineToolUEUI(QtWidgets.QWidget):
         self.ui.ani_shot_listWgt.customContextMenuRequested.connect(self.show_menu)
         self.ui.fbxImport_bttn.clicked.connect(self.importAnim)
         
+    @QtCore.Slot()
+    def finishStartup(self):
+        """Notify the native launcher after the first Qt event-loop turn."""
+        if not self._startup_finished:
+            self._startup_finished = True
+            self.startupFinished.emit()
+
     def getStyleSheet(self):
         global scriptsPath
         style_sheet_path = '%s/qss/UE5.qss' % scriptsPath
@@ -758,7 +769,11 @@ def showWin():
     win.setAttribute(QtCore.Qt.WA_DeleteOnClose)
 
     import ue_qt_host
+    # Schedule before host_window, which can enter Qt's event loop outside UE.
+    # In UE the shared Slate pump runs this once the window has been shown.
+    QtCore.QTimer.singleShot(0, win.finishStartup)
     ue_qt_host.host_window(win, app=QtWidgets.QApplication.instance())
+    return win
     
     
     

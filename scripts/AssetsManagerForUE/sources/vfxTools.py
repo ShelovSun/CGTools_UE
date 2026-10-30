@@ -340,6 +340,9 @@ class VfxToolsUI(QtWidgets.QWidget):
         self.card_list.itemSelectionChanged.connect(self._selectionChanged)
         self.card_list.itemDoubleClicked.connect(self._enterFolder)
         self.card_list.assetDropRequested.connect(self._placeVfx)
+        self.card_list.setAssetDragResolver(
+            lambda item: ue_asset_service.resolve_local_drag_asset(
+                item.uePlan(), object_path=item.itemData()[10]))
         self.card_list.assetDragRejected.connect(self._dragRejected)
 
     def _toolButton(self, icon_name, tooltip):
@@ -671,7 +674,7 @@ class VfxToolsUI(QtWidgets.QWidget):
         state = plan.get("state") or "missing"
         message = plan.get("message") or u"等待加载特效"
         item.setUEState(state, message, plan)
-        item.setUEMainObjectPath(asset.get("object_path") if state == "ready" else "")
+        item.setUEMainObjectPath(asset.get("object_path"))
         self._selectionChanged()
 
     def _setAssetProgress(self, asset, percent, message):
@@ -801,6 +804,10 @@ class VfxToolsUI(QtWidgets.QWidget):
             lambda checked=False, selected=item: self.openVfx(selected))
         menu.exec_(self.card_list.viewport().mapToGlobal(point))
 
+    def _chooseConflictFiles(self, plan):
+        from .sceneTools import choose_ue_conflict_files
+        return choose_ue_conflict_files(self, plan)
+
     def loadVfx(self, item=None):
         if isinstance(item, bool):
             item = None
@@ -818,6 +825,8 @@ class VfxToolsUI(QtWidgets.QWidget):
         QtWidgets.QApplication.processEvents()
         plan = ue_asset_service.build_external_dependency_import_plan(
             asset["source_file"], content_root)
+        if plan.get("state") != "error":
+            plan = ue_asset_service.query_filesystem_state(plan, verify_content=True)
         asset["plan"] = plan
         self._applyAssetState(asset)
 
@@ -836,11 +845,8 @@ class VfxToolsUI(QtWidgets.QWidget):
             self.infoMsg("error", text)
             return
         if plan.get("state") == "conflict":
-            conflicts = plan.get("different_files") or []
-            shown = u"\n".join(str(value) for value in conflicts[:12])
-            text = u"工程中已有同名但内容不同的文件，为保护工程，本次不会覆盖。\n\n{0}".format(shown)
-            QtWidgets.QMessageBox.warning(self, u"特效迁移冲突", text)
-            self.infoMsg("warning", plan.get("message"))
+            if self._chooseConflictFiles(plan):
+                self._startCopy(asset, plan)
             return
         if plan.get("state") == "ready":
             self._registerPlan(asset, plan)
@@ -860,6 +866,10 @@ class VfxToolsUI(QtWidgets.QWidget):
         self._startCopy(asset, plan)
 
     def _startCopy(self, asset, plan):
+        for warning in ue_asset_service.prepare_plan_overwrites(plan):
+            self.infoMsg("warning", warning)
+        if plan.get("overwrite_cancelled"):
+            return
         self._copy_source = asset["source_file"]
         self._setAssetProgress(asset, 0, u"准备迁移特效及依赖…")
         self._setOperationControls(False)
@@ -905,6 +915,8 @@ class VfxToolsUI(QtWidgets.QWidget):
         if plan.get("state") == "ready":
             self.infoMsg("info", u"{0}：加载完成，正在内容浏览器中定位…".format(asset["name"]))
             self._queueBrowserSync(asset)
+        elif plan.get("state") in ("partial", "conflict", "missing"):
+            self.infoMsg("warning", plan.get("message") or u"特效尚未完整加载")
         else:
             QtWidgets.QMessageBox.warning(
                 self, u"加载特效失败", plan.get("message") or u"UE 无法注册该特效")

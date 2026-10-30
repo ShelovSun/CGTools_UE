@@ -200,6 +200,9 @@ def _normalize_animation(plan, animation):
 
 def register_import(plan):
     """Refresh on the UE thread; require a visible, correctly named animation."""
+    ue_asset_service.reload_overwritten_packages(plan)
+    if plan.get("reload_error"):
+        raise RuntimeError(plan["message"])
     context = plan["action_context"]
     prerequisite = plan.get("prerequisite_plan")
     if prerequisite:

@@ -41,14 +41,16 @@ from .utils.ue_window_style import (
 
 
 class AssetsManagerUI(QtWidgets.QWidget):
+    startupFinished = QtCore.Signal()
     scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/')
     sm_temp = "{}/ShotManagerTemp".format(os.environ.get('APPDATA'))
     SM_SETTING_JSON = "{}/setting.json".format(sm_temp)
-    VERSION = "4.3.5"
+    VERSION = "4.3.28"
     def __init__(self, parent=None):
         super(AssetsManagerUI, self).__init__(parent)
 
         self.setObjectName("AssetsManagerWindow")
+        self._startup_finished = False
         self.setWindowFlags(
             self.windowFlags() | QtCore.Qt.FramelessWindowHint)
         self.setWindowTitle('Assets Manager ' + self.VERSION)
@@ -320,6 +322,9 @@ class AssetsManagerUI(QtWidgets.QWidget):
             raise
         finally:
             self._tab_build_pending.discard(idx)
+            if not self._startup_finished:
+                self._startup_finished = True
+                self.startupFinished.emit()
 
     def toolSetting_UI(self):
         Dialog = QtWidgets.QDialog(self)
@@ -394,3 +399,4 @@ def showWindow():
         # 独立环境的 host_window 会进入阻塞式 Qt exec()，必须预先安排定时器。
         win.beginDeferredLoad()
         ue_qt_host.host_window(win, app=app)
+    return win

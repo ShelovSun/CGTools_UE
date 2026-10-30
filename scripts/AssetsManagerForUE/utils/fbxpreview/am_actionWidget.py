@@ -94,13 +94,15 @@ class AssetActionWidget(QtWidgets.QWidget):
         header = self._list.header()
         header.setSectionsClickable(True)
         header.setSortIndicatorShown(True)
-        header.setSortIndicator(0, QtCore.Qt.AscendingOrder)
-        header.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        header.setSortIndicator(1, QtCore.Qt.DescendingOrder)
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
+        header.resizeSection(0, 200)
+        header.resizeSection(1, 145)
+        header.resizeSection(2, 75)
         header.sectionClicked.connect(self._on_header_clicked)
-        self._sort_column = 0
-        self._sort_order = QtCore.Qt.AscendingOrder
+        self._sort_column = 1
+        self._sort_order = QtCore.Qt.DescendingOrder
         outer.addWidget(self._list, 1)
 
     # ------------------------------------------------------------------ 对外接口

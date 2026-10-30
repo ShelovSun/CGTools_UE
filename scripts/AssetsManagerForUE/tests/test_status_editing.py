@@ -36,6 +36,9 @@ class LocalCursor:
     def rowcount(self):
         return self.cursor.rowcount
 
+    def fetchall(self):
+        return self.cursor.fetchall()
+
     def close(self):
         self.cursor.close()
 
@@ -66,12 +69,12 @@ class StatusDatabaseTests(unittest.TestCase):
         self.database = sqlite3.connect(":memory:")
         self.addCleanup(self.database.close)
         self.database.execute('CREATE TABLE asset ("asset.name", "asset.type", '
-                              '"asset.mod_status", "asset.rig_status", "asset.note")')
+                              '"asset.mod_status", "asset.rig_status", "asset.note", "asset.ue_status")')
         self.database.execute('CREATE TABLE scene ("scene.name", "scene.type", '
                               '"scene.status", "scene.note")')
-        self.database.executemany("INSERT INTO asset VALUES (?, ?, ?, ?, ?)", [
-            ("Hero's角色", "Characters", "未开始", "制作中", "保留备注"),
-            ("Hero's角色", "Props", "未开始", "已完成", "其他类型"),
+        self.database.executemany("INSERT INTO asset VALUES (?, ?, ?, ?, ?, ?)", [
+            ("Hero's角色", "Characters", "未开始", "制作中", "保留备注", "未开始"),
+            ("Hero's角色", "Props", "未开始", "已完成", "其他类型", "制作中"),
         ])
         self.database.execute("INSERT INTO scene VALUES (?, ?, ?, ?)",
                               ("Tree", "Nature", "已完成", "场景备注"))
@@ -81,7 +84,7 @@ class StatusDatabaseTests(unittest.TestCase):
             psycopg2, "connect", return_value=self.conn))
         self.enterContext(mock.patch.object(service, "databaseHost", return_value="local.test"))
 
-    def update(self, table="asset", field=4, old="未开始", new="UE", name="Hero's角色"):
+    def update(self, table="asset", field=4, old="未开始", new="已完成", name="Hero's角色"):
         service.update_status("user", "password", "Project", table,
                               "Nature" if table == "scene" else "Characters",
                               name, field, old, new)
@@ -89,8 +92,8 @@ class StatusDatabaseTests(unittest.TestCase):
     def test_model_updates_only_selected_type_and_preserves_rig_and_notes(self):
         self.update()
         self.assertEqual(self.database.execute("SELECT * FROM asset").fetchall(), [
-            ("Hero's角色", "Characters", "UE", "制作中", "保留备注"),
-            ("Hero's角色", "Props", "未开始", "已完成", "其他类型"),
+            ("Hero's角色", "Characters", "已完成", "制作中", "保留备注", "未开始"),
+            ("Hero's角色", "Props", "未开始", "已完成", "其他类型", "制作中"),
         ])
         self.assertEqual(self.conn.commits, 1)
         self.assertEqual(self.conn.rollbacks, 0)
@@ -98,6 +101,13 @@ class StatusDatabaseTests(unittest.TestCase):
         self.assertEqual(self.connect.call_args.kwargs["host"], "local.test")
         self.assertEqual(self.connect.call_args.kwargs["database"], "Project")
         self.assertEqual(self.connect.call_args.kwargs["user"], "user")
+
+    def test_ue_status_updates_only_ue_field_and_selected_type(self):
+        self.update(field=9)
+        self.assertEqual(self.database.execute("SELECT * FROM asset").fetchall(), [
+            ("Hero's角色", "Characters", "未开始", "制作中", "保留备注", "已完成"),
+            ("Hero's角色", "Props", "未开始", "已完成", "其他类型", "制作中"),
+        ])
 
     def test_rig_and_scene_columns_are_mapped_correctly(self):
         self.update(field=6, old="制作中", new="已完成")
@@ -136,7 +146,8 @@ class StatusDatabaseTests(unittest.TestCase):
         self.assertEqual(self.database.execute('SELECT "asset.mod_status" FROM asset LIMIT 1').fetchone()[0], "未开始")
 
     def test_unsupported_fields_values_and_rig_ue_never_open_connection(self):
-        for table, field, value in (("asset", 3, "UE"), ("asset", 6, "UE"),
+        for table, field, value in (("asset", 3, "UE"), ("asset", 4, "UE"),
+                                     ("asset", 6, "UE"), ("asset", 9, "UE"),
                                      ("scene", 4, "injected"), ("injected", 4, "UE")):
             with self.assertRaises(ValueError):
                 self.update(table=table, field=field, new=value)
@@ -157,7 +168,7 @@ class StatusPage(QtWidgets.QWidget):
         self.messages = []
         self.main_listWgt = myWidget.MainQListWiget()
         widget = self.main_listWgt
-        widget.setUEPublishedStatusField(4)
+        widget.setUEPublishedStatusField(9, "已完成") if table == "asset" else widget.setUEPublishedStatusField(4)
         widget.setSortingEnabled(False)
         widget.setIsList(True)
         if table == "scene":
@@ -168,13 +179,13 @@ class StatusPage(QtWidgets.QWidget):
         layout.addWidget(widget)
         self.editor = service.StatusEditor(self, table, lambda: self.scope)
         self.load()
-        self.resize(1000, 220)
+        self.resize(1200, 220)
         self.show()
 
     def load(self, status="未开始"):
         self.main_listWgt.clear()
         self.main_listWgt.setItems([
-            ("20261015", name, "角色", "模型制作人", status, "绑定制作人", "制作中", "", "备注")
+            ("20261015", name, "角色", "模型制作人", status, "绑定制作人", "制作中", "", "备注", "未开始", "原UE制作人")
             for name in ("Hero", "Other")])
         self.main_listWgt.addItems()
         self.editor.setContext(*self.scope)
@@ -238,6 +249,9 @@ class StatusDropdownTests(unittest.TestCase):
         self.widget._closeStatusMenu()
         menu = self.open_menu(6)
         self.assertEqual([a.text() for a in menu.actions()], list(service.BASE_STATUSES))
+        self.widget._closeStatusMenu()
+        menu = self.open_menu(9)
+        self.assertEqual([a.text() for a in menu.actions()], list(service.BASE_STATUSES))
         self.assertIsNone(self.widget._assetDragItem)
 
     def test_commit_updates_cache_and_cell_only_after_success_and_survives_rebuild(self):
@@ -248,7 +262,7 @@ class StatusDropdownTests(unittest.TestCase):
             finish.wait(2)
         self.write.side_effect = write
         item = self.widget.item(0)
-        self.choose("UE")
+        self.choose("已完成", field=9)
         self.wait_until(started.is_set)
         self.assertFalse(self.widget._statusEditingEnabled)
         self.assertEqual(item.itemData()[4], "未开始")
@@ -256,23 +270,27 @@ class StatusDropdownTests(unittest.TestCase):
         self.assertIs(self.widget.currentItem(), item)
         finish.set()
         self.wait_until(lambda: self.page.editor.pending is None)
-        self.assertEqual(item.itemData()[4], "UE")
+        self.assertEqual(item.itemData()[9], "已完成")
+        self.assertEqual(item.itemData()[4], "未开始")
         self.assertTrue(item.isUEPublished())
-        self.assertEqual(self.widget.items()[0][4], "UE")
+        self.assertEqual(self.widget.items()[0][9], "已完成")
         self.assertEqual(self.widget.items()[1][4], "未开始")
         self.assertEqual(item.itemData()[6], "制作中")
         self.widget.clear()
         self.widget.addItems("Hero")
         self.assertEqual(self.widget.count(), 1)
-        self.assertEqual(self.widget.item(0).itemData()[4], "UE")
+        self.assertEqual(self.widget.item(0).itemData()[9], "已完成")
         self.assertTrue(self.widget.item(0).isUEPublished())
         self.assertTrue(self.widget._statusEditingEnabled)
         self.write.assert_called_once_with("user", "password", "Project", "asset", "Characters",
-                                          "Hero", 4, "未开始", "UE")
+                                          "Hero", 9, "未开始", "已完成")
+        self.choose("制作中", field=9)
+        self.wait_until(lambda: self.page.editor.pending is None)
+        self.assertFalse(self.widget.item(0).isUEPublished())
 
     def test_failed_save_reports_error_and_keeps_cache_and_display(self):
         self.write.side_effect = RuntimeError("permission denied")
-        self.choose("UE")
+        self.choose("已完成")
         self.wait_until(lambda: self.page.editor.pending is None)
         self.assertEqual(self.widget.item(0).itemData()[4], "未开始")
         self.assertFalse(self.widget.item(0).isUEPublished())
@@ -288,7 +306,7 @@ class StatusDropdownTests(unittest.TestCase):
             started.set()
             finish.wait(2)
         self.write.side_effect = write
-        self.choose("UE")
+        self.choose("已完成")
         self.wait_until(started.is_set)
         self.page.editor.setLoading()
         self.page.scope = ("OtherProject", "Props")
@@ -302,7 +320,7 @@ class StatusDropdownTests(unittest.TestCase):
     def test_selecting_same_value_and_editing_stale_scope_do_not_write(self):
         self.choose("未开始")
         self.page.scope = ("OtherProject", "Characters")
-        self.choose("UE")
+        self.choose("已完成")
         self.app.processEvents()
         self.write.assert_not_called()
 
@@ -403,15 +421,16 @@ class StatusDropdownTests(unittest.TestCase):
                     ui.listWidgetAddItems([self.widget.items()[0]])
                     self.assertEqual(ui._status_editor.context, ("PageProject", "Props"))
                     self.assertTrue(ui.main_listWgt._statusEditingEnabled)
-                    self.assertEqual(ui.main_listWgt.uePublishedStatusField(), 4)
+                    field, complete = (9, "已完成") if table == "asset" else (4, "UE")
+                    self.assertEqual(ui.main_listWgt.uePublishedStatusField(), field)
                     self.assertFalse(ui.main_listWgt.item(0).isUEPublished())
-                    ui._status_editor.request(ui.main_listWgt.item(0).itemData(), 4, "UE")
+                    ui._status_editor.request(ui.main_listWgt.item(0).itemData(), field, complete)
                     self.wait_until(lambda: ui._status_editor.pending is None)
-                    self.assertEqual(ui.main_listWgt.item(0).itemData()[4], "UE")
+                    self.assertEqual(ui.main_listWgt.item(0).itemData()[field], complete)
                     self.assertTrue(ui.main_listWgt.item(0).isUEPublished())
                     self.assertEqual(self.write.call_args.args[2:5], ("PageProject", table, "Props"))
                     self.assertEqual(ui.main_listWgt._detailColumns,
-                                     {2: "text", 3: "artist", 5: "artist"}
+                                     {2: "text", 3: "artist", 5: "artist", 10: "artist"}
                                      if table == "asset" else {2: "text", 3: "artist"})
                     ui.main_listWgt.setCurrentRow(0)
                     ui.preview_wgt = mock.Mock()
@@ -421,7 +440,7 @@ class StatusDropdownTests(unittest.TestCase):
                         self.assertEqual(ui.main_listWgt.item(0).itemData()[2], "新中文名")
                         ui.preview_wgt.setTitle.assert_called_once_with("Hero", "新中文名")
                         self.assertEqual(detail_write.call_args.args[2:5], ("PageProject", table, "Props"))
-                    ui._status_editor.request(ui.main_listWgt.item(0).itemData(), 4, "已完成")
+                    ui._status_editor.request(ui.main_listWgt.item(0).itemData(), field, "制作中")
                     self.wait_until(lambda: ui._status_editor.pending is None)
                     self.assertFalse(ui.main_listWgt.item(0).isUEPublished())
                 finally:

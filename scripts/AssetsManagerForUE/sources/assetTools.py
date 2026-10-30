@@ -17,9 +17,9 @@ if venv_path not in sys.path:
 from PySide6 import QtWidgets, QtCore, QtGui
 
 from functools import partial
-from ..utils import assetFunctions, messageBox, myWidget
+from ..utils import assetFunctions, messageBox, myWidget, thumbnail_update, search_diagnostics
 from ..config import commonSetting, databaseHost
-from . import action_service, asset_fbx_service, ue_asset_service, status_edit_service
+from . import action_service, asset_fbx_service, ue_asset_service, status_edit_service, asset_crud_ui
 
 _FLAT = "border-style: flat; background: transparent;"
 _DRAINING_THREAD_JOBS = []
@@ -40,7 +40,8 @@ def _fetch_database(user, password, project, asset_type, settings=None):
     cur = None
     query = '''
          SELECT "asset.date", "asset.name", "asset.zh_name", "asset.mod_artist", "asset.mod_status",
-         "asset.rig_artist", "asset.rig_status", "asset.icon", "asset.note"
+         "asset.rig_artist", "asset.rig_status", "asset.icon", "asset.note",
+         "asset.ue_status", "asset.ue_artist"
          FROM public."asset"
          WHERE "asset.type" = %s;
          '''
@@ -167,12 +168,15 @@ class AssetToolsUI(QtWidgets.QWidget):
         self._state_pending = set()
         self._state_requests = {}
         self._state_items = {}
+        self._state_item_keys = {}
         self._state_target = ""
         self._state_closed = False
         self._copy_thread = None
         self._copy_worker = None
         self._copy_item_key = ""
         self._copy_plan = None
+        self._load_check = ue_asset_service.AssetLoadCheck(self)
+        self._load_check.finished.connect(self._onLoadChecked)
 
         self._query_generation = 0
         self._query_tasks = {}
@@ -184,6 +188,8 @@ class AssetToolsUI(QtWidgets.QWidget):
         self._status_editor = status_edit_service.StatusEditor(
             self, "asset", self._statusContext)
         self._status_editor.saved.connect(self._statusSaved)
+        self._record_controller = asset_crud_ui.RecordController(self, "asset", self._statusContext)
+        self._record_controller.changed.connect(self._recordChanged)
         # 网络配置、psycopg2 冷导入和第一次查询都交给真正的后台任务。
         # 0ms 定时器让本控件先返回给主窗口，窗口可先完成一次绘制。
         QtCore.QTimer.singleShot(0, self._startInitialLoad)
@@ -229,6 +235,8 @@ class AssetToolsUI(QtWidgets.QWidget):
         self.back_bttn = self._toolBtn('back.png', u"后退")
         self.back_bttn.setEnabled(False)
         tool.addWidget(self.back_bttn)
+        self.add_bttn = self._toolBtn('add.png', u"添加资产（Add Asset）")
+        tool.addWidget(self.add_bttn)
         self.displayThumb_bttn = self._toolBtn('display_list.png', u"表单显示")
         tool.addWidget(self.displayThumb_bttn)
 
@@ -242,6 +250,16 @@ class AssetToolsUI(QtWidgets.QWidget):
 
         self.refresh_Bttn = self._toolBtn('refresh.png', u"刷新")
         tool.addWidget(self.refresh_Bttn)
+
+        self.load_button = QtWidgets.QPushButton(u"加载资产")
+        self.load_button.setMinimumHeight(27)
+        self.load_button.setToolTip(u"加载当前选中资产的 UE 发布包及依赖")
+        self.load_button.setStyleSheet(
+            "QPushButton{background:#256f3a; font-weight:bold; padding:3px 12px;}"
+            "QPushButton:hover{background:#2f8b49;}"
+            "QPushButton:disabled{background:#454545; color:#888;}")
+        self.load_button.setEnabled(False)
+        tool.addWidget(self.load_button)
 
         self.sort_bttn = QtWidgets.QToolButton()
         self.sort_bttn.setIcon(QtGui.QIcon('%s/icon/sort.png' % self.scriptsPath))
@@ -258,7 +276,7 @@ class AssetToolsUI(QtWidgets.QWidget):
 
         midV.addLayout(tool)
         self.main_listWgt = myWidget.MainQListWiget()
-        self.main_listWgt.setUEPublishedStatusField(4)  # asset.mod_status
+        self.main_listWgt.setUEPublishedStatusField(9, u"已完成")  # asset.ue_status
         # 关掉 Qt 按 item 文字(资产名)的自动排序，否则会覆盖排序菜单选择的自定义顺序(日期/状态等)
         self.main_listWgt.setSortingEnabled(False)
         self.asset_list_header = myWidget.AssetListHeader(self.main_listWgt)
@@ -337,12 +355,16 @@ class AssetToolsUI(QtWidgets.QWidget):
         self.itemSize_Slider.valueChanged.connect(self.itemSizeSliderChanged)
         self.itemSize_Slider.sliderReleased.connect(self.itemSizeSliderReleased)
         self.refresh_Bttn.clicked.connect(self.refresh_asset)
+        self.load_button.clicked.connect(self.loadUEAsset)
         self.sort_bttn.clicked.connect(self.sort_asset_ui)
         self.key_line.returnPressed.connect(self.search_asset)
+        self.main_listWgt.itemSelectionChanged.connect(self._updateLoadButton)
+        self.main_listWgt.stateScanPriorityChanged.connect(self._prioritizeStateScans)
         self.main_listWgt.itemSelectionChanged.connect(self.listWidgetItemChanged)
         self.main_listWgt.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.main_listWgt.customContextMenuRequested.connect(self.show_menu)
         self.main_listWgt.assetDropRequested.connect(self.placeImportedAsset)
+        self.main_listWgt.setAssetDragResolver(ue_asset_service.resolve_local_card_drag)
         self.main_listWgt.assetDragRejected.connect(
             lambda text: self.infoMsg("warning", text))
         self.detail_splitter.splitterMoved.connect(
@@ -527,7 +549,7 @@ class AssetToolsUI(QtWidgets.QWidget):
 
     def openDir(self, dir_path):
         """
-        'Show in Explorer'打开文件夹
+        打开资产文件夹
         """
         folder_info = QtCore.QFileInfo(dir_path)
         if folder_info.exists():
@@ -611,7 +633,9 @@ class AssetToolsUI(QtWidgets.QWidget):
             (u'按模型状态排序', 4),
             (u'按绑定制作排序', 5),
             (u'按绑定状态排序', 6),
-            (u'按备注排序', 7),
+            (u'按UE状态排序', 7),
+            (u'按UE制作排序', 8),
+            (u'按备注排序', 9),
         ]
         for name, column in sort_columns:
             act = QtGui.QAction(name, self)
@@ -626,7 +650,7 @@ class AssetToolsUI(QtWidgets.QWidget):
         """
         更新当前排序状态并重排列表：同一列再次点击 -> 反向；换列 -> 默认升序。
         column: 0=日期 1=资产名 2=中文名 3=模型制作 4=模型状态
-                5=绑定制作 6=绑定状态 7=备注（数据中下标 8）
+                5=绑定制作 6=绑定状态 7=UE状态 8=UE制作 9=备注
         """
         cur_col, cur_reverse = self._current_sort
         reverse = (not cur_reverse) if column == cur_col else False
@@ -637,9 +661,9 @@ class AssetToolsUI(QtWidgets.QWidget):
     def _sort_data(self, data):
         """ 按当前排序状态 self._current_sort 对数据列表就地排序。 """
         column, reverse = self._current_sort
+        data_index = myWidget.MainQListWiget.LIST_FIELD_INDICES[column]
 
         def sort_key(item_data):
-            data_index = 8 if column == 7 else column
             try:
                 value = item_data[data_index] if len(item_data) > data_index else None
             except (IndexError, TypeError):
@@ -656,7 +680,14 @@ class AssetToolsUI(QtWidgets.QWidget):
 
     def search_asset(self):
         """ 搜索：按关键字过滤当前数据重填 """
-        self.listWidgetAddItems()
+        trace = search_diagnostics.SearchTrace(
+            self.key_line.text(), len(self.main_listWgt.items() or []), self.main_listWgt.count())
+        try:
+            self.listWidgetAddItems(_trace=trace)
+        except Exception:
+            trace.finish()
+            raise
+        trace.finish_after_events(self)
 
     def getItemsFromSQL(self):
         _type, _project, path = self.getTypeAndProject()
@@ -710,7 +741,20 @@ class AssetToolsUI(QtWidgets.QWidget):
         return (str(self.project_comb.currentText()),
                 str(current_type.text()) if current_type is not None else "")
 
+    def _recordChanged(self, result):
+        if (result["project"], result["type"]) != self._statusContext():
+            return
+        if self._status_editor.loading or self._status_editor.context != self._statusContext():
+            self._requestAssetData()
+            return
+        # Invalidate older reads so a slow pre-deletion query cannot restore this card.
+        self._query_generation += 1
+        self._invalidateUEStateCache()
+        self.listWidgetAddItems(asset_crud_ui.apply_to_rows(self.main_listWgt.items(), result))
+
     def _statusSaved(self, request):
+        if request[3] == 9 and request[:2] == self._statusContext():
+            self.scanUEAssetStates()
         if (request[3] == 2 and request[:2] == self._statusContext()
                 and request[:2] == self._status_editor.context
                 and self.preview_wgt is not None):
@@ -722,16 +766,20 @@ class AssetToolsUI(QtWidgets.QWidget):
                 and self._query_generation in self._query_tasks):
             self._requestAssetData()
 
-    def listWidgetAddItems(self, new_dict=None):
+    def listWidgetAddItems(self, new_dict=None, _trace=None):
         """
         设置主面板FBX显示
         """
+        start_time = time.perf_counter()
+        mark = _trace.mark if _trace is not None else lambda _phase: None
+        mark("clear_list")
         self.main_listWgt.clear()
+        mark("clear_preview")
         if self.preview_wgt is not None:
             self.preview_wgt.clear()
         keyWords = self.key_line.text()
 
-        start_time = time.time()
+        mark("sort_data")
         if new_dict is not None:
             self.main_listWgt.setItems(new_dict)
             self._status_editor.setContext(*self._statusContext())
@@ -742,14 +790,38 @@ class AssetToolsUI(QtWidgets.QWidget):
             self.main_listWgt.setItems(_data)
         self.main_listWgt.setIsList(self.isList)
         self.main_listWgt.setItemSize(self.itemSize_Slider.value())
+        mark("build_filtered_cards")
         self.main_listWgt.addItems(keyWords)
+        mark("layout")
         self.main_listWgt.setMode()
         self.asset_list_header.setVisible(self.isList)
         self.asset_list_header.setSortIndicator(*self._current_sort)
-        end_time = time.time()
+        end_time = time.perf_counter()
         self.infoMsg("info", "%s items" % (self.main_listWgt.count()) +
                      '   Cost :  %.2f' % (end_time - start_time) + ' sec')
+        mark("schedule_state_checks")
         self.scanUEAssetStates()
+        mark("rebuild_complete")
+
+    @staticmethod
+    def _hasUELoadableStatus(item):
+        """Loading can use a work-in-progress package; the badge means completed."""
+        if item is None:
+            return False
+        try:
+            return item.itemData()[9] in (u"制作中", u"已完成")
+        except (IndexError, KeyError, TypeError):
+            return False
+
+    def _canLoadUEAsset(self, item):
+        return (self._hasUELoadableStatus(item) and item.ueSourceAvailability() is True
+                and self._copy_thread is None and not self._load_check.isRunning())
+
+    def _updateLoadButton(self):
+        item = self.main_listWgt.currentItem()
+        if item is not None and not item.isSelected():
+            item = None
+        self.load_button.setEnabled(self._canLoadUEAsset(item))
 
     def listWidgetItemChanged(self):
         """ 改变item触发：把选中资产喂给 FBX 三维预览 + 动作库 """
@@ -778,30 +850,34 @@ class AssetToolsUI(QtWidgets.QWidget):
 
     def show_menu(self, point):
         """
-        设置主面板右键菜单：旧 FBX Import 与新 UE 包加载并存。
+        设置主面板右键菜单：FBX 导入与 UE 包加载并存。
         """
         currentItem = self.main_listWgt.itemAt(point)
         if currentItem is None:
             return
         self.main_listWgt.setCurrentItem(currentItem)
         menu = QtWidgets.QMenu(self.main_listWgt)
-        show_action = QtGui.QAction('Show in Explorer', self)
+        show_action = QtGui.QAction(u'打开资产文件夹', self)
         show_action.setIcon(QtGui.QIcon("{}/icon/folder_white.png".format(self.scriptsPath)))
         show_ue_action = QtGui.QAction(u'打开 UE 发布目录', self)
         load_action = QtGui.QAction(u'加载资产', self)
-        load_action.setEnabled(
-            currentItem.ueSourceAvailability() is True and self._copy_thread is None)
+        load_action.setEnabled(self._canLoadUEAsset(currentItem))
         load_action.setToolTip(currentItem.ueSourceMessage())
-        imp_action = QtGui.QAction('Import FBX', self)
+        imp_action = QtGui.QAction(u'导入 FBX', self)
         locate_action = QtGui.QAction(u'在内容浏览器中定位', self)
-        locate_action.setEnabled(bool(currentItem.ueMainObjectPath()))
+        local_object_path = ue_asset_service.resolve_local_card_browser_asset(currentItem)
+        locate_action.setEnabled(bool(local_object_path))
+        locate_action.setToolTip(local_object_path or u"当前工程中未找到该资产")
         menu.addAction(show_action)
         menu.addAction(show_ue_action)
+        thumbnail_update.add_menu_action(menu, self, currentItem)
         menu.addSeparator()
         menu.addAction(load_action)
         menu.addAction(locate_action)
         menu.addSeparator()
         menu.addAction(imp_action)
+        menu.addSeparator()
+        self._record_controller.addDeleteAction(menu, currentItem)
         asset_root = ue_asset_service.asset_root_from_item_data(currentItem.itemData())
         show_action.triggered.connect(partial(self.openDir, asset_root))
         show_ue_action.triggered.connect(partial(self.openDir, os.path.join(asset_root, "UE")))
@@ -842,11 +918,23 @@ class AssetToolsUI(QtWidgets.QWidget):
         if self._state_closed:
             return
         self._state_items = {}
+        self._state_item_keys = {}
         for index in range(self.main_listWgt.count()):
             item = self.main_listWgt.item(index)
             root = ue_asset_service.asset_root_from_item_data(item.itemData())
             key = self._sourceCacheKey(root)
+            if not self._hasUELoadableStatus(item):
+                self._state_cache.pop(key, None)
+                self._setItemUEPlan(item, ue_asset_service.unpublished_asset_state(root))
+                continue
+            self._state_item_keys[id(item)] = key
             self._state_items.setdefault(key, []).append(item)
+        if not self._state_items:
+            self._state_pending.clear()
+            self._state_requests.clear()
+            self._prioritizeStateScans()
+            self._updateLoadButton()
+            return
         try:
             target_content = ue_asset_service.project_content_dir()
         except Exception as exc:
@@ -854,12 +942,16 @@ class AssetToolsUI(QtWidgets.QWidget):
                 for item in items:
                     item.setUESourceAvailability(None, u"暂时无法检查 UE 发布文件")
                     item.setUEState("error", str(exc), {})
+            self._updateLoadButton()
             self.infoMsg("error", str(exc))
             return
         target_content = self._sourceCacheKey(target_content)
         if target_content != self._state_target:
             self._invalidateUEStateCache()
             self._state_target = target_content
+        # 筛选后移除未开跑的旧任务，不再让未显示的资产占住检查队列。
+        self._state_requests = {}
+        self._state_pending.intersection_update(self._state_items)
         for key, items in self._state_items.items():
             plan = self._state_cache.get(key)
             if self._copy_plan and self._sourceCacheKey(self._copy_plan.get("asset_root")) == key:
@@ -871,24 +963,40 @@ class AssetToolsUI(QtWidgets.QWidget):
                 else:
                     item.setUESourceAvailability(None, u"正在检查服务器 UE 发布文件…")
                     item.setUEState("scanning", u"正在检查 UE 发布资产…", {})
-            if plan is None and key not in self._state_pending:
+            if plan is None:
                 self._state_pending.add(key)
                 self._state_requests[key] = (
                     ue_asset_service.asset_root_from_item_data(items[0].itemData()))
+        self._updateLoadButton()
+        self._prioritizeStateScans()
+
+    def _prioritizeStateScans(self):
+        if self._state_closed:
+            return
+        ordered = {}
+        priority = (self.main_listWgt.stateScanPriorityItems(include_remaining=False)
+                    if self._state_requests else [])
+        for item in priority:
+            key = self._state_item_keys.get(id(item))
+            if key in self._state_requests:
+                ordered[key] = self._state_requests[key]
+        ordered.update(self._state_requests)
+        self._state_requests = ordered
+        for _thread, worker in self._state_jobs:
+            worker.replace_requests(self._state_generation, list(ordered.items()))
         self._startNextStateScan()
 
     def _startNextStateScan(self):
-        # 单窗口同时只运行一批 NAS 扫描；排序/搜索不会取消重开同一批。
+        # 单窗口仅一批 NAS 扫描，worker 在每项完成后读取可实时重排的队列。
         if self._state_closed or self._state_jobs or not self._state_requests:
             return
         requests = list(self._state_requests.items())
-        self._state_requests.clear()
         thread = QtCore.QThread()
         worker = ue_asset_service.AssetStateWorker(
-            self._state_generation, requests, self._state_target)
+            self._state_generation, requests, self._state_target, max_pending_results=8)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.itemScanned.connect(self._applyUEState)
+        worker.itemScanned.connect(self._applyUEState, QtCore.Qt.QueuedConnection)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
@@ -899,7 +1007,7 @@ class AssetToolsUI(QtWidgets.QWidget):
     def _releaseStateJob(self):
         finished_thread = self.sender()
         self._state_jobs = [job for job in self._state_jobs if job[0] is not finished_thread]
-        self._startNextStateScan()
+        QtCore.QTimer.singleShot(0, self._startNextStateScan)
 
     def _setItemUEPlan(self, item, plan):
         item.setUESourceAvailability(
@@ -908,6 +1016,7 @@ class AssetToolsUI(QtWidgets.QWidget):
         item.setUEState(plan.get("state"), plan.get("message"), plan)
         if plan.get("state") == "importing":
             item.setUEProgress(plan.get("progress", 0), plan.get("message"))
+        self._updateLoadButton()
 
     def _rememberUEPlan(self, plan, supersede_scan=False):
         key = self._sourceCacheKey(plan.get("asset_root"))
@@ -915,23 +1024,28 @@ class AssetToolsUI(QtWidgets.QWidget):
             # 主动加载的检查比正在进行的后台扫描更新，后者不能覆盖它。
             self._state_pending.discard(key)
             self._state_requests.pop(key, None)
+            self._prioritizeStateScans()
         self._state_cache[key] = dict(plan)
         for item in self._state_items.get(key, []):
             self._setItemUEPlan(item, plan)
 
+    @QtCore.Slot(int, str, object)
     def _applyUEState(self, generation, key, plan):
+        for _thread, worker in self._state_jobs:
+            worker.acknowledge_result(generation, key)
         if generation != self._state_generation or key not in self._state_pending:
             return
         self._state_pending.discard(key)
-        if plan.get("state") == "ready":
-            try:
-                plan["main_object_path"] = ue_asset_service.resolve_placeable_object_path(plan)
-                if not plan["main_object_path"]:
-                    plan["state"] = "partial"
-                    plan["message"] = u"UE 包已在工程中；未找到可直接拖放的 Actor 蓝图或网格体"
-            except Exception:
-                pass
+        self._state_requests.pop(key, None)
+        # Automatic checks report filesystem state only. Resolving an Actor
+        # Blueprint can load/compile packages on UE's game thread; defer it to
+        # an explicit drag, locate or load operation.
         self._rememberUEPlan(plan)
+
+    def _chooseConflictFiles(self, plan):
+        # 仅在出现冲突时导入，共用场景页的弹窗及覆盖/保留规则。
+        from .sceneTools import choose_ue_conflict_files
+        return choose_ue_conflict_files(self, plan)
 
     def loadUEAsset(self, item=None):
         """复制选中资产 UE 发布包；现有同名不同内容文件绝不自动覆盖。"""
@@ -941,48 +1055,69 @@ class AssetToolsUI(QtWidgets.QWidget):
         if item is None:
             self.infoMsg("warning", u"请先选择一张资产卡片")
             return
-        if self._copy_thread is not None and self._copy_thread.isRunning():
-            self.infoMsg("warning", u"已有资产正在加载，请等待当前任务完成")
+        if self._copy_thread is not None or self._load_check.isRunning():
+            self.infoMsg("warning", u"已有资产正在检查或加载，请等待当前任务完成")
             return
-
         asset_root = ue_asset_service.asset_root_from_item_data(item.itemData())
         try:
-            # 每次主动加载重建源文件清单，避免缓存期间发布包被添加/移除。
-            plan = ue_asset_service.build_import_plan(asset_root)
-            plan = ue_asset_service.query_filesystem_state(plan, verify_content=True)
+            target = ue_asset_service.project_content_dir()
+            key = str(item.itemData()[7])
+            self._load_check.start(key, asset_root, target)
         except Exception as exc:
-            plan = {"asset_root": asset_root, "state": "error", "message": str(exc),
-                    "main_object_path": "", "source_available": None,
-                    "ue_directory_exists": None,
-                    "source_message": u"无法确认服务器 UE 发布文件：{0}".format(exc)}
-            self._rememberUEPlan(plan, supersede_scan=True)
-            self._setItemUEPlan(item, plan)
             self.infoMsg("error", str(exc))
             return
+        # An older automatic result must not overwrite this explicit check.
+        source_key = self._sourceCacheKey(asset_root)
+        self._state_pending.discard(source_key)
+        self._state_requests.pop(source_key, None)
+        self._prioritizeStateScans()
+        self._updateLoadButton()
+        if self.action_wgt is not None:
+            self.action_wgt.setLoadBusy(True)
+        self.infoMsg("info", u"正在后台检查 UE 发布文件：{0}".format(item.name()))
+
+    @QtCore.Slot(str, object)
+    def _onLoadChecked(self, key, plan):
+        if self._state_closed:
+            return
+        item = self._findItemByKey(key)
+        self._updateLoadButton()
+        if self.action_wgt is not None:
+            self.action_wgt.setLoadBusy(False)
         self._rememberUEPlan(plan, supersede_scan=True)
-        self._setItemUEPlan(item, plan)
+        if item is not None:
+            self._setItemUEPlan(item, plan)
+        if plan.get("state") == "error":
+            self.infoMsg("error", plan.get("message"))
+            return
         # ``files`` 可能只有 .uexp/.ubulk 等 sidecar；没有 .uasset/.umap
         # 仍然不是一个可加载的 UE 包，不能把孤立 sidecar 复制进工程。
         if not plan.get("files") or not plan.get("package_object_paths"):
             message = plan.get("message") or u"没有找到该资产的 UE 发布文件"
-            item.setUEState("missing", message, plan)
+            if item is not None:
+                item.setUEState("missing", message, plan)
             self.infoMsg("warning", message)
             self._showMissingUEPackageDialog(plan, message)
             return
-        if plan.get("state") == "conflict":
-            item.setUEState("conflict", plan.get("message"), plan)
+        if plan.get("different_files"):
+            if item is not None:
+                item.setUEState(plan.get("state"), plan.get("message"), plan)
             self.infoMsg("warning", plan.get("message"))
-            return
+            if not self._chooseConflictFiles(plan):
+                return
+            if self._state_closed:
+                return
         if plan.get("state") == "ready":
             self._registerLoadedPlan(item, plan)
             return
 
-        key = str(item.itemData()[7])
+        for warning in ue_asset_service.prepare_plan_overwrites(plan):
+            self.infoMsg("warning", warning)
+        if plan.get("overwrite_cancelled"):
+            return
         self._copy_item_key = key
         self._copy_plan = dict(plan)
         self._onCopyProgress(0, u"准备加载 UE 最终资产")
-        for warning in ue_asset_service.prepare_plan_overwrites(plan):
-            self.infoMsg("warning", warning)
         thread = QtCore.QThread()
         worker = ue_asset_service.AssetCopyWorker(plan)
         worker.moveToThread(thread)
@@ -998,6 +1133,9 @@ class AssetToolsUI(QtWidgets.QWidget):
         thread.finished.connect(self._onCopyThreadFinished)
         self._copy_thread = thread
         self._copy_worker = worker
+        self._updateLoadButton()
+        if self.action_wgt is not None:
+            self.action_wgt.setLoadBusy(True)
         thread.start()
 
     def _showMissingUEPackageDialog(self, plan, message):
@@ -1021,6 +1159,8 @@ class AssetToolsUI(QtWidgets.QWidget):
         box.exec()
 
     def _onCopyProgress(self, percent, name):
+        if self._state_closed:
+            return
         message = u"正在加载：{0}".format(name)
         if self._copy_plan is not None:
             self._copy_plan.update(state="importing", progress=percent, message=message)
@@ -1032,6 +1172,8 @@ class AssetToolsUI(QtWidgets.QWidget):
         self.infoMsg("info", u"加载资产 {0}%：{1}".format(percent, name))
 
     def _onCopyFinished(self, plan):
+        if self._state_closed:
+            return
         key = self._copy_item_key
         item = self._findItemByKey(key)
         self._registerLoadedPlan(item, plan)
@@ -1048,11 +1190,11 @@ class AssetToolsUI(QtWidgets.QWidget):
                 self._setItemUEPlan(item, plan)
             if plan.get("state") == "ready":
                 self.infoMsg("info", plan.get("message"))
-            elif plan.get("state") == "partial":
+            elif plan.get("state") in ("partial", "conflict", "missing"):
                 self.infoMsg("warning", plan.get("message"))
             else:
                 self.infoMsg("error", plan.get("message"))
-            if plan.get("state") in ("ready", "partial"):
+            if plan.get("state") in ("ready", "partial", "conflict"):
                 located, object_path = (
                     ue_asset_service.sync_plan_to_content_browser(plan))
                 if located:
@@ -1072,6 +1214,8 @@ class AssetToolsUI(QtWidgets.QWidget):
             self.infoMsg("error", u"UE 注册资产失败：{0}".format(exc))
 
     def _onCopyFailed(self, message):
+        if self._state_closed:
+            return
         key = self._copy_item_key
         item = self._findItemByKey(key)
         state = "conflict" if (u"同名不同" in message or u"目标文件" in message) else "error"
@@ -1087,15 +1231,17 @@ class AssetToolsUI(QtWidgets.QWidget):
         self._copy_worker = None
         self._copy_item_key = ""
         self._copy_plan = None
+        self._updateLoadButton()
         if self.action_wgt is not None:
             self.action_wgt.setLoadBusy(False)
 
     def locateUEAsset(self, item=None):
         item = item or self.main_listWgt.currentItem()
-        if item is None or not item.ueMainObjectPath():
-            self.infoMsg("warning", u"该资产尚未加载，或没有可定位的主资产")
+        object_path = ue_asset_service.resolve_local_card_browser_asset(item)
+        if not object_path:
+            self.infoMsg("warning", u"当前工程中未找到该资产，请先加载资产")
             return
-        if not ue_asset_service.sync_to_content_browser(item.ueMainObjectPath()):
+        if not ue_asset_service.sync_to_content_browser(object_path):
             self.infoMsg("warning", u"内容浏览器无法定位该资产")
 
     def placeImportedAsset(self, payload):
@@ -1113,7 +1259,9 @@ class AssetToolsUI(QtWidgets.QWidget):
     def shutdownThreads(self):
         """主窗口关闭前取消本页 I/O 任务，避免销毁仍在运行的 QThread。"""
         self._status_editor.shutdown()
+        self._record_controller.shutdown()
         self._state_closed = True
+        self._load_check.cancel()
         self._state_requests.clear()
         self._state_pending.clear()
         self._query_generation += 1
@@ -1130,19 +1278,8 @@ class AssetToolsUI(QtWidgets.QWidget):
         if self._copy_thread is not None:
             self._copy_thread.requestInterruption()
             self._copy_thread.quit()
-        for thread, _worker in jobs:
-            try:
-                thread.wait(1500)
-            except RuntimeError:
-                pass
-        if self._copy_thread is not None:
-            try:
-                self._copy_thread.wait(3000)
-            except RuntimeError:
-                pass
-
-        # 极慢 NAS 调用可能在等待窗口后仍未返回。把线程/worker 提升到模块级持有，
-        # 直到 finished 再释放，避免关闭窗口时出现 QThread destroyed while running。
+        # Never wait for network I/O on UE's main thread. Keep unfinished
+        # jobs alive at module scope until their normal finished signal.
         remaining = list(jobs)
         if self._copy_thread is not None and self._copy_worker is not None:
             remaining.append((self._copy_thread, self._copy_worker))
@@ -1224,7 +1361,7 @@ class AssetToolsUI(QtWidgets.QWidget):
         """加载同名动画包；缺少角色/道具时，经确认一并加载其 UE 发布包。"""
         if not action_package:
             return
-        if self._copy_thread is not None and self._copy_thread.isRunning():
+        if self._copy_thread is not None or self._load_check.isRunning():
             self.infoMsg("warning", u"已有资产或动作正在加载，请等待完成")
             return
         try:
@@ -1264,6 +1401,7 @@ class AssetToolsUI(QtWidgets.QWidget):
             thread.finished.connect(self._onCopyThreadFinished)
             self._copy_thread = thread
             self._copy_worker = worker
+            self._updateLoadButton()
             thread.start()
         except Exception as exc:
             self._onActionCopyFailed(str(exc))

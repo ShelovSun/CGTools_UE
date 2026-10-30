@@ -924,7 +924,16 @@ class ComponentToolsUI(QtWidgets.QWidget):
         if self._operationIsRunning():
             self.infoMsg("warning", u"已有组件正在加载，请等待完成")
             return
-        plan = component.get("plan") or {}
+        previous = component.get("plan") or {}
+        try:
+            plan = component_service.build_component_plan(
+                component["category"], component["folder"], previous["plugins_dir"])
+            plan = component_service.query_component_state(plan, verify_content=True)
+        except Exception as exc:
+            self.infoMsg("error", u"检查组件失败：{0}".format(exc))
+            return
+        component["plan"] = plan
+        self._applyComponentState(component)
         state = plan.get("state") or "error"
         if state == "error":
             self.infoMsg("error", plan.get("message") or u"组件发布内容无效")
@@ -934,11 +943,15 @@ class ComponentToolsUI(QtWidgets.QWidget):
                 component["name"]))
             return
         if state == "conflict":
-            if not self._confirmReplacement(component, plan):
+            if not self._chooseConflictFiles(plan):
                 return
-            self._startCopy(component, plan, stage_replacement=True)
+            self._startCopy(component, plan, stage_replacement=bool(plan.get("overwrite_files")))
             return
         self._startCopy(component, plan, stage_replacement=False)
+
+    def _chooseConflictFiles(self, plan):
+        from .sceneTools import choose_ue_conflict_files
+        return choose_ue_conflict_files(self, plan, plugin_files=True)
 
     def _confirmReplacement(self, component, plan):
         different = list(plan.get("different_files") or [])
@@ -1004,16 +1017,16 @@ class ComponentToolsUI(QtWidgets.QWidget):
         component["plan"] = plan
         if plan.get("install_mode") == "replace_after_exit":
             plan["state"] = "importing"
-            plan["message"] = u"新版本已暂存，等待重启替换"
+            plan["message"] = u"选定更新已暂存，等待重启替换"
             self._applyComponentState(component)
             self._promptRestart(component, plan, replacing=True)
             return
 
         self._applyComponentState(component)
-        if plan.get("state") == "ready":
-            self.infoMsg("info", u"{0}：组件已复制到工程 Plugins".format(
-                component["name"]))
-            self._promptRestart(component, plan, replacing=False)
+        if plan.get("state") == "ready" or plan.get("load_completed"):
+            self.infoMsg("info", u"{0}：{1}".format(component["name"], plan.get("message") or u"组件已复制到工程 Plugins"))
+            if plan.get("created_files"):
+                self._promptRestart(component, plan, replacing=False)
         else:
             self.infoMsg("error", plan.get("message") or u"组件加载后校验失败")
 
@@ -1039,11 +1052,11 @@ class ComponentToolsUI(QtWidgets.QWidget):
         box.setIcon(QtWidgets.QMessageBox.Question)
         box.setWindowTitle(u"重启 Unreal Editor")
         if replacing:
-            box.setText(u"【{0}】新版本已复制完成，是否立即重启 UE 并替换？".format(
+            box.setText(u"【{0}】选定更新已暂存完成，是否立即重启 UE 并替换？".format(
                 component["name"]))
             box.setInformativeText(
-                u"确认后会先弹出 UE 的未保存内容对话框；UE 完全退出后才替换组件，"
-                u"然后重新打开当前 .uproject。原版本会保留在工程 Saved 目录。")
+                u"确认后会先弹出 UE 的未保存内容对话框；UE 完全退出后才应用选中的覆盖文件，"
+                u"未选中的文件保留工程版本，然后重新打开当前 .uproject。原版本会备份到工程 Saved 目录。")
         else:
             box.setText(u"【{0}】已加载到工程 Plugins，是否立即重启 UE？".format(
                 component["name"]))
@@ -1090,7 +1103,7 @@ class ComponentToolsUI(QtWidgets.QWidget):
 
     def _dragRejected(self, text):
         del text
-        self.infoMsg("warning", u"组件卡片不能拖入关卡；请先加载组件并重启 UE")
+        self.infoMsg("warning", u"组件卡片是 UE 插件安装包，不能直接拖入关卡；加载并重启 UE 后，请从内容浏览器或添加组件面板使用插件提供的资源")
 
     # ------------------------------------------------------------ 显示/设置
     def toggleDisplayMode(self):

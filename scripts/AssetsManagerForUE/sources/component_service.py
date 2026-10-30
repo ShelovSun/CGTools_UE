@@ -99,7 +99,7 @@ def _sha1(path, cancelled=None):
     return digest.hexdigest()
 
 
-def _same_file(source, target, cancelled=None):
+def _same_file(source, target, cancelled=None, verify_content=False):
     """复制后的文件通常保留 mtime；mtime 不同时再计算哈希，兼顾速度和准确性。"""
     try:
         source_stat = os.stat(source)
@@ -110,7 +110,7 @@ def _same_file(source, target, cancelled=None):
         return False
     source_time = getattr(source_stat, "st_mtime_ns", int(source_stat.st_mtime * 1e9))
     target_time = getattr(target_stat, "st_mtime_ns", int(target_stat.st_mtime * 1e9))
-    if source_time == target_time:
+    if source_time == target_time and not verify_content:
         return True
     return _sha1(source, cancelled) == _sha1(target, cancelled)
 
@@ -239,7 +239,7 @@ def build_component_plan(category_name, component_folder, plugins_dir,
     return query_component_state(plan, cancelled=cancelled)
 
 
-def query_component_state(plan, cancelled=None):
+def query_component_state(plan, cancelled=None, verify_content=False):
     """比较服务器组件与工程 Plugins 中的同名组件。"""
     files = plan.get("files") or []
     if not plan.get("descriptor") or not files:
@@ -256,7 +256,7 @@ def query_component_state(plan, cancelled=None):
         target = entry["target"]
         if not os.path.isfile(target):
             missing.append(entry["relative"])
-        elif _same_file(entry["source"], target, cancelled):
+        elif _same_file(entry["source"], target, cancelled, verify_content=verify_content):
             existing.append(entry["relative"])
         else:
             different.append(entry["relative"])
@@ -406,44 +406,68 @@ class ComponentCopyWorker(QtCore.QObject):
             files = self._plan.get("files") or []
             if not files:
                 raise RuntimeError(u"组件目录中没有可复制的文件")
+            overwrite_files = {_forward(path).lower()
+                               for path in self._plan.get("overwrite_files") or []}
+            keep_files = {_forward(path).lower()
+                          for path in self._plan.get("keep_existing_files") or []}
+            if overwrite_files & keep_files:
+                raise RuntimeError(u"同一个组件文件不能同时选择覆盖和保留")
+            known_files = {_forward(entry["relative"]).lower() for entry in files}
+            if (overwrite_files | keep_files) - known_files:
+                raise RuntimeError(u"组件冲突选择包含发布清单之外的文件，请重新加载")
+            for entry in files:
+                if (not _inside(source_folder, entry["source"])
+                        or not _inside(target_folder, entry["target"])
+                        or not _inside(target_folder, os.path.join(target_folder, entry["relative"]))):
+                    raise RuntimeError(u"拒绝复制组件目录之外的文件")
+            skipped_missing = {_forward(path).lower()
+                               for path in self._plan.get("skipped_missing_files") or []}
+            files = [entry for entry in files
+                     if _forward(entry["relative"]).lower() not in skipped_missing]
+            conflicts = [entry["relative"] for entry in files
+                         if os.path.isfile(entry["target"])
+                         and not _same_file(entry["source"], entry["target"],
+                                            self._is_cancelled, verify_content=True)
+                         and _forward(entry["relative"]).lower() not in overwrite_files | keep_files]
+            if conflicts:
+                raise RuntimeError(u"检测到 {0} 个尚未选择处理方式的组件冲突文件，请重新选择覆盖或保留".format(len(conflicts)))
+            if overwrite_files and not self._stage_replacement:
+                raise RuntimeError(u"组件覆盖文件必须先暂存，待 UE 退出后再替换")
+            self._plan["kept_existing_files"] = [entry["relative"] for entry in files
+                if _forward(entry["relative"]).lower() in keep_files and os.path.isfile(entry["target"])]
             os.makedirs(plugins_dir, exist_ok=True)
 
-            # 冲突版本不碰当前 UE 可能已经加载的 DLL；先完整复制到同卷暂存目录，
-            # 确认重启后再由独立 helper 替换。
+            # 仅暂存选中覆盖项及选中缺失项；保留项在 UE 保存并退出后从最新工程文件合并，
+            # 避免用户在重启保存对话框中保存的修改被暂存前的旧快照覆盖。
             if self._stage_replacement:
                 staging_root = os.path.join(plugins_dir, ".AssetsManagerForUE_Staging")
                 os.makedirs(staging_root, exist_ok=True)
                 staging_folder = os.path.join(
                     staging_root, self._plan.get("name", "Component") + "_" + uuid.uuid4().hex)
                 os.makedirs(staging_folder)
-                total = max(1, sum(max(0, int(row.get("size", 0))) for row in files))
+                selected = [entry for entry in files
+                            if _forward(entry["relative"]).lower() in overwrite_files
+                            or not os.path.isfile(entry["target"])]
+                total = max(1, sum(max(0, int(row.get("size", 0))) for row in selected))
                 completed = 0
                 for relative_dir in self._plan.get("directories") or []:
                     os.makedirs(os.path.join(staging_folder, relative_dir), exist_ok=True)
-                for entry in files:
+                for entry in selected:
                     if self._cancelled:
                         raise RuntimeError(u"操作已取消")
                     destination = os.path.join(staging_folder, entry["relative"])
                     os.makedirs(os.path.dirname(destination), exist_ok=True)
                     completed = self._copy_file(
                         entry["source"], destination, entry["relative"], completed, total)
+                    if not _same_file(entry["source"], destination, self._is_cancelled, verify_content=True):
+                        raise RuntimeError(u"暂存组件文件校验失败：{0}".format(entry["relative"]))
                 self._plan["staging_folder"] = staging_folder
                 self._plan["install_mode"] = "replace_after_exit"
-                self.progress.emit(100, u"新版本已复制到安全暂存目录")
+                self._plan["selective_update"] = True
+                self._plan["staged_files"] = [entry["relative"] for entry in selected]
+                self.progress.emit(100, u"选定更新已复制到安全暂存目录")
                 self.finished.emit(self._plan)
                 return
-
-            # 提交前做一次精确冲突检查，避免扫描后工程文件发生变化。
-            conflicts = []
-            for entry in files:
-                target = entry["target"]
-                if os.path.isfile(target) and not _same_file(
-                        entry["source"], target, self._is_cancelled):
-                    conflicts.append(entry["relative"])
-            if conflicts:
-                raise RuntimeError(
-                    u"复制前检测到 {0} 个不同版本文件，请刷新后重新加载".format(
-                        len(conflicts)))
 
             total = max(1, sum(max(0, int(row.get("size", 0))) for row in files))
             completed = 0
@@ -463,6 +487,7 @@ class ComponentCopyWorker(QtCore.QObject):
                 if os.path.exists(target_folder):
                     raise RuntimeError(u"复制过程中同名组件目录被其他进程创建")
                 os.replace(staging_folder, target_folder)
+                created_files.extend(entry["target"] for entry in files)
                 staging_folder = ""
                 _remove_empty_directory(staging_root)
             else:
@@ -489,9 +514,17 @@ class ComponentCopyWorker(QtCore.QObject):
                     temp_files.remove(temp_path)
                     created_files.append(target)
 
-            self._plan = query_component_state(self._plan, cancelled=self._is_cancelled)
-            if self._plan.get("state") != "ready":
+            self._plan = query_component_state(self._plan, cancelled=self._is_cancelled, verify_content=True)
+            unexpected = ({_forward(path).lower() for path in self._plan.get("different_files") or []}
+                          - keep_files - skipped_missing)
+            remaining_missing = ({_forward(path).lower() for path in self._plan.get("missing_files") or []}
+                                 - skipped_missing)
+            if remaining_missing or unexpected or self._plan.get("state") == "error":
                 raise RuntimeError(self._plan.get("message") or u"组件复制后校验失败")
+            self._plan["load_completed"] = True
+            self._plan["created_files"] = list(created_files)
+            self._plan["message"] = u"组件加载完成（新增 {0} 个文件，保留工程版本 {1} 个）".format(
+                len(created_files), len(self._plan["kept_existing_files"]))
             self.progress.emit(100, u"组件加载完成")
             self.finished.emit(self._plan)
         except Exception as exc:
@@ -552,6 +585,63 @@ def _restart_context():
     return project_file, editor_exe, world
 
 
+def _replacement_script_lines(replacement_plan, project_saved):
+    """生成退出后的插件合并和备份步骤；生成时验证所有根路径。"""
+    staging = _normal(replacement_plan.get("staging_folder"))
+    target = _normal(replacement_plan.get("target_folder"))
+    plugins_dir = _normal(replacement_plan.get("plugins_dir"))
+    if (not _inside(plugins_dir, target)
+            or not _inside(os.path.join(plugins_dir, ".AssetsManagerForUE_Staging"), staging)
+            or not os.path.isdir(staging)):
+        raise RuntimeError(u"暂存组件或目标组件路径不安全，已取消替换")
+    component_name = replacement_plan.get("name") or os.path.basename(target)
+    safe_name = "".join("_" if char in '<>:"/\\|?*' else char
+                        for char in str(component_name)) or "Component"
+    backup = os.path.join(project_saved, "AssetsManagerForUE", "ComponentBackups",
+        time.strftime("%Y%m%d_%H%M%S") + "_" + safe_name + "_" + uuid.uuid4().hex[:8])
+    lines = [
+        "  $stage = {0}".format(_ps_quote(staging)),
+        "  $target = {0}".format(_ps_quote(target)),
+        "  $backup = {0}".format(_ps_quote(backup)),
+    ]
+    if replacement_plan.get("selective_update"):
+        overwrite = ", ".join(_ps_quote(_forward(path).lower())
+                              for path in replacement_plan.get("overwrite_files") or [])
+        lines.extend([
+            "  $componentOverwrite = @({0})".format(overwrite),
+            "  if (-not (Test-Path -LiteralPath $target -PathType Container)) { throw '原组件目录已不存在，已停止替换' }",
+            "  $target = (Get-Item -LiteralPath $target).FullName",
+            "  $stage = (Get-Item -LiteralPath $stage).FullName",
+            "  $componentStagePrefix = [IO.Path]::GetFullPath($stage).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar",
+            "  foreach ($componentFile in Get-ChildItem -LiteralPath $target -File -Recurse -Force) {",
+            "    $componentRelative = $componentFile.FullName.Substring($target.Length + 1)",
+            "    $componentKey = $componentRelative.Replace([char]92, [char]47).ToLowerInvariant()",
+            "    if ($componentOverwrite -contains $componentKey) { continue }",
+            "    $componentDestination = [IO.Path]::GetFullPath((Join-Path $stage $componentRelative))",
+            "    if (-not $componentDestination.StartsWith($componentStagePrefix, [StringComparison]::OrdinalIgnoreCase)) { throw '组件保留文件路径越界' }",
+            "    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $componentDestination) | Out-Null",
+            "    Copy-Item -LiteralPath $componentFile.FullName -Destination $componentDestination -Force",
+            "  }",
+        ])
+    lines.extend([
+        "  $hadOld = Test-Path -LiteralPath $target",
+        "  if ($hadOld) {",
+        "    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $backup) | Out-Null",
+        "    Move-Item -LiteralPath $target -Destination $backup",
+        "  }",
+        "  try {",
+        "    Move-Item -LiteralPath $stage -Destination $target",
+        "  } catch {",
+        "    if ($hadOld -and -not (Test-Path -LiteralPath $target) -and (Test-Path -LiteralPath $backup)) {",
+        "      Move-Item -LiteralPath $backup -Destination $target",
+        "    }",
+        "    throw",
+        "  }",
+        "  Add-Content -LiteralPath $logPath -Value ('组件更新完成；原版本备份：' + $backup)",
+    ])
+    return lines
+
+
 def restart_editor(replacement_plan=None):
     """保存工程，后台等待当前 UE 退出，可选替换插件，然后重开同一工程。"""
     helper = None
@@ -575,39 +665,8 @@ def restart_editor(replacement_plan=None):
             "  Start-Sleep -Milliseconds 1200",
         ]
         if replacement_plan:
-            staging = _normal(replacement_plan.get("staging_folder"))
-            target = _normal(replacement_plan.get("target_folder"))
-            plugins_dir = _normal(replacement_plan.get("plugins_dir"))
-            if (not _inside(plugins_dir, target)
-                    or not _inside(os.path.join(plugins_dir, ".AssetsManagerForUE_Staging"), staging)
-                    or not os.path.isdir(staging)):
-                raise RuntimeError(u"暂存组件或目标组件路径不安全，已取消替换")
-            component_name = replacement_plan.get("name") or os.path.basename(target)
-            safe_name = "".join(
-                "_" if char in '<>:"/\\|?*' else char
-                for char in str(component_name)) or "Component"
-            backup = os.path.join(
-                project_saved, "AssetsManagerForUE", "ComponentBackups",
-                time.strftime("%Y%m%d_%H%M%S") + "_" + safe_name + "_" + uuid.uuid4().hex[:8])
-            lines.extend([
-                "  $stage = {0}".format(_ps_quote(staging)),
-                "  $target = {0}".format(_ps_quote(target)),
-                "  $backup = {0}".format(_ps_quote(backup)),
-                "  $hadOld = Test-Path -LiteralPath $target",
-                "  if ($hadOld) {",
-                "    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $backup) | Out-Null",
-                "    Move-Item -LiteralPath $target -Destination $backup",
-                "  }",
-                "  try {",
-                "    Move-Item -LiteralPath $stage -Destination $target",
-                "  } catch {",
-                "    if ($hadOld -and -not (Test-Path -LiteralPath $target) -and (Test-Path -LiteralPath $backup)) {",
-                "      Move-Item -LiteralPath $backup -Destination $target",
-                "    }",
-                "    throw",
-                "  }",
-                "  Add-Content -LiteralPath $logPath -Value ('组件更新完成；原版本备份：' + $backup)",
-            ])
+            lines.extend(_replacement_script_lines(replacement_plan, project_saved))
+
         lines.extend([
             # Start-Process 会把 ArgumentList 重新拼接成命令行；显式保留双引号，
             # 确保带空格或中文的 .uproject 路径仍作为一个参数传入。

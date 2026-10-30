@@ -25,12 +25,12 @@ class DetailDatabaseTests(unittest.TestCase):
         self.addCleanup(self.database.close)
         self.database.execute('CREATE TABLE asset ("asset.name", "asset.type", "asset.zh_name", '
                               '"asset.mod_artist", "asset.mod_status", "asset.rig_artist", '
-                              '"asset.rig_status", "asset.note")')
+                              '"asset.rig_status", "asset.note", "asset.ue_artist")')
         self.database.execute('CREATE TABLE scene ("scene.name", "scene.type", "scene.zh_name", '
                               '"scene.artist", "scene.status", "scene.note")')
-        self.database.executemany("INSERT INTO asset VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [
-            ("Hero", "Characters", "角色", "张三", "UE", "李四", "制作中", "保留备注"),
-            ("Hero", "Props", "同名道具", "其他人", "未开始", "其他绑定", "未开始", "其他备注"),
+        self.database.executemany("INSERT INTO asset VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [
+            ("Hero", "Characters", "角色", "张三", "UE", "李四", "制作中", "保留备注", "原UE制作人"),
+            ("Hero", "Props", "同名道具", "其他人", "未开始", "其他绑定", "未开始", "其他备注", "其他UE制作人"),
         ])
         self.database.execute("INSERT INTO scene VALUES (?, ?, ?, ?, ?, ?)",
                               ("Tree", "Nature", None, "张三", "UE", "场景备注"))
@@ -49,10 +49,16 @@ class DetailDatabaseTests(unittest.TestCase):
         self.update(3, "张三", "王五")
         self.update(5, "李四", "赵六")
         rows = self.database.execute("SELECT * FROM asset").fetchall()
-        self.assertEqual(rows[0], ("Hero", "Characters", "巴斯特", "王五", "UE", "赵六", "制作中", "保留备注"))
-        self.assertEqual(rows[1], ("Hero", "Props", "同名道具", "其他人", "未开始", "其他绑定", "未开始", "其他备注"))
+        self.assertEqual(rows[0], ("Hero", "Characters", "巴斯特", "王五", "UE", "赵六", "制作中", "保留备注", "原UE制作人"))
+        self.assertEqual(rows[1], ("Hero", "Props", "同名道具", "其他人", "未开始", "其他绑定", "未开始", "其他备注", "其他UE制作人"))
         self.assertEqual(self.conn.commits, 3)
         self.assertTrue(self.conn.closed)
+
+    def test_ue_artist_updates_only_requested_type_and_preserves_model_and_rig(self):
+        self.update(10, "原UE制作人", "王五")
+        self.assertEqual(self.database.execute('SELECT "asset.mod_artist", "asset.rig_artist", '
+                                              '"asset.ue_artist" FROM asset').fetchall(),
+                         [("张三", "李四", "王五"), ("其他人", "其他绑定", "其他UE制作人")])
 
     def test_scene_name_null_and_artist_fields_are_supported(self):
         self.update(2, None, "树'中文名", table="scene")
@@ -208,6 +214,15 @@ class DetailPopupTests(unittest.TestCase):
         row = self.widget.items()[0]
         self.assertEqual((row[3], row[4], row[5], row[6]), ("模型制作人", "未开始", "李四", "制作中"))
         self.assertEqual(self.write.call_args.args[-3:], (5, "绑定制作人", "李四"))
+
+    def test_ue_artist_uses_grouped_people_and_preserves_other_work(self):
+        popup = self.artist_picker(10)
+        popup._choose(popup.tree.topLevelItem(0).child(1), 0)
+        self.wait_until(lambda: self.write.called and self.page.editor.pending is None)
+        row = self.widget.items()[0]
+        self.assertEqual((row[3], row[4], row[5], row[6], row[9], row[10]),
+                         ("模型制作人", "未开始", "绑定制作人", "制作中", "未开始", "李四"))
+        self.assertEqual(self.write.call_args.args[-3:], (10, "原UE制作人", "李四"))
 
     def test_failed_detail_write_preserves_display_and_cache(self):
         self.write.side_effect = RuntimeError("permission denied")

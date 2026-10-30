@@ -20,7 +20,7 @@ if venv_path not in sys.path:
     sys.path.insert(0, venv_path)
 
 sys.path.append(scriptsPath.replace('sources', ''))
-from ..utils import exportFunctions, assetFunctions, messageBox, myWidget
+from ..utils import exportFunctions, assetFunctions, messageBox, myWidget, thumbnail_update
 from ..utils.ue_window_style import (
     UEWindowFrameOverlay,
     UEWindowTitleBar,
@@ -28,7 +28,7 @@ from ..utils.ue_window_style import (
     unreal_window_icon,
 )
 from ..config import commonSetting, databaseHost
-from . import ue_asset_service, status_edit_service
+from . import ue_asset_service, status_edit_service, asset_crud_ui
 from PySide6 import QtWidgets, QtCore, QtGui
 
 
@@ -267,6 +267,326 @@ class _UEConflictDialog(QtWidgets.QDialog):
         if target_geometry.isValid():
             self.move(target_geometry.center() - self.rect().center())
 
+
+def choose_ue_conflict_files(parent, plan, plugin_files=False):
+    """选择冲突文件的覆盖方式和缺失文件是否加载。"""
+    conflicts = list(plan.get("different_files") or [])
+    if not conflicts:
+        return False
+
+    conflict_keys = {str(path).replace("\\", "/").lower() for path in conflicts}
+    missing = {}
+    for path in plan.get("missing_files") or []:
+        normalized = str(path).replace("\\", "/")
+        key = normalized.lower()
+        if key not in conflict_keys:
+            missing.setdefault(key, normalized)
+    display_files = list(missing.values()) + conflicts
+
+    entries = {
+        str(entry.get("relative") or "").replace("\\", "/").lower(): entry
+        for entry in (plan.get("files") or [])
+    }
+    dialog = _UEConflictDialog(
+        u"加载组件冲突" if plugin_files else u"加载资产冲突", parent)
+    dialog.resize(980, 610)
+    layout = dialog.contentLayout()
+
+    title = QtWidgets.QLabel(u"选择要覆盖加载的内容")
+    title.setObjectName("UEConflictSectionTitle")
+    layout.addWidget(title)
+    description_text = (
+        u"检测到 {0} 个同名但内容不同的文件。勾选项将使用服务器版本覆盖；"
+        u"未勾选项保留工程版本。".format(len(conflicts)))
+    if missing:
+        description_text += (
+            u" 另有 {0} 个工程中缺失的文件，以红色图标显示，勾选后加载。".format(len(missing)))
+    if plugin_files:
+        description_text += u" 组件覆盖文件将先暂存，确认重启且 UE 退出后再替换。"
+    else:
+        description_text += u" 覆盖后自动重新加载资产；若有未保存修改，会在复制前提示确认。"
+    description = QtWidgets.QLabel(description_text)
+    description.setObjectName("UEConflictHint")
+    description.setWordWrap(True)
+    layout.addWidget(description)
+
+    tree = QtWidgets.QTreeWidget()
+    tree.setObjectName("UEConflictTree")
+    tree.setRootIsDecorated(False)
+    tree.setAlternatingRowColors(True)
+    tree.setUniformRowHeights(True)
+    tree.setIndentation(0)
+    tree.setIconSize(QtCore.QSize(16, 16))
+    tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+    tree.setHeaderLabels(
+        ("", u"文件名" if plugin_files else u"资产", u"文件", u"类型", u"服务器大小", u"工程大小"))
+    tree.setColumnWidth(0, 42)
+    tree.setColumnWidth(1, 175)
+    tree.setColumnWidth(3, 135)
+    tree.setColumnWidth(4, 95)
+    tree.setColumnWidth(5, 95)
+    header = tree.header()
+    header.setStretchLastSection(False)
+    header.setSectionResizeMode(0, QtWidgets.QHeaderView.Fixed)
+    header.setSectionResizeMode(1, QtWidgets.QHeaderView.Interactive)
+    header.setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
+    header.setSectionResizeMode(3, QtWidgets.QHeaderView.Fixed)
+    header.setSectionResizeMode(4, QtWidgets.QHeaderView.Fixed)
+    header.setSectionResizeMode(5, QtWidgets.QHeaderView.Fixed)
+    layout.addWidget(tree, 1)
+
+    def size_text(value):
+        value = max(0, int(value or 0))
+        if value >= 1024 * 1024:
+            return u"{0:.1f} MB".format(value / (1024.0 * 1024.0))
+        if value >= 1024:
+            return u"{0:.1f} KB".format(value / 1024.0)
+        return u"{0} B".format(value)
+
+    icon_cache = {}
+
+    def package_icon(extension, is_new=False):
+        extension = str(extension or "").lower()
+        cache_key = (extension, is_new)
+        if cache_key in icon_cache:
+            return icon_cache[cache_key]
+        color = QtGui.QColor(224, 75, 70) if is_new else {
+            ".umap": QtGui.QColor(92, 160, 83),
+            ".uasset": QtGui.QColor(35, 132, 187),
+            ".uexp": QtGui.QColor(116, 97, 155),
+            ".ubulk": QtGui.QColor(125, 102, 72),
+            ".uptnl": QtGui.QColor(125, 102, 72),
+        }.get(extension, QtGui.QColor(100, 110, 118))
+        pixmap = QtGui.QPixmap(16, 16)
+        pixmap.fill(QtCore.Qt.transparent)
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
+        painter.setPen(QtGui.QPen(color.lighter(145), 1))
+        painter.setBrush(color)
+        painter.drawRect(2, 2, 11, 11)
+        painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 85), 1))
+        painter.drawLine(4, 5, 11, 5)
+        painter.drawLine(4, 8, 10, 8)
+        painter.end()
+        icon = QtGui.QIcon(pixmap)
+        icon_cache[cache_key] = icon
+        return icon
+
+    # Resolve package types in one batch. Sidecar files inherit the class
+    # of the .uasset/.umap with the same stem. When an older bridge cannot
+    # inspect the server package, the existing project asset is a reliable
+    # fallback for existing conflicts; new packages use server metadata.
+    display_stems = {
+        os.path.splitext(str(relative).replace("\\", "/"))[0].lower()
+        for relative in display_files
+    }
+    primary_entries = {}
+    for source_entry in ([] if plugin_files else (plan.get("files") or [])):
+        relative_path = str(
+            source_entry.get("relative") or "").replace("\\", "/")
+        package_stem, package_extension = os.path.splitext(relative_path)
+        if (package_stem.lower() in display_stems
+                and package_extension.lower() in (".uasset", ".umap")):
+            primary_entries[package_stem.lower()] = (
+                relative_path, source_entry)
+
+    class_names_by_stem = {}
+    external_paths = []
+    external_stems = []
+    for package_stem, (relative_path, source_entry) in primary_entries.items():
+        extension = os.path.splitext(relative_path)[1].lower()
+        if extension == ".umap":
+            class_names_by_stem[package_stem] = "World"
+            continue
+        source_path = str(source_entry.get("source") or "")
+        if source_path and os.path.isfile(source_path):
+            external_paths.append(source_path)
+            external_stems.append(package_stem)
+
+    source_content_root = (
+        plan.get("source_content_root") or plan.get("source_root") or "")
+    if external_paths and source_content_root:
+        external_classes, _type_error = (
+            ue_asset_service.get_external_asset_class_names(
+                external_paths, source_content_root))
+        for package_stem, class_name in zip(
+                external_stems, external_classes):
+            if class_name:
+                class_names_by_stem[package_stem] = class_name
+
+    for package_stem, (relative_path, _source_entry) in primary_entries.items():
+        if class_names_by_stem.get(package_stem):
+            continue
+        class_name = ue_asset_service.project_asset_class_name(
+            relative_path)
+        if class_name:
+            class_names_by_stem[package_stem] = class_name
+
+    conflict_rows = []
+    new_rows = []
+    # Put new files first so they remain visible even in a long conflict list.
+    for relative in sorted(display_files, key=lambda path: (
+            str(path).replace("\\", "/").lower() not in missing, str(path).lower())):
+        normalized = str(relative).replace("\\", "/")
+        is_new = normalized.lower() in missing
+        entry = entries.get(normalized.lower(), {})
+        target = str(entry.get("target") or "")
+        package_relative, extension = os.path.splitext(normalized)
+        extension = extension.lower()
+        asset_name = os.path.basename(normalized if plugin_files else package_relative)
+        package_path = (target or normalized) if plugin_files else "/Game/{0}".format(package_relative.strip("/"))
+        class_name = class_names_by_stem.get(package_relative.lower(), "")
+        try:
+            target_size = os.path.getsize(target) if os.path.isfile(target) else 0
+        except OSError:
+            target_size = 0
+        row = QtWidgets.QTreeWidgetItem((
+            "", asset_name, package_path,
+            _asset_type_label(class_name, extension),
+            size_text(entry.get("size", 0)), u"缺失" if is_new else size_text(target_size)))
+        row.setFlags(row.flags() | QtCore.Qt.ItemIsUserCheckable)
+        if is_new:
+            row.setCheckState(0, QtCore.Qt.Unchecked)
+            row.setForeground(5, QtGui.QBrush(QtGui.QColor(224, 75, 70)))
+            row.setToolTip(0, u"服务器有此文件，工程中缺失；勾选后加载，取消勾选则跳过")
+            new_rows.append(row)
+        else:
+            row.setCheckState(0, QtCore.Qt.Unchecked)
+            conflict_rows.append(row)
+        row.setData(0, QtCore.Qt.UserRole, normalized)
+        row.setData(0, QtCore.Qt.UserRole + 1, "new" if is_new else "conflict")
+        row.setIcon(1, package_icon(extension, is_new))
+        row.setForeground(
+            3, QtGui.QBrush(
+                QtGui.QColor(75, 205, 113)
+                if extension == ".umap"
+                else QtGui.QColor(46, 178, 221)))
+        row.setToolTip(2, u"服务器：{0}\n工程：{1}".format(
+            entry.get("source") or "", target))
+        tree.addTopLevelItem(row)
+
+    footer = QtWidgets.QHBoxLayout()
+    footer.setSpacing(8)
+    selection_label = QtWidgets.QLabel()
+    selection_label.setObjectName("UEConflictSelectionSummary")
+    footer.addWidget(selection_label)
+
+    select_all = QtWidgets.QPushButton(u"全选")
+    select_all.setObjectName("UEConflictTextButton")
+    invert = QtWidgets.QPushButton(u"反选")
+    invert.setObjectName("UEConflictTextButton")
+    footer.addWidget(select_all)
+    footer.addWidget(invert)
+    footer.addStretch(1)
+
+    continue_button = QtWidgets.QPushButton(u"加载选中项")
+    continue_button.setObjectName("UEConflictPrimaryButton")
+    keep_button = QtWidgets.QPushButton(u"全部保留并加载")
+    cancel_button = QtWidgets.QPushButton(u"取消")
+    continue_button.setDefault(True)
+    continue_button.setAutoDefault(True)
+    footer.addWidget(continue_button)
+    footer.addWidget(keep_button)
+    footer.addWidget(cancel_button)
+    layout.addLayout(footer)
+
+    header_check = _UEHeaderCheckBox(header)
+    header_check.setToolTip(u"全选或取消所有文件")
+    header_check.resize(18, 18)
+    header_updating = [False]
+
+    def position_header_check():
+        header_check.move(
+            max(4, int((tree.columnWidth(0) - header_check.width()) / 2)),
+            max(2, int((header.height() - header_check.height()) / 2)))
+
+    header.geometriesChanged.connect(position_header_check)
+    position_header_check()
+
+    def update_selection_label(*_unused):
+        overwrite_count = sum(
+            1 for row in conflict_rows if row.checkState(0) == QtCore.Qt.Checked)
+        new_count = sum(
+            1 for row in new_rows if row.checkState(0) == QtCore.Qt.Checked)
+        selected = overwrite_count + new_count
+        total = len(conflict_rows) + len(new_rows)
+        selection_label.setText(
+            u"已选择 {0} / {1}（覆盖 {2}，保留 {3}".format(
+                selected, total, overwrite_count, len(conflict_rows) - overwrite_count)
+            + (u"，新增 {0}".format(new_count) if new_rows else "") + u"）")
+        header_updating[0] = True
+        header_check.blockSignals(True)
+        if selected == 0:
+            header_check.setCheckState(QtCore.Qt.Unchecked)
+        elif selected == total:
+            header_check.setCheckState(QtCore.Qt.Checked)
+        else:
+            header_check.setCheckState(QtCore.Qt.PartiallyChecked)
+        header_check.blockSignals(False)
+        header_updating[0] = False
+
+    def set_all(state):
+        tree.blockSignals(True)
+        for row in conflict_rows + new_rows:
+            row.setCheckState(0, state)
+        tree.blockSignals(False)
+        update_selection_label()
+
+    def header_state_changed(state):
+        if header_updating[0]:
+            return
+        target_state = (QtCore.Qt.Checked
+                        if header_check.checkState() == QtCore.Qt.Checked
+                        else QtCore.Qt.Unchecked)
+        set_all(target_state)
+
+    def invert_all(*_unused):
+        tree.blockSignals(True)
+        for row in conflict_rows + new_rows:
+            state = (QtCore.Qt.Unchecked
+                     if row.checkState(0) == QtCore.Qt.Checked
+                     else QtCore.Qt.Checked)
+            row.setCheckState(0, state)
+        tree.blockSignals(False)
+        update_selection_label()
+
+    def keep_all_and_accept(*_unused):
+        tree.blockSignals(True)
+        for row in conflict_rows:
+            row.setCheckState(0, QtCore.Qt.Unchecked)
+        tree.blockSignals(False)
+        update_selection_label()
+        dialog.accept()
+
+    select_all.clicked.connect(
+        lambda _checked=False: set_all(QtCore.Qt.Checked))
+    invert.clicked.connect(invert_all)
+    header_check.stateChanged.connect(header_state_changed)
+    tree.itemChanged.connect(update_selection_label)
+    continue_button.clicked.connect(dialog.accept)
+    keep_button.clicked.connect(keep_all_and_accept)
+    cancel_button.clicked.connect(dialog.reject)
+    update_selection_label()
+
+    if dialog.exec() != QtWidgets.QDialog.Accepted:
+        return False
+
+    overwrite_files = []
+    keep_existing_files = []
+    for row in conflict_rows:
+        relative = str(row.data(0, QtCore.Qt.UserRole) or "")
+        if row.checkState(0) == QtCore.Qt.Checked:
+            overwrite_files.append(relative)
+        else:
+            keep_existing_files.append(relative)
+    plan["overwrite_files"] = overwrite_files
+    plan["keep_existing_files"] = keep_existing_files
+    plan["skipped_missing_files"] = [
+        str(row.data(0, QtCore.Qt.UserRole) or "") for row in new_rows
+        if row.checkState(0) != QtCore.Qt.Checked]
+    return True
+
+
 class SceneToolsUI(QtWidgets.QMainWindow):
 
     def __init__(self, isSQL=True,
@@ -286,15 +606,24 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         self._current_sort = (0, True)  # Default: newest scene first.
         self._state_generation = 0
         self._state_jobs = []
+        self._state_requests = {}
+        self._state_items = {}
+        self._state_item_keys = {}
+        self._state_target = ""
+        self._state_closed = False
         self._copy_thread = None
         self._copy_worker = None
         self._copy_item_key = ""
+        self._load_check = ue_asset_service.AssetLoadCheck(self)
+        self._load_check.finished.connect(self._onLoadChecked)
 
         # 同步搭建界面（纯代码，无 I/O）→ 窗口一显示即最终布局，不闪。
         self.build_ui()
         self._status_editor = status_edit_service.StatusEditor(
             self, "scene", self._statusContext)
         self._status_editor.saved.connect(self._detailSaved)
+        self._record_controller = asset_crud_ui.RecordController(self, "scene", self._statusContext)
+        self._record_controller.changed.connect(self._recordChanged)
         self.firstView()
         self.viewThumbnail()
         # 数据加载(DB 查询)延迟到窗口显示后
@@ -375,6 +704,8 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         centerV.setSpacing(8)
         tool = QtWidgets.QHBoxLayout()
         tool.setSpacing(3)
+        self.add_bttn = self._toolBtn('add.png', u"添加场景（Add Scene）")
+        tool.addWidget(self.add_bttn)
         self.scene_displayThumb_bttn = self._toolBtn('display_list.png', u"表单显示")
         tool.addWidget(self.scene_displayThumb_bttn)
         self.scene_itemSize_Slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
@@ -385,6 +716,16 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         tool.addWidget(self.scene_itemSize_Slider)
         self.scene_refresh_Bttn = self._toolBtn('refresh.png', u"刷新")
         tool.addWidget(self.scene_refresh_Bttn)
+
+        self.load_button = QtWidgets.QPushButton(u"加载场景")
+        self.load_button.setMinimumHeight(27)
+        self.load_button.setToolTip(u"加载当前选中场景资产的 UE 发布包及依赖")
+        self.load_button.setStyleSheet(
+            "QPushButton{background:#256f3a; font-weight:bold; padding:3px 12px;}"
+            "QPushButton:hover{background:#2f8b49;}"
+            "QPushButton:disabled{background:#454545; color:#888;}")
+        self.load_button.setEnabled(False)
+        tool.addWidget(self.load_button)
 
         self.scene_sort_bttn = QtWidgets.QToolButton()
         self.scene_sort_bttn.setIcon(
@@ -505,12 +846,16 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         self.scene_itemSize_Slider.valueChanged.connect(self.setItemSize)
         self.scene_itemSize_Slider.sliderReleased.connect(self.rememberSettings)
         self.scene_refresh_Bttn.clicked.connect(self.update_asset)
+        self.load_button.clicked.connect(self.loadUEAsset)
         self.scene_sort_bttn.clicked.connect(self.sort_scene_ui)
         self.scene_key_line.returnPressed.connect(self.sc_search)
+        self.main_listWgt.itemSelectionChanged.connect(self._updateLoadButton)
+        self.main_listWgt.stateScanPriorityChanged.connect(self._prioritizeStateScans)
         self.main_listWgt.itemSelectionChanged.connect(self.mainWightItemChanged)
         self.main_listWgt.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.main_listWgt.customContextMenuRequested.connect(self.show_menu)
         self.main_listWgt.assetDropRequested.connect(self.placeImportedAsset)
+        self.main_listWgt.setAssetDragResolver(ue_asset_service.resolve_local_card_drag)
         self.main_listWgt.assetDragRejected.connect(
             lambda text: self.infoMsg("warning", text))
         self.exportScenePath_bttn.clicked.connect(self.getSceneExportPath)
@@ -796,7 +1141,14 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         return (str(self.proj_comb.currentText()),
                 str(current_type.text()) if current_type is not None else "")
 
+    def _recordChanged(self, result):
+        if (result["project"], result["type"]) != self._statusContext():
+            return
+        self.listWidgetAddItems(asset_crud_ui.apply_to_rows(self.main_listWgt.items(), result))
+
     def _detailSaved(self, request):
+        if request[3] == 4 and request[:2] == self._statusContext():
+            self.scanUEAssetStates()
         if (request[3] == 2 and request[:2] == self._statusContext()
                 and request[:2] == self._status_editor.context
                 and self.preview_wgt is not None):
@@ -883,6 +1235,16 @@ class SceneToolsUI(QtWidgets.QMainWindow):
                      '   Cost :  %.2f' % (end_time - start_time) + ' sec')
         self.scanUEAssetStates()
 
+    def _canLoadUEAsset(self, item):
+        return (item is not None and item.ueSourceAvailability() is True
+                and self._copy_thread is None and not self._load_check.isRunning())
+
+    def _updateLoadButton(self):
+        item = self.main_listWgt.currentItem()
+        if item is not None and not item.isSelected():
+            item = None
+        self.load_button.setEnabled(self._canLoadUEAsset(item))
+
     def mainWightItemChanged(self):
         """
         改变item触发：改变rBttn显示,改变预览显示,改变scene_int_listWgt显示
@@ -924,17 +1286,24 @@ class SceneToolsUI(QtWidgets.QMainWindow):
             "{}/icon/folder_white.png".format(self.scriptsPath)))
         show_ue_action = QtGui.QAction(u'打开 UE 发布目录', self)
         load_action = QtGui.QAction(u'加载资产', self)
+        load_action.setEnabled(self._canLoadUEAsset(currentItem))
+        load_action.setToolTip(currentItem.ueSourceMessage())
         import_fbx_action = QtGui.QAction(u'导入 FBX', self)
         locate_action = QtGui.QAction(u'在内容浏览器中定位', self)
-        locate_action.setEnabled(bool(currentItem.ueMainObjectPath()))
+        local_object_path = ue_asset_service.resolve_local_card_browser_asset(currentItem)
+        locate_action.setEnabled(bool(local_object_path))
+        locate_action.setToolTip(local_object_path or u"当前工程中未找到该资产")
 
         menu.addAction(show_action)
         menu.addAction(show_ue_action)
+        thumbnail_update.add_menu_action(menu, self, currentItem)
         menu.addSeparator()
         menu.addAction(load_action)
         menu.addAction(locate_action)
         menu.addSeparator()
         menu.addAction(import_fbx_action)
+        menu.addSeparator()
+        self._record_controller.addDeleteAction(menu, currentItem)
 
         show_action.triggered.connect(
             lambda _checked=False, path=asset_root: self.openDir(path))
@@ -1042,34 +1411,65 @@ class SceneToolsUI(QtWidgets.QMainWindow):
 
     def scanUEAssetStates(self):
         """后台检查场景卡片对应的 UE 发布包和当前工程状态。"""
+        if self._state_closed:
+            return
         self._state_generation += 1
-        generation = self._state_generation
         for _thread, worker in list(self._state_jobs):
             worker.cancel()
 
-        requests = []
+        self._state_requests = {}
+        self._state_items = {}
+        self._state_item_keys = {}
         for index in range(self.main_listWgt.count()):
             item = self.main_listWgt.item(index)
-            key = self._itemKey(item)
             asset_root = self._assetRootForItem(item)
+            if not item.isUEPublished():
+                self._setItemUEPlan(item, ue_asset_service.unpublished_asset_state(asset_root))
+                continue
+            key = self._itemKey(item)
+            self._state_items.setdefault(key, []).append(item)
+            self._state_item_keys[id(item)] = key
             item.setUESourceAvailability(None, u"正在检查服务器 UE 发布文件…")
             item.setUEState("scanning", u"正在检查 UE 发布资产…")
-            requests.append((key, asset_root))
-        if not requests:
+            self._state_requests[key] = asset_root
+        self._updateLoadButton()
+        if not self._state_requests:
             return
 
         try:
-            target_content = ue_asset_service.project_content_dir()
+            self._state_target = ue_asset_service.project_content_dir()
         except Exception as exc:
+            self._state_requests.clear()
             self.infoMsg("error", str(exc))
             return
+        self._prioritizeStateScans()
 
+    def _prioritizeStateScans(self):
+        if self._state_closed:
+            return
+        ordered = {}
+        priority = (self.main_listWgt.stateScanPriorityItems(include_remaining=False)
+                    if self._state_requests else [])
+        for item in priority:
+            key = self._state_item_keys.get(id(item))
+            if key in self._state_requests:
+                ordered[key] = self._state_requests[key]
+        ordered.update(self._state_requests)
+        self._state_requests = ordered
+        for _thread, worker in self._state_jobs:
+            worker.replace_requests(self._state_generation, list(ordered.items()))
+        self._startNextStateScan()
+
+    def _startNextStateScan(self):
+        if self._state_closed or self._state_jobs or not self._state_requests:
+            return
         thread = QtCore.QThread()
         worker = ue_asset_service.AssetStateWorker(
-            generation, requests, target_content)
+            self._state_generation, list(self._state_requests.items()), self._state_target,
+            max_pending_results=8)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.itemScanned.connect(self._applyUEState)
+        worker.itemScanned.connect(self._applyUEState, QtCore.Qt.QueuedConnection)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
@@ -1081,309 +1481,29 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         finished_thread = self.sender()
         self._state_jobs = [
             job for job in self._state_jobs if job[0] is not finished_thread]
+        QtCore.QTimer.singleShot(0, self._startNextStateScan)
 
-    @staticmethod
-    def _setItemUEPlan(item, plan):
+    def _setItemUEPlan(self, item, plan):
         item.setUESourceAvailability(
             plan.get("source_available"), plan.get("source_message"),
             ue_directory_exists=plan.get("ue_directory_exists"))
         item.setUEState(plan.get("state"), plan.get("message"), plan)
+        self._updateLoadButton()
 
+    @QtCore.Slot(int, str, object)
     def _applyUEState(self, generation, key, plan):
-        if generation != self._state_generation:
+        for _thread, worker in self._state_jobs:
+            worker.acknowledge_result(generation, key)
+        if generation != self._state_generation or key not in self._state_requests:
             return
-        item = self._findItemByKey(key)
-        if item is None:
-            return
-        if plan.get("state") == "ready":
-            try:
-                plan["main_object_path"] = (
-                    ue_asset_service.resolve_placeable_object_path(plan))
-                if not plan["main_object_path"]:
-                    plan["state"] = "partial"
-                    plan["message"] = (
-                        u"UE 包已在工程中；未找到可直接拖放的 Actor 蓝图或网格体")
-            except Exception:
-                pass
-        self._setItemUEPlan(item, plan)
+        self._state_requests.pop(key, None)
+        # Do not load UE packages just to colour cards. Use the current map
+        # rather than finding every result by walking the full list again.
+        for item in self._state_items.get(key, []):
+            self._setItemUEPlan(item, plan)
 
     def _chooseConflictFiles(self, plan):
-        """让用户逐项决定冲突文件是覆盖服务器版本还是保留工程版本。"""
-        conflicts = list(plan.get("different_files") or [])
-        if not conflicts:
-            return False
-
-        entries = {
-            str(entry.get("relative") or "").replace("\\", "/").lower(): entry
-            for entry in (plan.get("files") or [])
-        }
-        dialog = _UEConflictDialog(u"加载资产冲突", self)
-        dialog.resize(980, 610)
-        layout = dialog.contentLayout()
-
-        title = QtWidgets.QLabel(u"选择要覆盖加载的内容")
-        title.setObjectName("UEConflictSectionTitle")
-        layout.addWidget(title)
-        description = QtWidgets.QLabel(
-            u"检测到 {0} 个同名但内容不同的文件。勾选项将使用服务器版本覆盖；"
-            u"未勾选项保留工程版本。缺失文件仍会正常加载。".format(len(conflicts)))
-        description.setObjectName("UEConflictHint")
-        description.setWordWrap(True)
-        layout.addWidget(description)
-
-        tree = QtWidgets.QTreeWidget()
-        tree.setObjectName("UEConflictTree")
-        tree.setRootIsDecorated(False)
-        tree.setAlternatingRowColors(True)
-        tree.setUniformRowHeights(True)
-        tree.setIndentation(0)
-        tree.setIconSize(QtCore.QSize(16, 16))
-        tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        tree.setHeaderLabels(
-            ("", u"资产", u"文件", u"类型", u"服务器大小", u"工程大小"))
-        tree.setColumnWidth(0, 42)
-        tree.setColumnWidth(1, 175)
-        tree.setColumnWidth(3, 135)
-        tree.setColumnWidth(4, 95)
-        tree.setColumnWidth(5, 95)
-        header = tree.header()
-        header.setStretchLastSection(False)
-        header.setSectionResizeMode(0, QtWidgets.QHeaderView.Fixed)
-        header.setSectionResizeMode(1, QtWidgets.QHeaderView.Interactive)
-        header.setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
-        header.setSectionResizeMode(3, QtWidgets.QHeaderView.Fixed)
-        header.setSectionResizeMode(4, QtWidgets.QHeaderView.Fixed)
-        header.setSectionResizeMode(5, QtWidgets.QHeaderView.Fixed)
-        layout.addWidget(tree, 1)
-
-        def size_text(value):
-            value = max(0, int(value or 0))
-            if value >= 1024 * 1024:
-                return u"{0:.1f} MB".format(value / (1024.0 * 1024.0))
-            if value >= 1024:
-                return u"{0:.1f} KB".format(value / 1024.0)
-            return u"{0} B".format(value)
-
-        icon_cache = {}
-
-        def package_icon(extension):
-            extension = str(extension or "").lower()
-            if extension in icon_cache:
-                return icon_cache[extension]
-            color = {
-                ".umap": QtGui.QColor(92, 160, 83),
-                ".uasset": QtGui.QColor(35, 132, 187),
-                ".uexp": QtGui.QColor(116, 97, 155),
-                ".ubulk": QtGui.QColor(125, 102, 72),
-                ".uptnl": QtGui.QColor(125, 102, 72),
-            }.get(extension, QtGui.QColor(100, 110, 118))
-            pixmap = QtGui.QPixmap(16, 16)
-            pixmap.fill(QtCore.Qt.transparent)
-            painter = QtGui.QPainter(pixmap)
-            painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
-            painter.setPen(QtGui.QPen(color.lighter(145), 1))
-            painter.setBrush(color)
-            painter.drawRect(2, 2, 11, 11)
-            painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 85), 1))
-            painter.drawLine(4, 5, 11, 5)
-            painter.drawLine(4, 8, 10, 8)
-            painter.end()
-            icon = QtGui.QIcon(pixmap)
-            icon_cache[extension] = icon
-            return icon
-
-        # Resolve package types in one batch. Sidecar files inherit the class
-        # of the .uasset/.umap with the same stem. When an older bridge cannot
-        # inspect the server package, the existing project asset is a reliable
-        # fallback for this conflict-only list.
-        conflict_stems = {
-            os.path.splitext(str(relative).replace("\\", "/"))[0].lower()
-            for relative in conflicts
-        }
-        primary_entries = {}
-        for source_entry in (plan.get("files") or []):
-            relative_path = str(
-                source_entry.get("relative") or "").replace("\\", "/")
-            package_stem, package_extension = os.path.splitext(relative_path)
-            if (package_stem.lower() in conflict_stems
-                    and package_extension.lower() in (".uasset", ".umap")):
-                primary_entries[package_stem.lower()] = (
-                    relative_path, source_entry)
-
-        class_names_by_stem = {}
-        external_paths = []
-        external_stems = []
-        for package_stem, (relative_path, source_entry) in primary_entries.items():
-            extension = os.path.splitext(relative_path)[1].lower()
-            if extension == ".umap":
-                class_names_by_stem[package_stem] = "World"
-                continue
-            source_path = str(source_entry.get("source") or "")
-            if source_path and os.path.isfile(source_path):
-                external_paths.append(source_path)
-                external_stems.append(package_stem)
-
-        source_content_root = (
-            plan.get("source_content_root") or plan.get("source_root") or "")
-        if external_paths and source_content_root:
-            external_classes, _type_error = (
-                ue_asset_service.get_external_asset_class_names(
-                    external_paths, source_content_root))
-            for package_stem, class_name in zip(
-                    external_stems, external_classes):
-                if class_name:
-                    class_names_by_stem[package_stem] = class_name
-
-        for package_stem, (relative_path, _source_entry) in primary_entries.items():
-            if class_names_by_stem.get(package_stem):
-                continue
-            class_name = ue_asset_service.project_asset_class_name(
-                relative_path)
-            if class_name:
-                class_names_by_stem[package_stem] = class_name
-
-        for relative in sorted(conflicts, key=str.lower):
-            normalized = str(relative).replace("\\", "/")
-            entry = entries.get(normalized.lower(), {})
-            target = str(entry.get("target") or "")
-            package_relative, extension = os.path.splitext(normalized)
-            extension = extension.lower()
-            asset_name = os.path.basename(package_relative)
-            package_path = "/Game/{0}".format(package_relative.strip("/"))
-            class_name = class_names_by_stem.get(package_relative.lower(), "")
-            try:
-                target_size = os.path.getsize(target) if os.path.isfile(target) else 0
-            except OSError:
-                target_size = 0
-            row = QtWidgets.QTreeWidgetItem((
-                "", asset_name, package_path,
-                _asset_type_label(class_name, extension),
-                size_text(entry.get("size", 0)), size_text(target_size)))
-            row.setFlags(row.flags() | QtCore.Qt.ItemIsUserCheckable)
-            row.setCheckState(0, QtCore.Qt.Unchecked)
-            row.setData(0, QtCore.Qt.UserRole, normalized)
-            row.setIcon(1, package_icon(extension))
-            row.setForeground(
-                3, QtGui.QBrush(
-                    QtGui.QColor(75, 205, 113)
-                    if extension == ".umap"
-                    else QtGui.QColor(46, 178, 221)))
-            row.setToolTip(2, u"服务器：{0}\n工程：{1}".format(
-                entry.get("source") or "", target))
-            tree.addTopLevelItem(row)
-
-        footer = QtWidgets.QHBoxLayout()
-        footer.setSpacing(8)
-        selection_label = QtWidgets.QLabel()
-        selection_label.setObjectName("UEConflictSelectionSummary")
-        footer.addWidget(selection_label)
-
-        select_all = QtWidgets.QPushButton(u"全选")
-        select_all.setObjectName("UEConflictTextButton")
-        invert = QtWidgets.QPushButton(u"反选")
-        invert.setObjectName("UEConflictTextButton")
-        footer.addWidget(select_all)
-        footer.addWidget(invert)
-        footer.addStretch(1)
-
-        continue_button = QtWidgets.QPushButton(u"加载选中项")
-        continue_button.setObjectName("UEConflictPrimaryButton")
-        keep_button = QtWidgets.QPushButton(u"全部保留并加载")
-        cancel_button = QtWidgets.QPushButton(u"取消")
-        continue_button.setDefault(True)
-        continue_button.setAutoDefault(True)
-        footer.addWidget(continue_button)
-        footer.addWidget(keep_button)
-        footer.addWidget(cancel_button)
-        layout.addLayout(footer)
-
-        header_check = _UEHeaderCheckBox(header)
-        header_check.setToolTip(u"全选或全部取消")
-        header_check.resize(18, 18)
-        header_updating = [False]
-
-        def position_header_check():
-            header_check.move(
-                max(4, int((tree.columnWidth(0) - header_check.width()) / 2)),
-                max(2, int((header.height() - header_check.height()) / 2)))
-
-        header.geometriesChanged.connect(position_header_check)
-        position_header_check()
-
-        def update_selection_label(*_unused):
-            selected = sum(
-                1 for index in range(tree.topLevelItemCount())
-                if tree.topLevelItem(index).checkState(0) == QtCore.Qt.Checked)
-            selection_label.setText(
-                u"已选择 {0} / {1}（覆盖 {0}，保留 {2}）".format(
-                    selected, tree.topLevelItemCount(),
-                    tree.topLevelItemCount() - selected))
-            header_updating[0] = True
-            header_check.blockSignals(True)
-            if selected == 0:
-                header_check.setCheckState(QtCore.Qt.Unchecked)
-            elif selected == tree.topLevelItemCount():
-                header_check.setCheckState(QtCore.Qt.Checked)
-            else:
-                header_check.setCheckState(QtCore.Qt.PartiallyChecked)
-            header_check.blockSignals(False)
-            header_updating[0] = False
-
-        def set_all(state):
-            tree.blockSignals(True)
-            for index in range(tree.topLevelItemCount()):
-                tree.topLevelItem(index).setCheckState(0, state)
-            tree.blockSignals(False)
-            update_selection_label()
-
-        def header_state_changed(state):
-            if header_updating[0]:
-                return
-            target_state = (QtCore.Qt.Checked
-                            if header_check.checkState() == QtCore.Qt.Checked
-                            else QtCore.Qt.Unchecked)
-            set_all(target_state)
-
-        def invert_all(*_unused):
-            tree.blockSignals(True)
-            for index in range(tree.topLevelItemCount()):
-                row = tree.topLevelItem(index)
-                state = (QtCore.Qt.Unchecked
-                         if row.checkState(0) == QtCore.Qt.Checked
-                         else QtCore.Qt.Checked)
-                row.setCheckState(0, state)
-            tree.blockSignals(False)
-            update_selection_label()
-
-        def keep_all_and_accept(*_unused):
-            set_all(QtCore.Qt.Unchecked)
-            dialog.accept()
-
-        select_all.clicked.connect(
-            lambda _checked=False: set_all(QtCore.Qt.Checked))
-        invert.clicked.connect(invert_all)
-        header_check.stateChanged.connect(header_state_changed)
-        tree.itemChanged.connect(update_selection_label)
-        continue_button.clicked.connect(dialog.accept)
-        keep_button.clicked.connect(keep_all_and_accept)
-        cancel_button.clicked.connect(dialog.reject)
-        update_selection_label()
-
-        if dialog.exec() != QtWidgets.QDialog.Accepted:
-            return False
-
-        overwrite_files = []
-        keep_existing_files = []
-        for index in range(tree.topLevelItemCount()):
-            row = tree.topLevelItem(index)
-            relative = str(row.data(0, QtCore.Qt.UserRole) or "")
-            if row.checkState(0) == QtCore.Qt.Checked:
-                overwrite_files.append(relative)
-            else:
-                keep_existing_files.append(relative)
-        plan["overwrite_files"] = overwrite_files
-        plan["keep_existing_files"] = keep_existing_files
-        return True
+        return choose_ue_conflict_files(self, plan)
 
     def loadUEAsset(self, item=None):
         """迁移 ``<场景资产>/UE`` 中的 UE 包，不经过 FBX 再导入。"""
@@ -1393,48 +1513,61 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         if item is None:
             self.infoMsg("warning", u"请先选择一张场景资产卡片")
             return
-        if self._copy_thread is not None and self._copy_thread.isRunning():
-            self.infoMsg("warning", u"已有资产正在加载，请等待当前任务完成")
+        if self._copy_thread is not None or self._load_check.isRunning():
+            self.infoMsg("warning", u"已有资产正在检查或加载，请等待当前任务完成")
             return
+        try:
+            target = ue_asset_service.project_content_dir()
+            key = self._itemKey(item)
+            self._load_check.start(key, self._assetRootForItem(item), target)
+        except Exception as exc:
+            self.infoMsg("error", str(exc))
+            return
+        self._state_requests.pop(key, None)
+        self._prioritizeStateScans()
+        self._updateLoadButton()
+        self.infoMsg("info", u"正在后台检查 UE 发布文件：{0}".format(item.name()))
 
-        plan = item.uePlan()
-        if not plan or plan.get("state") == "scanning":
-            try:
-                plan = ue_asset_service.build_import_plan(
-                    self._assetRootForItem(item))
-            except Exception as exc:
-                item.setUESourceAvailability(
-                    None, u"无法确认服务器 UE 发布文件：{0}".format(exc))
-                item.setUEState("error", str(exc))
-                self.infoMsg("error", str(exc))
-                return
-
-        # The background card state may be older than the user's click.  Use
-        # the same size + SHA-1 rule as the copy worker before showing conflict
-        # choices, so every differing file receives an overwrite/keep policy.
-        plan = ue_asset_service.query_filesystem_state(
-            plan, verify_content=True)
-        self._setItemUEPlan(item, plan)
+    @QtCore.Slot(str, object)
+    def _onLoadChecked(self, key, plan):
+        if self._state_closed:
+            return
+        self._state_requests.pop(key, None)
+        self._prioritizeStateScans()
+        item = self._findItemByKey(key)
+        self._updateLoadButton()
+        if item is not None:
+            self._setItemUEPlan(item, plan)
+        if plan.get("state") == "error":
+            self.infoMsg("error", plan.get("message"))
+            return
 
         if not plan.get("files") or not plan.get("package_object_paths"):
             message = plan.get("message") or u"没有找到该资产的 UE 发布文件"
-            item.setUEState("missing", message, plan)
+            if item is not None:
+                item.setUEState("missing", message, plan)
             self.infoMsg("warning", message)
             self._showMissingUEPackageDialog(plan, message)
             return
-        if plan.get("state") == "conflict":
-            item.setUEState("conflict", plan.get("message"), plan)
+        if plan.get("different_files"):
+            if item is not None:
+                item.setUEState(plan.get("state"), plan.get("message"), plan)
             self.infoMsg("warning", plan.get("message"))
             if not self._chooseConflictFiles(plan):
+                return
+            if self._state_closed:
                 return
         if plan.get("state") == "ready":
             self._registerLoadedPlan(item, plan)
             return
 
-        self._copy_item_key = self._itemKey(item)
-        item.setUEProgress(0, u"准备迁移 UE 最终资产…")
         for warning in ue_asset_service.prepare_plan_overwrites(plan):
             self.infoMsg("warning", warning)
+        if plan.get("overwrite_cancelled"):
+            return
+        self._copy_item_key = key
+        if item is not None:
+            item.setUEProgress(0, u"准备迁移 UE 最终资产…")
         thread = QtCore.QThread()
         worker = ue_asset_service.AssetCopyWorker(plan)
         worker.moveToThread(thread)
@@ -1450,6 +1583,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         thread.finished.connect(self._onCopyThreadFinished)
         self._copy_thread = thread
         self._copy_worker = worker
+        self._updateLoadButton()
         thread.start()
 
     def _showMissingUEPackageDialog(self, plan, message):
@@ -1473,28 +1607,33 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         box.exec()
 
     def _onCopyProgress(self, percent, name):
+        if self._state_closed:
+            return
         item = self._findItemByKey(self._copy_item_key)
         if item is not None:
             item.setUEProgress(percent, u"正在加载：{0}".format(name))
         self.infoMsg("info", u"加载资产 {0}%：{1}".format(percent, name))
 
     def _onCopyFinished(self, plan):
+        if self._state_closed:
+            return
         item = self._findItemByKey(self._copy_item_key)
-        if item is not None:
-            self._registerLoadedPlan(item, plan)
+        self._registerLoadedPlan(item, plan)
 
     def _registerLoadedPlan(self, item, plan):
         try:
-            item.setUEProgress(100, u"正在刷新 UE Asset Registry…")
+            if item is not None:
+                item.setUEProgress(100, u"正在重新加载资产并刷新 UE Asset Registry…")
             plan = ue_asset_service.refresh_asset_registry(plan)
-            self._setItemUEPlan(item, plan)
+            if item is not None:
+                self._setItemUEPlan(item, plan)
             if plan.get("state") == "ready":
                 self.infoMsg("info", plan.get("message"))
-            elif plan.get("state") == "partial":
+            elif plan.get("state") in ("partial", "conflict", "missing"):
                 self.infoMsg("warning", plan.get("message"))
             else:
                 self.infoMsg("error", plan.get("message"))
-            if plan.get("state") in ("ready", "partial"):
+            if plan.get("state") in ("ready", "partial", "conflict"):
                 located, object_path = (
                     ue_asset_service.sync_plan_to_content_browser(plan))
                 if located:
@@ -1505,10 +1644,13 @@ class SceneToolsUI(QtWidgets.QMainWindow):
                     self.infoMsg(
                         "warning", u"加载完成，但没有找到可在内容浏览器中定位的资产")
         except Exception as exc:
-            item.setUEState("error", str(exc), plan)
+            if item is not None:
+                item.setUEState("error", str(exc), plan)
             self.infoMsg("error", u"UE 注册资产失败：{0}".format(exc))
 
     def _onCopyFailed(self, message):
+        if self._state_closed:
+            return
         item = self._findItemByKey(self._copy_item_key)
         state = "conflict" if (
             u"同名不同" in message or u"目标文件" in message) else "error"
@@ -1521,14 +1663,15 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         self._copy_thread = None
         self._copy_worker = None
         self._copy_item_key = ""
+        self._updateLoadButton()
 
     def locateUEAsset(self, item=None):
         item = item or self.main_listWgt.currentItem()
-        if item is None or not item.ueMainObjectPath():
-            self.infoMsg("warning", u"该资产尚未加载，或没有可定位的主资产")
+        object_path = ue_asset_service.resolve_local_card_browser_asset(item)
+        if not object_path:
+            self.infoMsg("warning", u"当前工程中未找到该资产，请先加载资产")
             return
-        if not ue_asset_service.sync_to_content_browser(
-                item.ueMainObjectPath()):
+        if not ue_asset_service.sync_to_content_browser(object_path):
             self.infoMsg("warning", u"内容浏览器无法定位该资产")
 
     def placeImportedAsset(self, payload):
@@ -1653,6 +1796,10 @@ class SceneToolsUI(QtWidgets.QMainWindow):
     def shutdownThreads(self):
         """停止场景页的 UE 包扫描/迁移任务，防止关闭窗口时销毁运行中线程。"""
         self._status_editor.shutdown()
+        self._record_controller.shutdown()
+        self._state_closed = True
+        self._load_check.cancel()
+        self._state_requests.clear()
         self._state_generation += 1
         jobs = list(self._state_jobs)
         for thread, worker in jobs:
@@ -1665,17 +1812,8 @@ class SceneToolsUI(QtWidgets.QMainWindow):
             self._copy_thread.requestInterruption()
             self._copy_thread.quit()
 
-        for thread, _worker in jobs:
-            try:
-                thread.wait(1500)
-            except RuntimeError:
-                pass
-        if self._copy_thread is not None:
-            try:
-                self._copy_thread.wait(3000)
-            except RuntimeError:
-                pass
-
+        # Never wait for network I/O on UE's main thread. Keep unfinished
+        # jobs alive at module scope until their normal finished signal.
         remaining = list(jobs)
         if self._copy_thread is not None and self._copy_worker is not None:
             remaining.append((self._copy_thread, self._copy_worker))

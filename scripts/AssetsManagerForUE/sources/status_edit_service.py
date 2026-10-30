@@ -7,19 +7,22 @@ from ..utils.cell_editors import ArtistPicker, NameEditor
 
 
 BASE_STATUSES = (u"未开始", u"制作中", u"已完成")
-MODEL_STATUSES = BASE_STATUSES + ("UE",)
+MODEL_STATUSES = BASE_STATUSES
+SCENE_STATUSES = BASE_STATUSES + ("UE",)
 STATUS_FIELDS = {
     "asset": {
         4: ("asset.mod_status", MODEL_STATUSES, (4,)),
         6: ("asset.rig_status", BASE_STATUSES, (6,)),
+        9: ("asset.ue_status", BASE_STATUSES, (9,)),
     },
-    "scene": {4: ("scene.status", MODEL_STATUSES, (4, 6))},
+    "scene": {4: ("scene.status", SCENE_STATUSES, (4, 6))},
 }
 DETAIL_FIELDS = {
     "asset": {
         2: ("asset.zh_name", u"中文名", (2,), "text"),
         3: ("asset.mod_artist", u"模型制作", (3,), "artist"),
         5: ("asset.rig_artist", u"绑定制作", (5,), "artist"),
+        10: ("asset.ue_artist", u"UE制作", (10,), "artist"),
     },
     "scene": {
         2: ("scene.zh_name", u"中文名", (2,), "text"),

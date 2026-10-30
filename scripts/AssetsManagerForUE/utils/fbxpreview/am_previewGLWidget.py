@@ -1559,6 +1559,17 @@ class PreviewGLWidget(QtWidgets.QWidget):
         zh_text = "" if zh_name is None else str(zh_name)
         self.title_label.setText(u"Name： " + name_text + u"\n中文名： " + zh_text)
 
+    def refreshThumbnail(self, path, image):
+        """Refresh the current fallback image without reloading the FBX preview."""
+        key = os.path.normcase(os.path.normpath(path or ""))
+        current = os.path.normcase(os.path.normpath(self._fallback_icon or ""))
+        if key != current or image is None or image.isNull():
+            return
+        self._fallback_pixmap = QtGui.QPixmap.fromImage(image)
+        self._fallback_pixmap_path = (path or "").replace("\\", "/")
+        if self._stack.currentIndex() == self._PAGE_FALLBACK:
+            self._applyFallbackPixmap()
+
     def setPreviewPixmap(self, path, _type=None):
         self._fallback_icon = path or ""
         if self._preview_mode == "2d":

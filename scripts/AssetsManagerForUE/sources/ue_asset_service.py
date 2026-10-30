@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import stat
+import threading
 import time
 import uuid
 
@@ -30,9 +31,55 @@ PRIMARY_EXTENSIONS = frozenset((".uasset", ".umap"))
 MANIFEST_NAMES = ("asset_manifest.json", "manifest.json", "ue_manifest.json")
 COPY_CHUNK_SIZE = 4 * 1024 * 1024
 
+# Strings only: background disk scans must never inspect live UObjects.
+_pending_package_reloads = {}
+_package_reload_lock = threading.RLock()
+
+
+def _package_names_for_files(plan, field):
+    names = set()
+    for relative in plan.get(field) or []:
+        stem, extension = os.path.splitext(_forward(relative).lstrip("/"))
+        if extension.lower() in PACKAGE_EXTENSIONS:
+            names.add("/Game/" + stem)
+    return sorted(names, key=str.lower)
+
+
+def _reload_project_key(plan):
+    return os.path.normcase(os.path.abspath(plan.get("target_root") or "."))
+
+
+def _set_pending_package_reloads(plan, names, complete=False):
+    root = _reload_project_key(plan)
+    with _package_reload_lock:
+        for name in names:
+            key = (root, name.lower())
+            if complete:
+                _pending_package_reloads.pop(key, None)
+            else:
+                _pending_package_reloads[key] = name
+
+
+def _pending_reloads_for_plan(plan):
+    root = _reload_project_key(plan)
+    names = {str(path).split(".", 1)[0].lower()
+             for path in plan.get("package_object_paths") or []}
+    with _package_reload_lock:
+        return sorted((name for (project, key), name in _pending_package_reloads.items()
+                       if project == root and key in names), key=str.lower)
+
 
 class AssetConflictError(RuntimeError):
     pass
+
+
+class ScanCancelled(RuntimeError):
+    """Cooperative cancellation between filesystem operations."""
+
+
+def _check_scan_cancelled(cancelled):
+    if cancelled and cancelled():
+        raise ScanCancelled("Asset check cancelled")
 
 
 def _forward(path):
@@ -143,14 +190,180 @@ def _normalize_object_path(value):
     return value
 
 
-def build_import_plan(asset_root, project_content_dir=None):
-    """建立一个可序列化的迁移计划，不调用任何 UE API。"""
+def _asset_folder_from_root(asset_root):
+    asset_root = _forward(asset_root).rstrip("/")
+    for marker in ("/Assets/", "/Scenes/"):
+        index = asset_root.lower().rfind(marker.lower())
+        if index >= 0:
+            return "/Game" + asset_root[index:]
+    return ""
+
+
+def _is_in_package_folder(object_path, folder):
+    package = _normalize_object_path(object_path).split(".", 1)[0].lower()
+    return bool(folder and package.startswith(folder.rstrip("/").lower() + "/"))
+
+
+def _set_asset_identity(plan):
+    """Identify an asset/scene's own packages without loading UE objects.
+
+    A migration also contains shared materials and other assets' dependencies.
+    Keep those in the copy/conflict lists, but never use them as this card's
+    identity. Named packages also support legacy releases whose parent folder
+    differs from the database asset name.
+    Category/VFX import plans deliberately keep their existing semantics.
+    """
+    folder = _asset_folder_from_root(plan.get("asset_root"))
+    if not folder:
+        return plan
+    paths = [_normalize_object_path(p) for p in plan.get("package_object_paths") or []]
+    name = _forward(plan.get("asset_root")).rstrip("/").rsplit("/", 1)[-1].lower()
+    names = {name, "sm_" + name, "sk_" + name, "bp_" + name}
+    named = [p for p in paths if p.rsplit(".", 1)[-1].lower() in names]
+    manifest = plan.get("manifest") or {}
+    declared = _normalize_object_path(
+        manifest.get("mainObjectPath") or manifest.get("main_object_path")
+        or manifest.get("mainPackage") or manifest.get("main_package"))
+    manifest_declared = bool(declared)
+    configured = _normalize_object_path(plan.get("main_object_path"))
+    # Cached main paths used to be inferred from the complete dependency list.
+    # Only a manifest declaration may explicitly identify an unrelated folder.
+    if not declared and (configured in named or (not named and _is_in_package_folder(configured, folder))):
+        declared = configured
+    anchors = [declared] if declared else named
+    preferred = list(anchors)
+    if not manifest_declared and any(_is_in_package_folder(p, folder) for p in named):
+        # A standard folder-based asset can contain several body meshes. One
+        # missing namesake must not hide another local body or skip reporting
+        # that the rest of the folder is only partially installed.
+        anchors += [p for p in paths if p.rsplit("/", 1)[0].lower() == folder.lower()]
+    folders = [folder]
+    for path in anchors:
+        parent = path.rsplit("/", 1)[0]
+        # Never widen a card to /Game, /Game/Assets or an entire category.
+        if len(parent.strip("/").split("/")) >= 4 and parent not in folders:
+            folders.append(parent)
+    owned = [p for p in paths if p in anchors or any(
+        _is_in_package_folder(p, parent) for parent in folders)]
+    if not anchors:
+        # Legacy packages may use an unrelated filename. Prefer packages at
+        # the asset root over textures/materials in its nested directories.
+        anchors = [p for p in owned if p.rsplit("/", 1)[0].lower() == folder.lower()]
+        if not anchors:
+            anchors = owned
+    plan["asset_object_paths"] = list(dict.fromkeys(anchors + owned))
+    plan["asset_identity_paths"] = list(dict.fromkeys(anchors))
+    plan["asset_preferred_paths"] = preferred or plan["asset_identity_paths"]
+    plan["asset_local_folders"] = folders
+    if configured and configured not in plan["asset_object_paths"]:
+        plan["main_object_path"] = ""
+    return plan
+
+
+def _plan_asset_paths(plan):
+    """Respect card ownership where known; generic import plans stay generic."""
+    return plan.get("asset_object_paths", plan.get("package_object_paths")) or []
+
+
+def unpublished_asset_state(asset_root):
+    """Database-only result: no source or project filesystem access."""
+    return {"asset_root": _forward(asset_root), "state": "missing",
+            "message": u"数据库未标记为 UE 已发布，已跳过文件检查",
+            "source_available": False, "ue_directory_exists": None,
+            "source_message": u"数据库中没有 UE 发布标记",
+            "state_check_only": True, "check_stage": "database"}
+
+
+def _is_package_file(path):
+    try:
+        return stat.S_ISREG(os.stat(path).st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
+def _content_package_candidates(object_path, content_root):
+    """Return safe /Game paths; other mount points require normal discovery."""
+    package = _normalize_object_path(object_path).split(".", 1)[0]
+    if not package.startswith("/Game/"):
+        return []
+    root = os.path.abspath(content_root)
+    stem = os.path.abspath(os.path.join(root, *package[6:].split("/")))
+    if os.path.commonpath((root, stem)) != root:
+        return []
+    return [stem + extension for extension in sorted(PRIMARY_EXTENSIONS)]
+
+
+def _mark_primary_missing(plan):
+    plan.update(state="missing", asset_present=False, state_check_only=True,
+                check_stage="primary",
+                message=u"工程中没有该资产主体，已跳过依赖及冲突检查")
+    return plan
+
+
+def _local_asset_folder_missing(plan):
+    """Reject an absent local asset directory before touching the server.
+
+    The UI already checked the database publish flag. Keep loading enabled on
+    that evidence; a user-requested load always checks the actual server files.
+    This result is deliberately not a copy plan or a claim of server access.
+    """
+    package_folder = _asset_folder_from_root(plan.get("asset_root"))
+    if not package_folder:
+        return False
+    target_root = os.path.abspath(plan["target_root"])
+    folder = os.path.abspath(os.path.join(target_root, *package_folder[6:].split("/")))
+    if (os.path.commonpath((target_root, folder)) != target_root
+            or folder == target_root):
+        return False
+    try:
+        if stat.S_ISDIR(os.stat(folder).st_mode):
+            return False
+    except (FileNotFoundError, NotADirectoryError):
+        pass
+    plan.update(
+        state="missing", asset_present=False, state_check_only=True,
+        check_stage="local_folder", asset_local_folders=[package_folder],
+        source_available=True, ue_directory_exists=None,
+        message=u"工程中没有该资产文件夹，已跳过服务器遍历和冲突检查",
+        source_message=u"数据库 UE 状态允许加载；点击【加载资产】时检查服务器发布文件")
+    return True
+
+
+def _manifest_primary_missing(plan):
+    """An explicit published main package can short-circuit even the source walk."""
+    main = plan.get("main_object_path")
+    if not main:
+        return False
+    source_paths = _content_package_candidates(main, plan["source_root"])
+    target_paths = _content_package_candidates(main, plan["target_root"])
+    if not source_paths or not target_paths:
+        return False
+    if any(_is_package_file(path) for path in target_paths):
+        return False
+    if not any(_is_package_file(path) for path in source_paths):
+        # An outdated/incomplete declaration must not establish availability.
+        return False
+    plan.update(package_object_paths=[main], asset_identity_paths=[main],
+                asset_object_paths=[main], source_available=True,
+                source_message=u"服务器有 UE 发布主包，可加载资产")
+    _mark_primary_missing(plan)
+    return True
+
+
+def build_import_plan(asset_root, project_content_dir=None, cancelled=None,
+                      check_primary_first=False):
+    """Build a full load plan, or a short-circuiting background card result.
+
+    Background results marked state_check_only never serve as copy plans.
+    Missing local asset directories skip all server access. If a local folder
+    exists, legacy releases may still need a filename walk to identify bodies.
+    """
+    _check_scan_cancelled(cancelled)
     asset_root = os.path.abspath(os.path.normpath(str(asset_root or "")))
     target_root = _project_content_dir(project_content_dir)
-    source_root = find_source_content_root(asset_root)
     plan = {
         "asset_root": _forward(asset_root),
-        "source_root": _forward(source_root),
+        "source_root": "",
         "target_root": _forward(target_root),
         "files": [],
         "package_object_paths": [],
@@ -159,17 +372,28 @@ def build_import_plan(asset_root, project_content_dir=None):
         "state": "missing",
         "message": u"没有找到 UE 发布目录",
         "source_available": False,
-        "ue_directory_exists": bool(source_root),
+        "ue_directory_exists": None,
         "source_message": u"服务器没有 UE 发布目录，无法加载资产",
     }
+    if check_primary_first and _local_asset_folder_missing(plan):
+        return plan
+    source_root = find_source_content_root(asset_root)
+    plan.update(source_root=_forward(source_root), ue_directory_exists=bool(source_root))
     if not source_root:
         return plan
 
     manifest = _read_manifest(asset_root, source_root)
     plan["manifest"] = manifest
+    configured_main = (manifest.get("mainObjectPath") or manifest.get("main_object_path")
+                       or manifest.get("mainPackage") or manifest.get("main_package"))
+    plan["main_object_path"] = _normalize_object_path(configured_main)
+    if check_primary_first and _manifest_primary_missing(plan):
+        return plan
     for root, dirs, names in os.walk(source_root, onerror=_raise_walk_error):
+        _check_scan_cancelled(cancelled)
         dirs.sort(key=str.lower)
         for name in sorted(names, key=str.lower):
+            _check_scan_cancelled(cancelled)
             extension = os.path.splitext(name)[1].lower()
             if extension not in PACKAGE_EXTENSIONS:
                 continue
@@ -184,12 +408,10 @@ def build_import_plan(asset_root, project_content_dir=None):
                 inside_target = False
             if not inside_target:
                 continue
-            size = os.path.getsize(source)
             entry = {
                 "source": _forward(source),
                 "target": _forward(target),
                 "relative": _forward(relative),
-                "size": int(size),
                 "extension": extension,
             }
             plan["files"].append(entry)
@@ -198,19 +420,32 @@ def build_import_plan(asset_root, project_content_dir=None):
                 if object_path:
                     plan["package_object_paths"].append(object_path)
 
-    configured_main = (manifest.get("mainObjectPath") or manifest.get("main_object_path")
-                       or manifest.get("mainPackage") or manifest.get("main_package"))
-    plan["main_object_path"] = _normalize_object_path(configured_main)
+    _set_asset_identity(plan)
     plan["source_available"] = bool(plan["package_object_paths"])
     plan["source_message"] = (
         u"服务器有 UE 发布主包，可加载资产" if plan["source_available"]
         else u"UE 发布目录中没有 .uasset 或 .umap 主包，无法加载资产")
+    if check_primary_first and plan.get("asset_identity_paths"):
+        targets = {entry["target"] for entry in plan["files"]
+                   if _object_path_from_relative(entry["relative"])
+                   in plan["asset_identity_paths"]}
+        if targets and not any(_is_package_file(path) for path in sorted(targets)):
+            # Keep the filename-only discovery for local locate/drag ownership.
+            # No partial metadata list may accidentally be used for copying.
+            plan["files"] = []
+            return _mark_primary_missing(plan)
+    for entry in plan["files"]:
+        _check_scan_cancelled(cancelled)
+        entry["size"] = (None if check_primary_first
+                         else int(os.path.getsize(entry["source"])))
+    if check_primary_first:
+        plan.update(state_check_only=True, check_stage="files")
     # 实时编辑器中先准备 sidecar，最后才让 .uasset/.umap 出现在 Content 目录。
     plan["files"].sort(key=lambda entry: (
         entry["extension"] in PRIMARY_EXTENSIONS,
         entry["relative"].lower(),
     ))
-    return query_filesystem_state(plan)
+    return query_filesystem_state(plan, cancelled=cancelled)
 
 
 def object_path_for_source_file(source_file, source_content_root):
@@ -562,7 +797,7 @@ def build_external_dependency_import_plan(source_file, source_content_root,
         dependency_resolved=True)
 
 
-def query_filesystem_state(plan, verify_content=False):
+def query_filesystem_state(plan, verify_content=False, cancelled=None):
     """Update red/orange/green state without loading UE packages.
 
     Background card scans keep the inexpensive size check.  A user-initiated
@@ -579,20 +814,28 @@ def query_filesystem_state(plan, verify_content=False):
     missing = []
     different = []
     existing = []
+    local_packages = set()
     for entry in files:
+        _check_scan_cancelled(cancelled)
         target = entry["target"]
         if not os.path.isfile(target):
             missing.append(entry["relative"])
             continue
+        object_path = _object_path_from_relative(entry["relative"])
+        if object_path:
+            local_packages.add(object_path.lower())
         try:
             target_size = os.path.getsize(target)
         except OSError:
             target_size = -1
+        # Background discovery defers source metadata until both files exist.
+        if entry.get("size") is None:
+            entry["size"] = int(os.path.getsize(entry["source"]))
         content_differs = target_size != entry["size"]
         if not content_differs and verify_content:
             try:
                 content_differs = (
-                    _sha1(entry["source"]) != _sha1(target))
+                    _sha1(entry["source"], cancelled) != _sha1(target, cancelled))
             except OSError:
                 # A source or target that cannot be read safely must not be
                 # treated as identical merely because its byte size matches.
@@ -605,9 +848,21 @@ def query_filesystem_state(plan, verify_content=False):
     plan["missing_files"] = missing
     plan["different_files"] = different
     plan["existing_files"] = existing
-    if different:
+    identity = plan.get("asset_identity_paths") or []
+    if "asset_identity_paths" in plan:
+        plan["asset_present"] = any(p.lower() in local_packages for p in identity)
+    if plan.get("asset_present") is False:
+        plan["state"] = "missing"
+        plan["message"] = u"该资产主体尚未加载到当前工程；共享依赖不代表资产已加载"
+        if different:
+            plan["message"] += u"（另有 {0} 个依赖文件冲突，加载时可选择处理）".format(len(different))
+    elif different:
         plan["state"] = "conflict"
         plan["message"] = u"工程内有 {0} 个同名但内容不同的文件".format(len(different))
+    elif _pending_reloads_for_plan(plan):
+        plan["state"] = "partial"
+        plan["pending_reload_packages"] = _pending_reloads_for_plan(plan)
+        plan["message"] = u"磁盘文件已更新，内存资产待重新加载；请点击加载重试"
     elif not missing:
         plan["state"] = "ready"
         plan["message"] = u"UE 包已在当前工程中"
@@ -695,10 +950,8 @@ def _remove_with_retry(path, cancelled=None,
 def prepare_plan_overwrites(plan):
     """Fully load selected existing assets before the copy thread replaces them.
 
-    UE may keep lazily loaded package files open without delete sharing.  On
-    Windows that prevents the transaction from renaming the original file to
-    its recovery backup.  ``fully_load_assets`` is the UE-provided operation
-    whose documented purpose is to release those on-disk write locks.
+    Confirm discarding dirty targets before any file is copied. Fully loading
+    the already-loaded packages then releases UE's lazy on-disk write locks.
 
     This function calls Unreal APIs and therefore must run on the UI thread.
     It returns warning strings instead of aborting the transaction; the copy
@@ -714,40 +967,89 @@ def prepare_plan_overwrites(plan):
     if not overwrite_files:
         return []
 
-    assets = []
-    object_paths = []
+    packages = []
+    package_names = []
     warnings = []
-    for entry in (plan or {}).get("files") or []:
-        relative = _forward(entry.get("relative"))
-        if relative.lower() not in overwrite_files:
-            continue
-        if str(entry.get("extension") or "").lower() != ".uasset":
-            continue
-        if not os.path.isfile(entry.get("target") or ""):
-            continue
-        object_path = _object_path_from_relative(relative)
-        if not object_path:
-            continue
+    plan.pop("overwrite_cancelled", None)
+    for name in _package_names_for_files(plan, "overwrite_files"):
         try:
-            if not unreal.EditorAssetLibrary.does_asset_exist(object_path):
-                continue
-            asset = unreal.EditorAssetLibrary.load_asset(object_path)
-            if asset:
-                assets.append(asset)
-                object_paths.append(object_path)
+            package = unreal.find_package(name)
+            if package is not None:
+                packages.append(package)
+                package_names.append(package.get_name())
         except Exception as exc:
             warnings.append(u"无法准备覆盖 {0}：{1}".format(
-                object_path, exc))
+                name, exc))
 
-    if not assets:
+    if not packages:
         return warnings
 
     try:
-        unreal.EditorLoadingAndSavingUtils.fully_load_assets(assets)
-        plan["prepared_overwrite_object_paths"] = object_paths
+        dirty_names = _dirty_package_names().intersection(package_names)
+        if dirty_names:
+            answer = unreal.EditorDialog.show_message(
+                u"覆盖未保存的资产",
+                u"以下待覆盖资产有未保存修改：\n{0}\n\n"
+                u"继续后将使用服务器版本覆盖并重新加载，放弃这些资产的未保存修改。是否继续？".format(
+                    "\n".join(sorted(dirty_names))),
+                unreal.AppMsgType.YES_NO, unreal.AppReturnType.NO)
+            if answer != unreal.AppReturnType.YES:
+                plan["overwrite_cancelled"] = True
+                warnings.append(u"已取消覆盖，保留资产的未保存修改")
+                return warnings
+        plan["approved_dirty_reload_packages"] = sorted(dirty_names)
+        unreal.EditorLoadingAndSavingUtils.fully_load_packages(packages)
+        plan["prepared_overwrite_packages"] = package_names
     except Exception as exc:
-        warnings.append(u"UE 无法释放待覆盖资产的磁盘句柄：{0}".format(exc))
+        # Without a reliable dirty-package check, do not start destructive disk replacement.
+        plan["overwrite_cancelled"] = True
+        warnings.append(u"无法准备资产覆盖，未开始复制：{0}".format(exc))
     return warnings
+
+
+def _dirty_package_names():
+    utils = unreal.EditorLoadingAndSavingUtils
+    return {package.get_name() for package in
+            list(utils.get_dirty_content_packages()) + list(utils.get_dirty_map_packages())}
+
+
+def reload_overwritten_packages(plan):
+    """Reload replaced live packages on the UE thread, including sidecar-only changes.
+
+    Registry scans and load_asset() alone can both return stale, already-loaded
+    objects. Let UE replace the packages and repair their existing references.
+    A failed reload stays pending across subsequent filesystem scans and retries.
+    """
+    names = sorted(set(_package_names_for_files(plan, "overwritten_files"))
+                   | set(_pending_reloads_for_plan(plan)), key=str.lower)
+    if not names:
+        return plan
+    _set_pending_package_reloads(plan, names)
+    try:
+        packages = [package for name in names
+                    if (package := unreal.find_package(name)) is not None]
+        loaded_names = [package.get_name() for package in packages]
+        dirty = _dirty_package_names().intersection(loaded_names) if packages else set()
+        approved = set(plan.get("approved_dirty_reload_packages") or [])
+        if dirty - approved:
+            raise RuntimeError(u"资产产生了尚未确认放弃的未保存修改：{0}；请手动重新加载并确认处理".format(
+                "、".join(sorted(dirty - approved))))
+        if packages:
+            result = unreal.EditorLoadingAndSavingUtils.reload_packages(
+                packages, unreal.ReloadPackagesInteractionMode.ASSUME_POSITIVE)
+            success, error = _decode_bridge_result(result)
+            if not success or error:
+                raise RuntimeError(error or u"UE 未完成资产包重新加载")
+        _set_pending_package_reloads(plan, names, complete=True)
+        plan["reloaded_packages"] = loaded_names
+        plan.pop("pending_reload_packages", None)
+        plan.pop("reload_error", None)
+    except Exception as exc:
+        plan["state"] = "partial"
+        plan["reload_error"] = str(exc)
+        plan["pending_reload_packages"] = names
+        plan["message"] = u"文件已更新，但内存资产重新加载失败：{0}。请再次加载或手动重新加载资产。".format(exc)
+    return plan
 
 
 def _asset_class_name(object_path):
@@ -784,41 +1086,193 @@ def _is_actor_blueprint(object_path):
         return True
 
 
+def _placeable_rank(object_path):
+    class_name = _asset_class_name(object_path)
+    if class_name in ("Blueprint", "AnimBlueprint"):
+        return 0 if _is_actor_blueprint(object_path) else None
+    return {"StaticMesh": 1, "SkeletalMesh": 2,
+            "NiagaraSystem": 3, "ParticleSystem": 3}.get(class_name)
+
+
+def _local_uasset_file(object_path, target_root):
+    """只接受当前工程 Content 下的实际 .uasset，不能只相信缓存的注册表。"""
+    package = _normalize_object_path(object_path).split(".", 1)[0]
+    if not package.startswith("/Game/"):
+        return ""
+    target_root = os.path.abspath(target_root)
+    filename = os.path.abspath(os.path.join(target_root, package[6:] + ".uasset"))
+    try:
+        if os.path.commonpath((target_root, filename)) != target_root:
+            return ""
+    except ValueError:
+        return ""
+    return filename if os.path.isfile(filename) else ""
+
+
+def resolve_local_drag_asset(plan, object_path="", local_folder=""):
+    """解析关卡拖放用的本地版本；不读取服务器、不复制文件、不改变同步状态。
+
+    蓝图/特效卡片传入精确对象路径，禁止误拖出同包的其他依赖。
+    资产/场景卡片从发布清单及本地资产目录选择 Actor 蓝图或网格体。
+    """
+    if unreal is None:
+        return "", u"当前不在 Unreal Editor 中"
+    plan = plan or {}
+    target_root = _project_content_dir(plan.get("target_root"))
+    explicit = _normalize_object_path(object_path)
+    configured = _normalize_object_path(plan.get("main_object_path"))
+    owned_paths = _plan_asset_paths(plan)
+    if "asset_object_paths" in plan and configured not in owned_paths:
+        configured = ""
+    candidates = [explicit] if explicit else [configured] + list(owned_paths)
+
+    # 服务器改名、增加文件或暂时不可访问时，仍可从约定目录使用工程旧版本。
+    folders = list(plan.get("asset_local_folders") or [])
+    if local_folder and local_folder not in folders:
+        folders.append(local_folder)
+    for local_folder in ([] if explicit else folders):
+        folder_path = _normalize_object_path(local_folder).split(".", 1)[0]
+        if not folder_path.startswith("/Game/"):
+            continue
+        folder = os.path.abspath(os.path.join(target_root, folder_path[6:]))
+        if os.path.commonpath((target_root, folder)) == target_root:
+            for root, dirs, names in os.walk(folder):
+                dirs.sort(key=str.lower)
+                for name in sorted(names, key=str.lower):
+                    if name.lower().endswith(".uasset"):
+                        relative = os.path.relpath(os.path.join(root, name), target_root)
+                        candidates.append(_object_path_from_relative(relative))
+
+    seen = set()
+    local_candidates = []
+    for candidate in candidates:
+        candidate = _normalize_object_path(candidate)
+        if not candidate or candidate.lower() in seen:
+            continue
+        seen.add(candidate.lower())
+        filename = _local_uasset_file(candidate, target_root)
+        if filename:
+            local_candidates.append((candidate, filename))
+    if not local_candidates:
+        return "", u"当前工程中不存在该资产的本地 .uasset，请先点击【加载资产】"
+
+    ranked = []
+    for candidate, filename in local_candidates:
+        if not unreal.EditorAssetLibrary.does_asset_exist(candidate):
+            # 文件已经在磁盘上但尚未被注册时，只扫描本地文件。
+            registry = unreal.AssetRegistryHelpers.get_asset_registry()
+            registry.scan_files_synchronous([_forward(filename)], True)
+        if not unreal.EditorAssetLibrary.does_asset_exist(candidate):
+            continue
+        rank = _placeable_rank(candidate)
+        if rank is not None:
+            if explicit or candidate == configured:
+                return candidate, ""
+            identity = plan.get("asset_preferred_paths", plan.get("asset_identity_paths")) or []
+            ranked.append((0 if candidate in identity else 1, rank, candidate.lower(), candidate))
+    if ranked:
+        return min(ranked)[-1], ""
+    if explicit:
+        return "", u"本地资源无法直接拖入关卡（仅支持 Actor 蓝图、网格体和特效系统）：{0}".format(explicit)
+    return "", u"本地 .uasset 已存在，但未找到可拖入关卡的 Actor 蓝图、网格体或特效系统"
+
+
+def _local_card_context(item):
+    """取得卡片的发布路径线索和约定的工程目录，不访问服务器。"""
+    asset_root = _forward(asset_root_from_item_data(item.itemData()))
+    local_folder = _asset_folder_from_root(asset_root)
+    plan = dict(item.uePlan() or {})
+    plan["asset_root"] = asset_root
+    if item.ueMainObjectPath():
+        plan["main_object_path"] = item.ueMainObjectPath()
+    _set_asset_identity(plan)
+    return plan, local_folder
+
+
+def resolve_local_card_drag(item):
+    """资产/场景页共用：发布清单之外也检查约定的本地资产目录。"""
+    plan, local_folder = _local_card_context(item)
+    return resolve_local_drag_asset(plan, local_folder=local_folder)
+
+
+def resolve_local_card_browser_asset(item):
+    """查询卡片对应的工程资产用于定位，不要求与服务器一致或可拖入关卡。"""
+    if unreal is None or item is None:
+        return ""
+    plan, local_folder = _local_card_context(item)
+    configured = _normalize_object_path(plan.get("main_object_path"))
+
+    def exists(object_path):
+        try:
+            return bool(unreal.EditorAssetLibrary.does_asset_exist(object_path))
+        except Exception:
+            return False
+
+    if configured and exists(configured):
+        return configured
+
+    paths = list(_plan_asset_paths(plan))
+    for local_folder in plan.get("asset_local_folders") or [local_folder]:
+        if not local_folder:
+            continue
+        try:
+            registry = unreal.AssetRegistryHelpers.get_asset_registry()
+            assets = registry.get_assets_by_path(local_folder, recursive=True)
+            for data in assets:
+                paths.append("{0}.{1}".format(data.package_name, data.asset_name))
+        except Exception:
+            pass
+
+    candidates = []
+    seen = set()
+    for value in paths:
+        object_path = _normalize_object_path(value)
+        if not object_path or object_path.lower() in seen:
+            continue
+        seen.add(object_path.lower())
+        if exists(object_path):
+            candidates.append(object_path)
+    if not candidates:
+        return ""
+    # 优先使用与拖放一致的蓝图/网格体；材质、骨架、地图等也可以定位。
+    preferred = resolve_placeable_object_path(dict(
+        plan, main_object_path="", asset_object_paths=candidates))
+    return preferred or candidates[0]
+
+
 def resolve_placeable_object_path(plan):
-    """按 Actor Blueprint > StaticMesh > SkeletalMesh 选择拖放主资产。"""
+    """按 Actor Blueprint > StaticMesh > SkeletalMesh > 特效选择拖放主资产。"""
     if unreal is None:
         return ""
     configured = _normalize_object_path(plan.get("main_object_path"))
+    if "asset_object_paths" in plan and configured not in _plan_asset_paths(plan):
+        configured = ""
     if configured and unreal.EditorAssetLibrary.does_asset_exist(configured):
         return configured
 
     ranked = []
-    for object_path in plan.get("package_object_paths") or []:
+    for object_path in _plan_asset_paths(plan):
         try:
             if not unreal.EditorAssetLibrary.does_asset_exist(object_path):
                 continue
         except Exception:
             continue
-        class_name = _asset_class_name(object_path)
-        if class_name in ("Blueprint", "AnimBlueprint"):
-            if not _is_actor_blueprint(object_path):
-                continue
-            rank = 0
-        elif class_name == "StaticMesh":
-            rank = 1
-        elif class_name == "SkeletalMesh":
-            rank = 2
-        else:
+        rank = _placeable_rank(object_path)
+        if rank is None:
             continue
-        ranked.append((rank, object_path.lower(), object_path))
+        identity = plan.get("asset_preferred_paths", plan.get("asset_identity_paths")) or []
+        ranked.append((0 if object_path in identity else 1, rank, object_path.lower(), object_path))
     ranked.sort()
-    return ranked[0][2] if ranked else ""
+    return ranked[0][-1] if ranked else ""
 
 
 def refresh_asset_registry(plan, require_placeable=True):
     """在 UE 主线程刷新新复制的包并解析主资产，返回更新后的计划。"""
     if unreal is None:
         raise RuntimeError("当前不在 Unreal Editor 中")
+    reload_overwritten_packages(plan)
+    if plan.get("reload_error"):
+        return plan
     package_paths = plan.get("package_object_paths") or []
     scan_paths = sorted(set(path.rsplit("/", 1)[0].split(".", 1)[0] for path in package_paths))
     registry = unreal.AssetRegistryHelpers.get_asset_registry()
@@ -830,8 +1284,17 @@ def refresh_asset_registry(plan, require_placeable=True):
         except TypeError:
             registry.scan_paths_synchronous(scan_paths or ["/Game"])
 
+    # The copy worker has already compared the complete manifest off the UI
+    # thread. Unchecked missing files are intentionally absent, not registry
+    # failures; keep their incomplete state after registering the copied files.
+    known_missing_packages = {
+        object_path.lower() for relative in plan.get("missing_files") or []
+        if (object_path := _object_path_from_relative(relative))
+    }
     missing_packages = []
     for object_path in package_paths:
+        if object_path.lower() in known_missing_packages:
+            continue
         try:
             if not unreal.EditorAssetLibrary.does_asset_exist(object_path):
                 missing_packages.append(object_path)
@@ -843,6 +1306,7 @@ def refresh_asset_registry(plan, require_placeable=True):
             len(missing_packages))
         plan["missing_packages"] = missing_packages
         return plan
+    plan.pop("missing_packages", None)
 
     plan["main_object_path"] = resolve_placeable_object_path(plan)
     overwritten_count = len(plan.get("overwritten_files") or [])
@@ -851,7 +1315,24 @@ def refresh_asset_registry(plan, require_placeable=True):
     if overwritten_count or kept_count:
         policy_suffix = u"（覆盖 {0} 个冲突文件，保留工程版本 {1} 个）".format(
             overwritten_count, kept_count)
-    if not require_placeable:
+    if plan.get("reloaded_packages"):
+        policy_suffix += u"；已重新加载 {0} 个内存资产包".format(len(plan["reloaded_packages"]))
+    remaining_conflicts = len(plan.get("different_files") or [])
+    remaining_missing = len(plan.get("missing_files") or [])
+    if plan.get("asset_present") is False:
+        plan["state"] = "missing"
+        plan["message"] = u"该资产主体尚未加载到当前工程{0}".format(policy_suffix)
+    elif remaining_conflicts:
+        plan["state"] = "conflict"
+        plan["message"] = u"本次选择已处理；仍有 {0} 个文件与服务器不同".format(remaining_conflicts)
+        if remaining_missing:
+            plan["message"] += u"、{0} 个文件缺失".format(remaining_missing)
+        plan["message"] += policy_suffix
+    elif remaining_missing:
+        plan["state"] = "partial"
+        plan["message"] = u"本次选择已处理；仍有 {0} 个文件缺失{1}".format(
+            remaining_missing, policy_suffix)
+    elif not require_placeable:
         plan["state"] = "ready"
         plan["message"] = u"分类蓝图已完整加载{0}".format(policy_suffix)
     elif plan["main_object_path"]:
@@ -1003,8 +1484,11 @@ def sync_plan_to_content_browser(plan):
 
     candidates = []
     seen_candidates = set()
-    for value in [plan.get("main_object_path")] + list(
-            plan.get("package_object_paths") or []):
+    owned_paths = _plan_asset_paths(plan)
+    configured = plan.get("main_object_path")
+    if "asset_object_paths" in plan and configured not in owned_paths:
+        configured = ""
+    for value in [configured] + list(owned_paths):
         object_path = _normalize_object_path(value)
         object_key = object_path.lower()
         if object_path and object_key not in seen_candidates:
@@ -1025,24 +1509,65 @@ class AssetStateWorker(QtCore.QObject):
     itemScanned = QtCore.Signal(int, str, object)
     finished = QtCore.Signal()
 
-    def __init__(self, generation, requests, project_content_dir):
+    def __init__(self, generation, requests, project_content_dir, max_pending_results=0):
         super(AssetStateWorker, self).__init__()
         self._generation = int(generation)
-        self._requests = list(requests or [])
+        self._requests = dict(requests or [])
         self._project_content_dir = project_content_dir
+        if not project_content_dir:
+            raise ValueError("Asset state worker requires an explicit project Content directory")
         self._cancelled = False
+        self._queue_lock = threading.Lock()
+        self._result_condition = threading.Condition(self._queue_lock)
+        self._stop_event = threading.Event()
+        self._max_pending_results = max(0, int(max_pending_results))
+        self._outstanding_results = set()
+        self._active_key = None
+        self._completed = set()
+        self._done = False
 
     def cancel(self):
-        self._cancelled = True
+        with self._queue_lock:
+            self._cancelled = True
+            self._requests.clear()
+            self._stop_event.set()
+            self._result_condition.notify_all()
+
+    def acknowledge_result(self, generation, key):
+        """Bound queued Qt callbacks when a UI consumer is slower than the disk."""
+        with self._result_condition:
+            if generation == self._generation:
+                self._outstanding_results.discard(key)
+                self._result_condition.notify_all()
+
+    def replace_requests(self, generation, requests):
+        """UI 线程可重排待检查项；当前文件 I/O 完成后读取最新顺序。"""
+        with self._queue_lock:
+            if generation != self._generation or self._cancelled or self._done:
+                return False
+            self._requests = {
+                key: root for key, root in requests
+                if key != self._active_key and key not in self._completed
+            }
+            return True
 
     @QtCore.Slot()
     def run(self):
         try:
-            for key, asset_root in self._requests:
-                if self._cancelled:
-                    break
+            while True:
+                with self._queue_lock:
+                    if self._cancelled or not self._requests:
+                        self._done = True
+                        break
+                    key = next(iter(self._requests))
+                    asset_root = self._requests.pop(key)
+                    self._active_key = key
                 try:
-                    plan = build_import_plan(asset_root, self._project_content_dir)
+                    plan = build_import_plan(
+                        asset_root, self._project_content_dir, self._stop_event.is_set,
+                        check_primary_first=True)
+                except ScanCancelled:
+                    break
                 except Exception as exc:
                     plan = {
                         "asset_root": _forward(asset_root),
@@ -1053,9 +1578,101 @@ class AssetStateWorker(QtCore.QObject):
                         "ue_directory_exists": None,
                         "source_message": u"无法确认服务器 UE 发布文件：{0}".format(exc),
                     }
+                with self._queue_lock:
+                    if self._cancelled:
+                        break
+                    self._completed.add(key)
+                    self._active_key = None
+                    if self._max_pending_results:
+                        self._outstanding_results.add(str(key))
                 self.itemScanned.emit(self._generation, str(key), plan)
+                with self._result_condition:
+                    while (not self._cancelled and self._max_pending_results
+                           and len(self._outstanding_results) >= self._max_pending_results):
+                        self._result_condition.wait()
+                # Yield the GIL and avoid saturating the NAS/UE event queue
+                # with thousands of cheap missing-release results.
+                if self._stop_event.wait(0.005):
+                    break
         finally:
+            with self._queue_lock:
+                self._done = True
             self.finished.emit()
+
+
+_LOAD_CHECK_POOL = QtCore.QThreadPool()
+_LOAD_CHECK_POOL.setMaxThreadCount(2)
+
+
+class _LoadCheckSignals(QtCore.QObject):
+    finished = QtCore.Signal(int, str, object)
+
+
+class _LoadCheckTask(QtCore.QRunnable):
+    """Only strings/filesystem data cross into this worker, never UE or widgets."""
+
+    def __init__(self, generation, key, asset_root, target_root):
+        super(_LoadCheckTask, self).__init__()
+        self.signals = _LoadCheckSignals()
+        self.generation = generation
+        self.key = key
+        self.asset_root = asset_root
+        self.target_root = target_root
+        self.cancelled = threading.Event()
+
+    def run(self):
+        try:
+            plan = build_import_plan(
+                self.asset_root, self.target_root, self.cancelled.is_set)
+            plan = query_filesystem_state(
+                plan, verify_content=True, cancelled=self.cancelled.is_set)
+        except Exception as exc:
+            plan = {"asset_root": self.asset_root, "state": "error", "message": str(exc),
+                    "main_object_path": "", "source_available": None,
+                    "ue_directory_exists": None,
+                    "source_message": u"无法确认服务器 UE 发布文件：{0}".format(exc)}
+        self.signals.finished.emit(self.generation, self.key, plan)
+
+
+class AssetLoadCheck(QtCore.QObject):
+    """Cancellable, nonblocking preflight for a user-initiated asset/scene load."""
+
+    finished = QtCore.Signal(str, object)
+
+    def __init__(self, parent=None):
+        super(AssetLoadCheck, self).__init__(parent)
+        self._generation = 0
+        self._task = None
+
+    def isRunning(self):
+        return self._task is not None
+
+    def start(self, key, asset_root, target_root):
+        if self.isRunning():
+            return False
+        # A missing explicit target would cause build_import_plan to call UE
+        # Paths from the worker. Resolve it on the UI thread before scheduling.
+        if not target_root:
+            raise ValueError("Asset check requires an explicit project Content directory")
+        self._generation += 1
+        self._task = _LoadCheckTask(
+            self._generation, str(key), str(asset_root), str(target_root))
+        self._task.signals.finished.connect(self._onFinished, QtCore.Qt.QueuedConnection)
+        _LOAD_CHECK_POOL.start(self._task)
+        return True
+
+    @QtCore.Slot(int, str, object)
+    def _onFinished(self, generation, key, plan):
+        if generation != self._generation or self._task is None:
+            return
+        self._task = None
+        self.finished.emit(key, plan)
+
+    def cancel(self):
+        self._generation += 1
+        if self._task is not None:
+            self._task.cancelled.set()
+            self._task = None
 
 
 class AssetCopyWorker(QtCore.QObject):
@@ -1081,9 +1698,21 @@ class AssetCopyWorker(QtCore.QObject):
         temp_files = []
         staged_files = []
         try:
+            if self._plan.get("state_check_only"):
+                raise RuntimeError(u"请先执行完整的加载检查，再复制 UE 发布文件")
+            if self._plan.get("overwrite_cancelled"):
+                raise RuntimeError(u"已取消覆盖，保留资产的未保存修改")
             files = self._plan.get("files") or []
             if not files:
                 raise RuntimeError(u"没有可加载的 UE 发布文件")
+            skipped_missing = {
+                _forward(value).lower()
+                for value in (self._plan.get("skipped_missing_files") or [])
+            }
+            # Keep the full manifest for the final state check, but never read
+            # or copy files the user unchecked in the conflict dialog.
+            files = [entry for entry in files
+                     if _forward(entry["relative"]).lower() not in skipped_missing]
 
             overwrite_files = {
                 _forward(value).lower()
@@ -1184,7 +1813,8 @@ class AssetCopyWorker(QtCore.QObject):
                 (_forward(entry["relative"]) for entry in files
                  if _forward(entry["relative"]).lower() in keep_existing_files),
                 key=str.lower)
-            self._plan = query_filesystem_state(self._plan)
+            self._plan = query_filesystem_state(
+                self._plan, verify_content=True, cancelled=self._is_cancelled)
 
             # 计划和磁盘状态都更新成功后再清掉原文件备份；此前任一步失败，
             # except 分支仍能利用这些备份把所有已覆盖文件恢复原状。
@@ -1198,6 +1828,14 @@ class AssetCopyWorker(QtCore.QObject):
                     recovery_backups.append(_forward(backup_path))
             if recovery_backups:
                 self._plan["recovery_backup_files"] = recovery_backups
+            prepared = {name.lower() for name in self._plan.get("prepared_overwrite_packages") or []}
+            reload_names = [name for name in _package_names_for_files(self._plan, "overwritten_files")
+                            if name.lower() in prepared]
+            _set_pending_package_reloads(self._plan, reload_names)
+            if reload_names:
+                self._plan["state"] = "partial"
+                self._plan["pending_reload_packages"] = reload_names
+                self._plan["message"] = u"文件已更新，正在重新加载内存资产…"
             self.progress.emit(100, u"正在让 UE 注册新资产…")
             self.finished.emit(self._plan)
         except Exception as exc:

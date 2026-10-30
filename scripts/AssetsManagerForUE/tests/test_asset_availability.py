@@ -120,6 +120,9 @@ class ReleaseAvailabilityTests(unittest.TestCase):
 
         with mock.patch.object(ue_asset_service.os, "scandir", side_effect=inaccessible_directory):
             self.assertIsNone(self.scan()["source_available"])
+        # Metadata is now read only for files that also exist in the project.
+        self.target.mkdir(parents=True)
+        (self.target / source.name).write_bytes(b"local package")
         with mock.patch.object(ue_asset_service.os.path, "getsize", side_effect=PermissionError("metadata denied")):
             self.assertIsNone(self.scan()["source_available"])
 
@@ -156,7 +159,7 @@ class AssetCardAvailabilityTests(unittest.TestCase):
     def row(self, name):
         icon = self.root / name / "Icon" / (name + ".png")
         icon.parent.mkdir(parents=True, exist_ok=True)
-        return (20261014, name, name, "", "", "", "", str(icon), "")
+        return (20261014, name, name, "", "", "", "", str(icon), "", "已完成", "")
 
     def package(self, name, relative="UE/Content/Hero.uasset", content=b"package"):
         path = self.root / name / relative
@@ -190,11 +193,11 @@ class AssetCardAvailabilityTests(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         return {action.text(): action for action in captured[0].actions()}
 
-    def test_load_menu_checks_packages_independently_of_database_badge(self):
+    def test_unpublished_database_status_skips_automatic_source_checks(self):
         rows = []
         for name in ("red", "green", "gray", "empty", "sidecars"):
             row = list(self.row(name))
-            row[4] = "" if name == "green" else "UE"
+            row[9] = "未开始" if name == "green" else "已完成"
             rows.append(tuple(row))
         self.package("green")
         (self.root / "empty/UE").mkdir()
@@ -205,7 +208,7 @@ class AssetCardAvailabilityTests(unittest.TestCase):
         self.assertFalse(self.menu_actions(self.item("green"))["加载资产"].isEnabled())
         self.wait_scanned()
         for name, available, directory_exists in (
-                ("red", False, False), ("green", True, True), ("gray", None, None),
+                ("red", False, False), ("green", False, None), ("gray", None, None),
                 ("empty", False, True), ("sidecars", False, True)):
             item = self.item(name)
             self.assertIs(item.ueSourceAvailability(), available)
@@ -216,6 +219,44 @@ class AssetCardAvailabilityTests(unittest.TestCase):
             self.assertFalse(actions["在内容浏览器中定位"].isEnabled())
             self.assertIn(item.ueSourceMessage(), item.toolTip())
         self.assertEqual(self.item("green").ueState(), "missing")
+
+    def test_in_progress_and_completed_enable_load_entries_when_package_exists(self):
+        cases = (("wip", "制作中", True), ("done", "已完成", True),
+                 ("missing", "制作中", False), ("draft", "未开始", False),
+                 ("blank", None, False))
+        rows = []
+        for name, status, _enabled in cases:
+            row = list(self.row(name))
+            row[9] = status
+            rows.append(tuple(row))
+            if name != "missing":
+                self.package(name)
+        self.ui.listWidgetAddItems(rows)
+        self.wait_scanned()
+        for name, status, enabled in cases:
+            with self.subTest(status=status, name=name):
+                item = self.item(name)
+                self.ui.main_listWgt.setCurrentItem(item)
+                self.assertEqual(item.ueSourceAvailability(), enabled)
+                self.assertEqual(self.ui.load_button.isEnabled(), enabled)
+                self.assertEqual(self.menu_actions(item)["加载资产"].isEnabled(), enabled)
+                self.assertEqual(item.isUEPublished(), status == "已完成")
+
+    def test_in_progress_toolbar_load_copies_existing_release(self):
+        row = list(self.row("Hero"))
+        row[9] = "制作中"
+        source = self.package("Hero", content=b"work in progress package")
+        self.ui.listWidgetAddItems([tuple(row)])
+        self.wait_scanned()
+        item = self.item("Hero")
+        self.ui.main_listWgt.setCurrentItem(item)
+        self.assertTrue(self.ui.load_button.isEnabled())
+        with mock.patch.object(self.ui, "_registerLoadedPlan") as register:
+            self.ui.load_button.click()
+            self.wait_until(lambda: not self.ui._load_check.isRunning() and self.ui._copy_thread is None)
+        register.assert_called_once()
+        self.assertEqual((self.target / "Hero.uasset").read_bytes(), source.read_bytes())
+        self.assertFalse(item.isUEPublished())
 
     def test_sort_search_display_and_duplicate_source_cards_reuse_scans(self):
         row = self.row("Hero")
@@ -244,10 +285,10 @@ class AssetCardAvailabilityTests(unittest.TestCase):
         release = threading.Event()
         original_build = ue_asset_service.build_import_plan
 
-        def delayed_build(*args):
+        def delayed_build(*args, **kwargs):
             started.set()
             release.wait(5)
-            return original_build(*args)
+            return original_build(*args, **kwargs)
 
         with mock.patch.object(ue_asset_service, "build_import_plan", side_effect=delayed_build) as build:
             try:
@@ -289,9 +330,9 @@ class AssetCardAvailabilityTests(unittest.TestCase):
         original_build = ue_asset_service.build_import_plan
         calls = []
 
-        def delayed_first_scan(*args):
+        def delayed_first_scan(*args, **kwargs):
             calls.append(args)
-            plan = original_build(*args)
+            plan = original_build(*args, **kwargs)
             if len(calls) == 1:
                 started.set()
                 release.wait(5)
@@ -320,11 +361,216 @@ class AssetCardAvailabilityTests(unittest.TestCase):
         self.wait_scanned()
         with mock.patch.object(ue_asset_service, "build_import_plan", side_effect=PermissionError("NAS offline")):
             self.ui.loadUEAsset(self.item("Hero"))
+            self.wait_until(lambda: not self.ui._load_check.isRunning())
         self.ui.listWidgetAddItems()
         item = self.item("Hero")
         self.assertIsNone(item.ueSourceAvailability())
         self.assertFalse(self.menu_actions(item)["加载资产"].isEnabled())
         self.assertIn("NAS offline", item.toolTip())
+
+    def conflicting_release(self):
+        row = self.row("Hero")
+        files = {
+            "Hero.uasset": (b"server_v1", b"local__v1"),
+            "Mat/M_Hero.uasset": (b"server_material", b"local__material"),
+            "Tex/T_New.uasset": (b"new_texture", None),
+        }
+        for relative, (server, local) in files.items():
+            self.package("Hero", "UE/Content/" + relative, server)
+            if local is not None:
+                target = self.target / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(local)
+        self.ui.listWidgetAddItems([row])
+        self.wait_scanned()
+        return self.item("Hero"), files
+
+    def test_conflict_dialog_selectively_overwrites_and_loads_missing_packages(self):
+        from AssetsManagerForUE.sources import sceneTools
+        item, files = self.conflicting_release()
+
+        def choose(dialog):
+            tree = dialog.findChild(QtWidgets.QTreeWidget, "UEConflictTree")
+            self.assertEqual(tree.topLevelItemCount(), 3)
+            self.assertEqual(tree.headerItem().text(3), "类型")
+            for index in range(tree.topLevelItemCount()):
+                row = tree.topLevelItem(index)
+                if row.data(0, QtCore.Qt.UserRole) == "Tex/T_New.uasset":
+                    self.assertEqual(row.text(0), "")
+                    self.assertEqual(row.text(5), "缺失")
+                    self.assertTrue(row.flags() & QtCore.Qt.ItemIsUserCheckable)
+                    self.assertEqual(row.checkState(0), QtCore.Qt.Unchecked)
+                    row.setCheckState(0, QtCore.Qt.Checked)
+                else:
+                    self.assertEqual(row.checkState(0), QtCore.Qt.Unchecked)
+                self.assertTrue(row.text(4))
+                self.assertTrue(row.text(5))
+                self.assertIn("服务器：", row.toolTip(2))
+                if row.data(0, QtCore.Qt.UserRole) == "Hero.uasset":
+                    row.setCheckState(0, QtCore.Qt.Checked)
+            button = next(button for button in dialog.findChildren(QtWidgets.QPushButton)
+                          if button.text() == "加载选中项")
+            button.click()
+            return dialog.result()
+
+        with mock.patch.object(sceneTools._UEConflictDialog, "exec", choose), \
+                mock.patch.object(ue_asset_service, "prepare_plan_overwrites", return_value=[]) as prepare, \
+                mock.patch.object(self.ui, "_registerLoadedPlan") as register:
+            self.ui.loadUEAsset(item)
+            self.wait_until(lambda: not self.ui._load_check.isRunning() and self.ui._copy_thread is None)
+        register.assert_called_once()
+        finished = register.call_args.args[1]
+        self.assertEqual(finished["overwrite_files"], ["Hero.uasset"])
+        self.assertEqual(finished["keep_existing_files"], ["Mat/M_Hero.uasset"])
+        self.assertEqual(finished["overwritten_files"], ["Hero.uasset"])
+        self.assertEqual(finished["kept_existing_files"], ["Mat/M_Hero.uasset"])
+        prepare.assert_called_once()
+        self.assertEqual((self.target / "Hero.uasset").read_bytes(), files["Hero.uasset"][0])
+        self.assertEqual((self.target / "Mat/M_Hero.uasset").read_bytes(), files["Mat/M_Hero.uasset"][1])
+        self.assertEqual((self.target / "Tex/T_New.uasset").read_bytes(), files["Tex/T_New.uasset"][0])
+
+    def test_conflict_keep_all_preserves_existing_and_still_loads_missing_packages(self):
+        from AssetsManagerForUE.sources import sceneTools
+        item, files = self.conflicting_release()
+
+        def keep_all(dialog):
+            # Even previously checked rows must be cleared by this button.
+            next(button for button in dialog.findChildren(QtWidgets.QPushButton)
+                 if button.text() == "全选").click()
+            next(button for button in dialog.findChildren(QtWidgets.QPushButton)
+                 if button.text() == "全部保留并加载").click()
+            return dialog.result()
+
+        with mock.patch.object(sceneTools._UEConflictDialog, "exec", keep_all), \
+                mock.patch.object(ue_asset_service, "prepare_plan_overwrites", return_value=[]), \
+                mock.patch.object(self.ui, "_registerLoadedPlan") as register:
+            self.ui.loadUEAsset(item)
+            self.wait_until(lambda: not self.ui._load_check.isRunning() and self.ui._copy_thread is None)
+        register.assert_called_once()
+        finished = register.call_args.args[1]
+        self.assertEqual(finished["overwrite_files"], [])
+        self.assertEqual(finished["overwritten_files"], [])
+        self.assertEqual(set(finished["kept_existing_files"]), {"Hero.uasset", "Mat/M_Hero.uasset"})
+        for relative, (server, local) in files.items():
+            self.assertEqual((self.target / relative).read_bytes(), local if local is not None else server)
+
+    def test_single_file_load_keeps_card_and_cached_plan_yellow_without_manual_refresh(self):
+        from AssetsManagerForUE.sources import sceneTools
+        item, files = self.conflicting_release()
+        def choose(dialog):
+            tree = dialog.findChild(QtWidgets.QTreeWidget, "UEConflictTree")
+            for index in range(tree.topLevelItemCount()):
+                row = tree.topLevelItem(index)
+                self.assertEqual(row.checkState(0), QtCore.Qt.Unchecked)
+                if row.data(0, QtCore.Qt.UserRole) == "Hero.uasset":
+                    row.setCheckState(0, QtCore.Qt.Checked)
+            next(button for button in dialog.findChildren(QtWidgets.QPushButton)
+                 if button.text() == "加载选中项").click()
+            return dialog.result()
+        library = mock.Mock()
+        library.does_asset_exist.side_effect = lambda path: (self.target / (path.split(".", 1)[0].removeprefix("/Game/") + ".uasset")).is_file()
+        engine = types.SimpleNamespace(EditorAssetLibrary=library, find_package=lambda name: None,
+            AssetRegistryHelpers=types.SimpleNamespace(get_asset_registry=lambda: mock.Mock()))
+        with mock.patch.object(sceneTools._UEConflictDialog, "exec", choose), \
+                mock.patch.object(ue_asset_service, "unreal", engine), \
+                mock.patch.object(ue_asset_service, "prepare_plan_overwrites", return_value=[]), \
+                mock.patch.object(ue_asset_service, "sync_plan_to_content_browser", return_value=(True, "/Game/Hero.Hero")):
+            self.ui.loadUEAsset(item)
+            self.wait_until(lambda: not self.ui._load_check.isRunning() and self.ui._copy_thread is None)
+        self.assertEqual(item.ueState(), "conflict")
+        self.assertEqual(item.uePlan()["different_files"], ["Mat/M_Hero.uasset"])
+        self.assertEqual(item.uePlan()["missing_files"], ["Tex/T_New.uasset"])
+        self.assertEqual((self.target / "Hero.uasset").read_bytes(), files["Hero.uasset"][0])
+        self.assertEqual((self.target / "Mat/M_Hero.uasset").read_bytes(), files["Mat/M_Hero.uasset"][1])
+        self.assertFalse((self.target / "Tex/T_New.uasset").exists())
+        self.ui.listWidgetAddItems()
+        self.assertEqual(self.item("Hero").ueState(), "conflict")
+
+    def test_missing_asset_still_prompts_for_shared_conflicts_and_copies_main(self):
+        from AssetsManagerForUE.sources import sceneTools
+        self.root = self.root / "Assets/Props"
+        item, files = self.conflicting_release()
+        (self.target / "Hero.uasset").unlink()
+        plan = ue_asset_service.build_import_plan(
+            ue_asset_service.asset_root_from_item_data(item.itemData()), str(self.target))
+        plan = ue_asset_service.query_filesystem_state(plan, verify_content=True)
+        self.assertEqual(plan["state"], "missing")
+        self.assertTrue(plan["different_files"])
+
+        # Both pages must offer conflict choices even though the card is red.
+        scene = mock.Mock()
+        scene._state_closed = False
+        scene._state_requests = {}
+        scene._findItemByKey.return_value = None
+        scene._chooseConflictFiles.return_value = False
+        sceneTools.SceneToolsUI._onLoadChecked(scene, "Hero", dict(plan))
+        scene._chooseConflictFiles.assert_called_once()
+
+        def keep_all(dialog):
+            next(button for button in dialog.findChildren(QtWidgets.QPushButton)
+                 if button.text() == "全选").click()
+            next(button for button in dialog.findChildren(QtWidgets.QPushButton)
+                 if button.text() == "全部保留并加载").click()
+            return dialog.result()
+
+        with mock.patch.object(sceneTools._UEConflictDialog, "exec", keep_all), \
+                mock.patch.object(ue_asset_service, "prepare_plan_overwrites", return_value=[]), \
+                mock.patch.object(self.ui, "_registerLoadedPlan") as register:
+            self.ui.loadUEAsset(item)
+            self.wait_until(lambda: not self.ui._load_check.isRunning() and self.ui._copy_thread is None)
+        register.assert_called_once()
+        self.assertEqual((self.target / "Hero.uasset").read_bytes(), files["Hero.uasset"][0])
+        self.assertEqual((self.target / "Mat/M_Hero.uasset").read_bytes(), files["Mat/M_Hero.uasset"][1])
+
+    def test_conflict_cancel_does_not_start_copy_or_change_any_files(self):
+        from AssetsManagerForUE.sources import sceneTools
+        item, files = self.conflicting_release()
+
+        def cancel(dialog):
+            next(button for button in dialog.findChildren(QtWidgets.QPushButton)
+                 if button.text() == "取消").click()
+            return dialog.result()
+
+        with mock.patch.object(sceneTools._UEConflictDialog, "exec", cancel), \
+                mock.patch.object(ue_asset_service, "prepare_plan_overwrites") as prepare, \
+                mock.patch.object(ue_asset_service, "AssetCopyWorker") as worker:
+            self.ui.loadUEAsset(item)
+            self.wait_until(lambda: not self.ui._load_check.isRunning())
+        worker.assert_not_called()
+        prepare.assert_not_called()
+        self.assertEqual(item.ueState(), "conflict")
+        self.assertIsNone(self.ui._copy_thread)
+        for relative, (_server, local) in files.items():
+            if local is None:
+                self.assertFalse((self.target / relative).exists())
+            else:
+                self.assertEqual((self.target / relative).read_bytes(), local)
+
+    def test_shared_conflict_dialog_select_all_invert_and_scene_entry_point(self):
+        from AssetsManagerForUE.sources import sceneTools
+        item, _files = self.conflicting_release()
+        plan = ue_asset_service.query_filesystem_state(dict(item.uePlan()), verify_content=True)
+
+        def choose(dialog):
+            tree = dialog.findChild(QtWidgets.QTreeWidget, "UEConflictTree")
+            buttons = {button.text(): button for button in dialog.findChildren(QtWidgets.QPushButton)}
+            conflicts = [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())
+                         if tree.topLevelItem(i).data(0, QtCore.Qt.UserRole + 1) == "conflict"]
+            self.assertEqual(len(conflicts), 2)
+            buttons["全选"].click()
+            self.assertTrue(all(row.checkState(0) == QtCore.Qt.Checked for row in conflicts))
+            buttons["反选"].click()
+            self.assertTrue(all(row.checkState(0) == QtCore.Qt.Unchecked for row in conflicts))
+            header = dialog.findChild(sceneTools._UEHeaderCheckBox)
+            header.nextCheckState()
+            self.assertTrue(all(row.checkState(0) == QtCore.Qt.Checked for row in conflicts))
+            buttons["加载选中项"].click()
+            return dialog.result()
+
+        with mock.patch.object(sceneTools._UEConflictDialog, "exec", choose):
+            self.assertTrue(sceneTools.SceneToolsUI._chooseConflictFiles(self.ui, plan))
+        self.assertEqual(set(plan["overwrite_files"]), {"Hero.uasset", "Mat/M_Hero.uasset"})
+        self.assertEqual(plan["keep_existing_files"], [])
 
     def test_explicit_load_rechecks_source_and_supersedes_old_scan_results(self):
         row = self.row("Hero")
@@ -337,6 +583,7 @@ class AssetCardAvailabilityTests(unittest.TestCase):
         with mock.patch.object(self.ui, "_showMissingUEPackageDialog") as dialog, \
                 mock.patch.object(ue_asset_service, "AssetCopyWorker") as copy:
             self.ui.loadUEAsset(item)
+            self.wait_until(lambda: not self.ui._load_check.isRunning())
         dialog.assert_called_once()
         copy.assert_not_called()
         self.assertIs(item.ueSourceAvailability(), False)
@@ -369,13 +616,13 @@ class AssetCardAvailabilityTests(unittest.TestCase):
         item = myWidget.Item()
         item.setItemsWidget(widget)
         row = list(self.row("Hero"))
-        row[4] = "UE"
+        row[9] = "已完成"
         item.setItemData(tuple(row))
         item.setUESourceAvailability(True, "server ready", ue_directory_exists=True)
         # Other library pages do not opt into database badges.
         self.assertFalse(item.isUEPublished())
         self.assertFalse(self.badge_painted(item))
-        widget.setUEPublishedStatusField(4)
+        widget.setUEPublishedStatusField(9, "已完成")
         item.setUEState("error", "project copy failed")
         self.assertTrue(item.isUEPublished())
         self.assertTrue(self.badge_painted(item))
@@ -394,24 +641,24 @@ class AssetCardAvailabilityTests(unittest.TestCase):
         painter.end()
         return any(image.constBits())
 
-    def test_label_follows_model_status_and_ignores_directory_and_rig_status(self):
+    def test_label_follows_ue_status_and_ignores_model_rig_and_directory(self):
         item = myWidget.Item()
         item.setItemsWidget(self.ui.main_listWgt)
         row = list(self.row("Hero"))
         for status in (None, "", "未开始", "制作中", "已完成", "ue", " UE ", "UE"):
-            row[4], row[6] = status, "UE"
+            row[4], row[6], row[9] = "UE", "已完成", status
             item.setItemData(tuple(row))
             for directory_exists in (True, False, None):
                 with self.subTest(status=status, directory_exists=directory_exists):
                     item.setUESourceAvailability(False, "no main package", ue_directory_exists=directory_exists)
-                    self.assertEqual(item.isUEPublished(), status == "UE")
-                    self.assertEqual(self.badge_painted(item), status == "UE")
+                    self.assertEqual(item.isUEPublished(), status == "已完成")
+                    self.assertEqual(self.badge_painted(item), status == "已完成")
 
     def test_label_is_visible_before_scan_and_safe_for_missing_row_data(self):
         item = myWidget.Item()
         item.setItemsWidget(self.ui.main_listWgt)
         row = list(self.row("Hero"))
-        row[4] = "UE"
+        row[9] = "已完成"
         item.setItemData(tuple(row))
         self.assertIsNone(item.ueSourceAvailability())
         self.assertIsNone(item.ueDirectoryExists())

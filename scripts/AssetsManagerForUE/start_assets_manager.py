@@ -18,7 +18,7 @@ if root_dir not in sys.path:
 
 # 导入并启动
 try:
-    from AssetsManagerForUE.AssetsManagerForUE import showWindow
+    from AssetsManagerForUE.launcher import showWindow
     showWindow()
 except Exception as e:
     print(f"启动失败: {e}")
