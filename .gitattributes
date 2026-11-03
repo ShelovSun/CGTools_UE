@@ -1,5 +1,5 @@
 # Keep plugin distribution files byte-for-byte, including UTF-8 sources.
 Plugins/Marketplace/** -text
 
-# Unreal content includes files above GitHub's regular Git size limit.
+# Store Unreal binary content in Git LFS.
 Plugins/Marketplace/**/*.uasset filter=lfs diff=lfs merge=lfs -text

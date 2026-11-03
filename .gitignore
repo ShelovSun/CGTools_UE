@@ -14,3 +14,6 @@
 *.log
 *.tmp
 Thumbs.db
+
+# Downloaded separately; keep the local installation outside version control.
+/Plugins/Marketplace/HoudiniNiagara/
