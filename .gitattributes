@@ -1,0 +1,2 @@
+# Keep the verified publisher payload byte-for-byte, including UTF-8 sources.
+Plugins/Marketplace/CGToolsPublisher/** -text

@@ -1,0 +1,16 @@
+# Generated files; compiled plugin DLLs and runtime libraries remain versioned.
+**/__pycache__/
+**/.pytest_cache/
+**/.vs/
+**/Intermediate/
+**/Saved/
+**/DerivedDataCache/
+*.pyc
+*.pyo
+*.pdb
+*.obj
+*.lib
+*.exp
+*.log
+*.tmp
+Thumbs.db
