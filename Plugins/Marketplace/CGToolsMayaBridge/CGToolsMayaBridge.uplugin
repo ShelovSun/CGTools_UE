@@ -1,0 +1,24 @@
+{
+  "FileVersion": 3,
+  "Version": 5,
+  "VersionName": "1.2.1",
+  "FriendlyName": "CGTools Maya Bridge",
+  "Description": "Receives Maya action-publish notifications and imports animation FBX files in Unreal Editor.",
+  "Category": "CGTools",
+  "CreatedBy": "CGTools",
+  "EngineVersion": "5.7.0",
+  "EnabledByDefault": true,
+  "CanContainContent": true,
+  "Installed": true,
+  "Modules": [
+    {
+      "Name": "CGToolsMayaBridge",
+      "Type": "Editor",
+      "LoadingPhase": "PostEngineInit"
+    }
+  ],
+  "Plugins": [
+    { "Name": "PythonScriptPlugin", "Enabled": true },
+    { "Name": "EditorScriptingUtilities", "Enabled": true }
+  ]
+}

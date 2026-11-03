@@ -1,2 +1,5 @@
-# Keep the verified publisher payload byte-for-byte, including UTF-8 sources.
-Plugins/Marketplace/CGToolsPublisher/** -text
+# Keep plugin distribution files byte-for-byte, including UTF-8 sources.
+Plugins/Marketplace/** -text
+
+# Unreal content includes files above GitHub's regular Git size limit.
+Plugins/Marketplace/**/*.uasset filter=lfs diff=lfs merge=lfs -text

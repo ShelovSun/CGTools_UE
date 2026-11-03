@@ -1,0 +1,7 @@
+{
+  "port": 19821,
+  "skeleton_template": "/Game/Assets/{asset_type}/{asset_name}/{asset_name}_Skeleton",
+  "animation_path_template": "/Game/Assets/{asset_type}/{asset_name}/Action",
+  "replace_existing": true,
+  "asset_overrides": []
+}
