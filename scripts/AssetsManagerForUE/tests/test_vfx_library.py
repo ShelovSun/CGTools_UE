@@ -400,6 +400,48 @@ class VfxLibraryTests(unittest.TestCase):
         self.assertEqual(folder.itemData()[7], ui._folder_icon)
         self.assertEqual(folder.ueState(), "folder")
 
+    def test_thumbnail_requests_follow_viewport_and_prioritize_selection(self):
+        ui = self.build_ui("Team1/火")
+        category = ui._categories["Team1/火"]
+        template = self.assets["Team1/火/NS_Fire.uasset"]
+        for index in range(30):
+            asset = copy.deepcopy(template)
+            asset["name"] = "NS_Visible_{0:02}".format(index)
+            asset["source_file"] = str(self.root / "Team1/火" / (asset["name"] + ".uasset"))
+            asset["thumbnail"] += str(index)
+            category["assets"].append(asset)
+            ui._assets_by_source[os.path.normcase(asset["source_file"])] = asset
+        ui.resize(650, 300)
+        ui._rebuildCards()
+        self.app.processEvents()
+        cache = mock.Mock()
+        ui._thumbnail_cache = cache
+        vfxTools.VfxToolsUI._queueThumbnails(ui, category["assets"])
+        ui._requestVisibleThumbnails()
+        initial = cache.request.call_args.args[0]
+        self.assertGreater(len(initial), 0)
+        self.assertLess(len(initial), len(category["assets"]))
+        last = self.card("NS_Visible_29")
+        ui.card_list.setCurrentItem(last)
+        ui.card_list.scrollToItem(last)
+        self.app.processEvents()
+        ui._requestVisibleThumbnails()
+        requested = cache.request.call_args.args[0]
+        self.assertEqual(requested[0]["name"], "NS_Visible_29")
+        self.assertNotIn(initial[0], requested)
+        ui.hide()
+        ui._requestVisibleThumbnails()
+        self.assertEqual(cache.request.call_args.args[0], [])
+
+    def test_stale_thumbnail_result_does_not_overwrite_updated_card(self):
+        ui = self.build_ui("Team1/火")
+        asset = self.assets["Team1/火/NS_Fire.uasset"]
+        with mock.patch.object(ui, "_updateCardThumbnail") as update:
+            ui._thumbnailReady(asset["source_file"], asset["thumbnail"] + ".obsolete")
+            update.assert_not_called()
+            ui._thumbnailReady(asset["source_file"], asset["thumbnail"])
+            update.assert_called_once_with(asset["source_file"], asset["thumbnail"])
+
     def test_copy_completion_and_preloaded_effect_both_schedule_browser_sync(self):
         path = "Team1/火/NS_Fire.uasset"
         ui = self.build_ui(path)

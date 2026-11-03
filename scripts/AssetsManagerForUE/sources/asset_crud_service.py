@@ -18,7 +18,8 @@ SUBFOLDERS = {
 ROW_FIELDS = {
     "asset": ("date", "name", "zh_name", "mod_artist", "mod_status", "rig_artist",
               "rig_status", "icon", "note", "ue_status", "ue_artist"),
-    "scene": ("date", "name", "zh_name", "artist", "status", "artist", "status", "icon", "note"),
+    "scene": ("date", "name", "zh_name", "artist", "status", "artist", "status", "icon", "note",
+              "ue_status", "ue_artist"),
 }
 
 
@@ -123,8 +124,8 @@ def add_record(user, password, table, project, record_type, name, zh_name):
         fields = ROW_FIELDS[table] + ("type",)
         values = (date, name, zh_name, user, "未开始", "", "未开始", icon, "", "未开始", "", record_type)
     else:
-        fields = ("date", "name", "zh_name", "artist", "status", "icon", "note", "type")
-        values = (date, name, zh_name, user, "未开始", icon, "", record_type)
+        fields = ("date", "name", "zh_name", "artist", "status", "icon", "note", "ue_status", "ue_artist", "type")
+        values = (date, name, zh_name, user, "未开始", icon, "", "未开始", "", record_type)
     columns = ", ".join('"{0}.{1}"'.format(table, field) for field in fields)
     returning = ", ".join('"{0}.{1}"'.format(table, field) for field in ROW_FIELDS[table])
     conn = cur = None

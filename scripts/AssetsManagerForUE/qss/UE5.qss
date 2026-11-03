@@ -532,6 +532,12 @@ QWidget#UEWindowFrameOverlay
     qproperty-innerBorderColor: #111111;
 }
 
+QWidget#UEWindowResizeBorder
+{
+    background: transparent;
+    border: none;
+}
+
 QSizeGrip#UEWindowResizeGrip
 {
     background: transparent;

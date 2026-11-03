@@ -27,13 +27,13 @@ class DetailDatabaseTests(unittest.TestCase):
                               '"asset.mod_artist", "asset.mod_status", "asset.rig_artist", '
                               '"asset.rig_status", "asset.note", "asset.ue_artist")')
         self.database.execute('CREATE TABLE scene ("scene.name", "scene.type", "scene.zh_name", '
-                              '"scene.artist", "scene.status", "scene.note")')
+                              '"scene.artist", "scene.status", "scene.note", "scene.ue_artist")')
         self.database.executemany("INSERT INTO asset VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [
             ("Hero", "Characters", "角色", "张三", "UE", "李四", "制作中", "保留备注", "原UE制作人"),
             ("Hero", "Props", "同名道具", "其他人", "未开始", "其他绑定", "未开始", "其他备注", "其他UE制作人"),
         ])
-        self.database.execute("INSERT INTO scene VALUES (?, ?, ?, ?, ?, ?)",
-                              ("Tree", "Nature", None, "张三", "UE", "场景备注"))
+        self.database.execute("INSERT INTO scene VALUES (?, ?, ?, ?, ?, ?, ?)",
+                              ("Tree", "Nature", None, "张三", "已完成", "场景备注", "原UE制作人"))
         self.database.commit()
         self.conn = LocalConnection(self.database)
         self.connect = self.enterContext(mock.patch.object(psycopg2, "connect", return_value=self.conn))
@@ -64,7 +64,13 @@ class DetailDatabaseTests(unittest.TestCase):
         self.update(2, None, "树'中文名", table="scene")
         self.update(3, "张三", "王五", table="scene")
         self.assertEqual(self.database.execute("SELECT * FROM scene").fetchone(),
-                         ("Tree", "Nature", "树'中文名", "王五", "UE", "场景备注"))
+                         ("Tree", "Nature", "树'中文名", "王五", "已完成", "场景备注", "原UE制作人"))
+
+    def test_scene_ue_artist_preserves_original_model_artist_status_and_note(self):
+        self.update(10, "原UE制作人", "李四", table="scene")
+        self.assertEqual(self.database.execute('SELECT "scene.artist", "scene.status", '
+                                              '"scene.note", "scene.ue_artist" FROM scene').fetchone(),
+                         ("张三", "已完成", "场景备注", "李四"))
 
     def test_quotes_and_sql_text_are_saved_as_text_and_empty_name_is_allowed(self):
         value = "角色'; DROP TABLE asset;--"
@@ -293,6 +299,13 @@ class DetailPopupTests(unittest.TestCase):
         self.assertEqual((row[2], row[3], row[5], row[4], row[8]),
                          ("树林", "张三", "张三", "未开始", "备注"))
         self.assertEqual(self.write.call_args.args[2:5], ("Project", "scene", "Characters"))
+        popup = self.artist_picker(10)
+        popup._choose(popup.tree.topLevelItem(0).child(1), 0)
+        self.wait_until(lambda: self.page.editor.pending is None)
+        row = self.widget.items()[0]
+        self.assertEqual((row[3], row[5], row[4], row[9], row[10]),
+                         ("张三", "张三", "未开始", "未开始", "李四"))
+        self.assertEqual(self.write.call_args.args[-3:], (10, "原UE制作人", "李四"))
 
 
 if __name__ == "__main__":

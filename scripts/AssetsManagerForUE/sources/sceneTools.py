@@ -746,14 +746,14 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         tool.addWidget(self.scene_key_line, 1)
         centerV.addLayout(tool)
         self.main_listWgt = myWidget.MainQListWiget()
-        self.main_listWgt.setUEPublishedStatusField(4)  # scene.status
+        self.main_listWgt.setUEPublishedStatusField(9, u"已完成")  # scene.ue_status
         self.main_listWgt.setSortingEnabled(False)
         self.main_listWgt.setListColumns(
-            (u"创建日期", u"场景名", u"中文名", u"制作人", u"状态", u"备注"),
-            (0, 1, 2, 3, 4, 8),
-            (90, 190, 120, 100, 90, 260),
-            (None, None, None, None, None, "note"),
-            ("center", "left", "left", "center", "center", "left"),
+            (u"创建日期", u"场景名", u"中文名", u"制作人", u"状态", u"UE状态", u"UE制作", u"备注"),
+            (0, 1, 2, 3, 4, 9, 10, 8),
+            (90, 190, 120, 100, 90, 90, 100, 260),
+            (None, None, None, None, None, None, None, "note"),
+            ("center", "left", "left", "center", "center", "center", "center", "left"),
         )
         self.scene_list_header = myWidget.AssetListHeader(self.main_listWgt)
         self.scene_list_header.setSortIndicator(*self._current_sort)
@@ -1147,7 +1147,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         self.listWidgetAddItems(asset_crud_ui.apply_to_rows(self.main_listWgt.items(), result))
 
     def _detailSaved(self, request):
-        if request[3] == 4 and request[:2] == self._statusContext():
+        if request[3] == 9 and request[:2] == self._statusContext():
             self.scanUEAssetStates()
         if (request[3] == 2 and request[:2] == self._statusContext()
                 and request[:2] == self._status_editor.context
@@ -1181,16 +1181,17 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         cur = None
         get_script = ''' 
                  SELECT "scene.date", "scene.name", "scene.zh_name", "scene.artist", "scene.status", 
-                 "scene.artist", "scene.status", "scene.icon", "scene.note"
+                 "scene.artist", "scene.status", "scene.icon", "scene.note",
+                 "scene.ue_status", "scene.ue_artist"
                  FROM public."scene"
                  WHERE
-                 "scene.type" = '%s';
-                 ''' % _type
+                 "scene.type" = %s;
+                 '''
         try:
             conn = psycopg2.connect(database=_project, user=self.user, password=self.password, host=databaseHost(),
                                     port="5432")
             cur = conn.cursor()
-            cur.execute(get_script)
+            cur.execute(get_script, (_type,))
             data = cur.fetchall()
             # print(data)
             return data
@@ -1236,7 +1237,8 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         self.scanUEAssetStates()
 
     def _canLoadUEAsset(self, item):
-        return (item is not None and item.ueSourceAvailability() is True
+        return (item is not None and self._databaseAllowsUELoad(item)
+                and item.ueSourceAvailability() is True
                 and self._copy_thread is None and not self._load_check.isRunning())
 
     def _updateLoadButton(self):
@@ -1423,7 +1425,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         for index in range(self.main_listWgt.count()):
             item = self.main_listWgt.item(index)
             asset_root = self._assetRootForItem(item)
-            if not item.isUEPublished():
+            if not self._databaseAllowsUELoad(item):
                 self._setItemUEPlan(item, ue_asset_service.unpublished_asset_state(asset_root))
                 continue
             key = self._itemKey(item)
@@ -1443,6 +1445,13 @@ class SceneToolsUI(QtWidgets.QMainWindow):
             self.infoMsg("error", str(exc))
             return
         self._prioritizeStateScans()
+
+    @staticmethod
+    def _databaseAllowsUELoad(item):
+        try:
+            return item.itemData()[9] in (u"制作中", u"已完成")
+        except (IndexError, KeyError, TypeError):
+            return False
 
     def _prioritizeStateScans(self):
         if self._state_closed:

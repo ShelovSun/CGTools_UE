@@ -1379,7 +1379,15 @@ def export_external_asset_thumbnail(asset_file_path, output_png_path):
             result = export_method(str(asset_file_path), str(output_png_path))
         except TypeError:
             result = export_method(str(asset_file_path), str(output_png_path), "")
-        return _decode_bridge_result(result)
+        # UE 5.7's bool + single out-string binding returns "" on success,
+        # and None on failure. Confirm the actual file instead of treating ""
+        # as a failed export. Other bridge APIs retain their own decoding.
+        if isinstance(result, str) and not result:
+            return os.path.isfile(output_png_path), ""
+        success, error = _decode_bridge_result(result)
+        if not success and not error:
+            error = u"原生接口未生成缩略图：{0}".format(asset_file_path)
+        return success and os.path.isfile(output_png_path), error
     except Exception as exc:
         return False, u"读取外部资产缩略图失败：{0}".format(exc)
 

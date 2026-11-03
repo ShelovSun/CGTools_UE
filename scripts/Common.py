@@ -341,9 +341,11 @@ def create_outliner_contextMenu():
 #             unreal.log_warning("迁移失败或没有资产被迁移。")
 
 
-create_menu()
-create_asset_contextMenu()
-create_sequence_contextMenu()
+# The thumbnail commandlet reads assets without an editor Main menu.
+if not os.environ.get("CGTOOLS_VFX_THUMBNAIL_JOB"):
+    create_menu()
+    create_asset_contextMenu()
+    create_sequence_contextMenu()
 # create_outliner_contextMenu()
 
 

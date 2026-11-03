@@ -33,6 +33,7 @@ if scriptsPath not in sys.path:
 from .config import SMConfig, commonSettingPath
 from .utils.ue_window_style import (
     UEWindowFrameOverlay,
+    UEWindowResizeBorder,
     UEWindowResizeGrip,
     UEWindowTitleBar,
     apply_ue_stylesheet,
@@ -45,7 +46,7 @@ class AssetsManagerUI(QtWidgets.QWidget):
     scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/')
     sm_temp = "{}/ShotManagerTemp".format(os.environ.get('APPDATA'))
     SM_SETTING_JSON = "{}/setting.json".format(sm_temp)
-    VERSION = "4.3.28"
+    VERSION = "4.3.31"
     def __init__(self, parent=None):
         super(AssetsManagerUI, self).__init__(parent)
 
@@ -122,6 +123,7 @@ class AssetsManagerUI(QtWidgets.QWidget):
         self._positionResizeGrip()
         self._resize_grip.raise_()
         self._frame_overlay = UEWindowFrameOverlay(self)
+        self._resize_border = UEWindowResizeBorder(self)
 
         self._tab_initialized = set()
         self._tab_build_pending = set()
@@ -220,6 +222,9 @@ class AssetsManagerUI(QtWidgets.QWidget):
         frame = getattr(self, "_frame_overlay", None)
         if frame is not None:
             frame.raise_()
+        border = getattr(self, "_resize_border", None)
+        if border is not None:
+            border.raise_()
 
     def rememberSettings(self):
         settings = QtCore.QSettings('AssetsManagerUE', 'AssetsManagerUESettings')

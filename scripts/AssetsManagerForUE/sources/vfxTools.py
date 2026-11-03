@@ -17,6 +17,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from ..utils import messageBox, myWidget
 from ..utils.source_folder_menu import add_open_source_folder_action
 from . import ue_asset_service
+from .vfx_thumbnail_cache import VfxThumbnailCache
 
 
 VFX_CONTENT_CANDIDATES = (
@@ -51,7 +52,9 @@ def _thumbnail_paths(source_file):
     root = os.path.join(os.environ.get("TEMP") or os.getcwd(),
                         "AssetsManagerVfxThumbnails")
     png = os.path.join(root, digest + ".png")
-    return png, png + ".no_thumbnail"
+    # Keep existing valid PNGs. Only invalidate old negative results, which
+    # meant "no standard thumbnail" rather than "no internal preview either".
+    return png, png + ".no_thumbnail.v2"
 
 
 class _VfxCardList(myWidget.MainQListWiget):
@@ -163,9 +166,12 @@ class _LibraryScanTask(QtCore.QRunnable):
             source_file = os.path.abspath(entry.path)
             thumbnail, no_thumbnail = _thumbnail_paths(source_file)
             try:
-                modified = int(entry.stat().st_mtime)
+                source_stat = entry.stat()
+                modified = int(source_stat.st_mtime)
+                source_signature = [int(source_stat.st_size), int(source_stat.st_mtime_ns)]
             except OSError:
                 modified = 0
+                source_signature = None
             directory["assets"].append({
                 "name": os.path.splitext(entry.name)[0],
                 # 保留扩展名，避免同一目录中同名文件夹与特效节点冲突。
@@ -176,6 +182,7 @@ class _LibraryScanTask(QtCore.QRunnable):
                 "object_path": ue_asset_service.object_path_for_source_file(
                     source_file, content_root),
                 "modified": modified,
+                "source_signature": source_signature,
                 "thumbnail": thumbnail,
                 "no_thumbnail": no_thumbnail,
                 "plan": ue_asset_service.build_single_package_import_plan(
@@ -205,9 +212,12 @@ class VfxToolsUI(QtWidgets.QWidget):
         self._copy_thread = None
         self._copy_worker = None
         self._copy_source = ""
-        self._thumbnail_generation = 0
-        self._thumbnail_queue = []
-        self._thumbnail_bridge_error_reported = False
+        self._thumbnail_cache = None
+        self._thumbnail_assets = []
+        self._thumbnail_timer = QtCore.QTimer(self)
+        self._thumbnail_timer.setSingleShot(True)
+        self._thumbnail_timer.setInterval(150)
+        self._thumbnail_timer.timeout.connect(self._requestVisibleThumbnails)
         self._browser_sync_generation = 0
         self._fallback_icon = "%s/icon/Default.png" % self.scriptsPath
         self._folder_icon = "%s/icon/floder.png" % self.scriptsPath
@@ -344,6 +354,10 @@ class VfxToolsUI(QtWidgets.QWidget):
             lambda item: ue_asset_service.resolve_local_drag_asset(
                 item.uePlan(), object_path=item.itemData()[10]))
         self.card_list.assetDragRejected.connect(self._dragRejected)
+        self.card_list.verticalScrollBar().valueChanged.connect(self._scheduleVisibleThumbnails)
+        self.card_list.horizontalScrollBar().valueChanged.connect(self._scheduleVisibleThumbnails)
+        self.card_list.viewport().installEventFilter(self)
+        self.installEventFilter(self)
 
     def _toolButton(self, icon_name, tooltip):
         button = QtWidgets.QPushButton()
@@ -366,8 +380,10 @@ class VfxToolsUI(QtWidgets.QWidget):
         if self._scan_task is not None:
             self._scan_task.cancel()
             self._scan_task = None
-        self._thumbnail_generation += 1
-        self._thumbnail_queue = []
+        self._thumbnail_assets = []
+        if self._thumbnail_cache is not None:
+            self._thumbnail_cache.stop()
+            self._thumbnail_cache.reset_failures()
         self.category_list.setEnabled(False)
         self.refresh_button.setEnabled(False)
         self.parent_button.setEnabled(False)
@@ -485,8 +501,7 @@ class VfxToolsUI(QtWidgets.QWidget):
         if generation != self._scan_generation:
             return
         self._scan_task = None
-        self._thumbnail_generation += 1
-        self._thumbnail_queue = []
+        self._thumbnail_assets = []
         self.category_list.setEnabled(True)
         self.refresh_button.setEnabled(True)
         self._library_payload = {}
@@ -689,6 +704,7 @@ class VfxToolsUI(QtWidgets.QWidget):
     def _selectionChanged(self):
         if self._rebuilding_cards:
             return
+        self._scheduleVisibleThumbnails()
         selected = self.card_list.currentItem()
         asset = self._assetForItem(selected)
         if selected is not None:
@@ -717,38 +733,52 @@ class VfxToolsUI(QtWidgets.QWidget):
 
     # ------------------------------------------------------------- 缩略图缓存
     def _queueThumbnails(self, assets):
-        self._thumbnail_generation += 1
-        generation = self._thumbnail_generation
-        self._thumbnail_queue = [
-            value for value in assets
-            if not os.path.isfile(value["thumbnail"])
-            and not os.path.isfile(value["no_thumbnail"])]
-        if self._thumbnail_queue:
-            QtCore.QTimer.singleShot(0, lambda: self._exportNextThumbnail(generation))
+        self._thumbnail_assets = list(assets)
+        self._scheduleVisibleThumbnails()
 
-    def _exportNextThumbnail(self, generation):
-        if generation != self._thumbnail_generation or not self._thumbnail_queue:
-            return
-        asset = self._thumbnail_queue.pop(0)
-        success, error = ue_asset_service.export_external_asset_thumbnail(
-            asset["source_file"], asset["thumbnail"])
-        if success and os.path.isfile(asset["thumbnail"]):
-            self._updateCardThumbnail(asset["source_file"], asset["thumbnail"])
-        elif (u"没有保存嵌入缩略图" in error or u"缩略图表为空" in error
-              or u"没有可读取" in error or u"数据为空" in error):
+    def _scheduleVisibleThumbnails(self, *args):
+        self._thumbnail_timer.start()
+
+    def eventFilter(self, watched, event):
+        if event.type() in (QtCore.QEvent.Resize, QtCore.QEvent.Show, QtCore.QEvent.Hide):
+            self._scheduleVisibleThumbnails()
+        return super(VfxToolsUI, self).eventFilter(watched, event)
+
+    def _requestVisibleThumbnails(self):
+        assets = []
+        if self.isVisible() and self.card_list.isVisible():
+            viewport = self.card_list.viewport().rect()
+            by_source = {os.path.normcase(asset["source_file"]): asset for asset in self._thumbnail_assets}
+            for index in range(self.card_list.count()):
+                item = self.card_list.item(index)
+                asset = by_source.get(self._sourceForItem(item))
+                if asset is not None and self.card_list.visualItemRect(item).intersects(viewport):
+                    assets.append(asset)
+            selected = self._assetForItem(self.card_list.currentItem())
+            if selected in assets:
+                assets.remove(selected)
+                assets.insert(0, selected)
+        if self._thumbnail_cache is None and assets and unreal is not None:
             try:
-                os.makedirs(os.path.dirname(asset["no_thumbnail"]), exist_ok=True)
-                with open(asset["no_thumbnail"], "w", encoding="utf-8") as stream:
-                    stream.write("no embedded thumbnail\n")
-            except OSError:
-                pass
-        elif (u"低于 1.2.0" in error or u"未启用 CGToolsAssetBridge" in error):
-            self._thumbnail_queue = []
-            if not self._thumbnail_bridge_error_reported:
-                self._thumbnail_bridge_error_reported = True
-                self.infoMsg("warning", error + u"；当前暂用通用特效图标")
-            return
-        QtCore.QTimer.singleShot(8, lambda: self._exportNextThumbnail(generation))
+                engine = unreal.Paths.convert_relative_path_to_full(unreal.Paths.engine_dir())
+                self._thumbnail_cache = VfxThumbnailCache(engine, self)
+                self._thumbnail_cache.ready.connect(self._thumbnailReady)
+                self._thumbnail_cache.warning.connect(self._thumbnailWarning)
+            except Exception as exc:
+                self._thumbnailWarning(str(exc))
+                return
+        if self._thumbnail_cache is not None:
+            self._thumbnail_cache.request(assets, self._library_payload.get("content_root", ""))
+
+    def _thumbnailReady(self, source_file, thumbnail):
+        asset = self._assets_by_source.get(os.path.normcase(source_file))
+        if asset is not None and asset["thumbnail"] == thumbnail:
+            self._updateCardThumbnail(source_file, thumbnail)
+
+    def _thumbnailWarning(self, error):
+        self.infoMsg("warning", error)
+        if unreal is not None:
+            unreal.log_warning(error)
 
     def _updateCardThumbnail(self, source_file, thumbnail):
         item = self._itemForSource(source_file)
@@ -1048,10 +1078,12 @@ class VfxToolsUI(QtWidgets.QWidget):
         messageBox.show_msg(self.message_icon, icon, self.message_label, str(text))
 
     def shutdownThreads(self):
+        self._thumbnail_timer.stop()
+        self._thumbnail_assets = []
+        if self._thumbnail_cache is not None:
+            self._thumbnail_cache.stop()
         self._scan_generation += 1
         self._browser_sync_generation += 1
-        self._thumbnail_generation += 1
-        self._thumbnail_queue = []
         if self._scan_task is not None:
             self._scan_task.cancel()
             self._scan_task = None

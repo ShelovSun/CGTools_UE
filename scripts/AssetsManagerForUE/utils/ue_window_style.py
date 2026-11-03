@@ -398,6 +398,141 @@ class UEWindowFrameOverlay(QtWidgets.QWidget):
         painter.end()
 
 
+class UEWindowResizeBorder(QtWidgets.QWidget):
+    """A thin input-only ring restoring all eight frameless resize directions."""
+
+    BORDER_WIDTH = 6
+    CORNER_EXTENT = 16
+
+    def __init__(self, window):
+        super(UEWindowResizeBorder, self).__init__(window)
+        self._window = window
+        self._drag_edges = QtCore.Qt.Edges()
+        self._drag_origin = None
+        self._drag_geometry = None
+        self.setObjectName("UEWindowResizeBorder")
+        self.setAttribute(QtCore.Qt.WA_NoSystemBackground, True)
+        self.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.setMouseTracking(True)
+        window.installEventFilter(self)
+        self._sync_geometry()
+
+    def _sync_geometry(self):
+        self.setGeometry(self._window.rect())
+        inner = self.rect().adjusted(
+            self.BORDER_WIDTH, self.BORDER_WIDTH,
+            -self.BORDER_WIDTH, -self.BORDER_WIDTH)
+        # The entire content area remains outside this widget's input region.
+        self.setMask(QtGui.QRegion(self.rect()).subtracted(QtGui.QRegion(inner)))
+        enabled = not (self._window.isMaximized() or self._window.isFullScreen())
+        if not enabled:
+            self._finish_resize()
+        self.setVisible(enabled)
+        self.raise_()
+
+    def eventFilter(self, watched, event):
+        if watched is self._window:
+            if event.type() in (QtCore.QEvent.Resize, QtCore.QEvent.Show,
+                                QtCore.QEvent.WindowStateChange):
+                self._sync_geometry()
+            elif event.type() == QtCore.QEvent.Hide:
+                self._finish_resize()
+        return False
+
+    def _edges_at(self, point):
+        edges = QtCore.Qt.Edges()
+        if (not self.rect().contains(point) or self._window.isMaximized()
+                or self._window.isFullScreen()):
+            return edges
+        x, y = point.x(), point.y()
+        width, height = self.width(), self.height()
+        if not (x < self.BORDER_WIDTH or x >= width - self.BORDER_WIDTH
+                or y < self.BORDER_WIDTH or y >= height - self.BORDER_WIDTH):
+            return edges
+        if self._window.minimumWidth() < self._window.maximumWidth():
+            if x < self.CORNER_EXTENT:
+                edges |= QtCore.Qt.LeftEdge
+            elif x >= width - self.CORNER_EXTENT:
+                edges |= QtCore.Qt.RightEdge
+        if self._window.minimumHeight() < self._window.maximumHeight():
+            if y < self.CORNER_EXTENT:
+                edges |= QtCore.Qt.TopEdge
+            elif y >= height - self.CORNER_EXTENT:
+                edges |= QtCore.Qt.BottomEdge
+        return edges
+
+    def _update_cursor(self, edges):
+        horizontal = edges & (QtCore.Qt.LeftEdge | QtCore.Qt.RightEdge)
+        vertical = edges & (QtCore.Qt.TopEdge | QtCore.Qt.BottomEdge)
+        if horizontal and vertical:
+            descending = edges in (QtCore.Qt.LeftEdge | QtCore.Qt.TopEdge,
+                                   QtCore.Qt.RightEdge | QtCore.Qt.BottomEdge)
+            self.setCursor(QtCore.Qt.SizeFDiagCursor if descending else QtCore.Qt.SizeBDiagCursor)
+        elif horizontal:
+            self.setCursor(QtCore.Qt.SizeHorCursor)
+        elif vertical:
+            self.setCursor(QtCore.Qt.SizeVerCursor)
+        else:
+            self.unsetCursor()
+
+    def _start_system_resize(self, edges):
+        handle = self._window.windowHandle()
+        try:
+            return bool(handle and handle.startSystemResize(edges))
+        except (AttributeError, RuntimeError):
+            return False
+
+    def mousePressEvent(self, event):
+        edges = self._edges_at(event.position().toPoint())
+        if event.button() == QtCore.Qt.LeftButton and edges:
+            self._update_cursor(edges)
+            # Prefer Qt's native Windows sizing loop, including DPI handling.
+            if not self._start_system_resize(edges):
+                self._drag_edges = edges
+                self._drag_origin = event.globalPosition().toPoint()
+                self._drag_geometry = QtCore.QRect(self._window.geometry())
+                self.grabMouse()
+            event.accept()
+            return
+        super(UEWindowResizeBorder, self).mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_origin is not None:
+            if not event.buttons() & QtCore.Qt.LeftButton:
+                self._finish_resize()
+                return
+            delta = event.globalPosition().toPoint() - self._drag_origin
+            rect = self._drag_geometry
+            left, top = rect.x(), rect.y()
+            right, bottom = left + rect.width(), top + rect.height()
+            minimum = self._window.minimumSize().expandedTo(self._window.minimumSizeHint())
+            maximum = self._window.maximumSize().expandedTo(minimum)
+            if self._drag_edges & QtCore.Qt.LeftEdge:
+                left = min(max(left + delta.x(), right - maximum.width()), right - minimum.width())
+            elif self._drag_edges & QtCore.Qt.RightEdge:
+                right = min(max(right + delta.x(), left + minimum.width()), left + maximum.width())
+            if self._drag_edges & QtCore.Qt.TopEdge:
+                top = min(max(top + delta.y(), bottom - maximum.height()), bottom - minimum.height())
+            elif self._drag_edges & QtCore.Qt.BottomEdge:
+                bottom = min(max(bottom + delta.y(), top + minimum.height()), top + maximum.height())
+            self._window.setGeometry(left, top, right - left, bottom - top)
+            event.accept()
+            return
+        self._update_cursor(self._edges_at(event.position().toPoint()))
+        super(UEWindowResizeBorder, self).mouseMoveEvent(event)
+
+    def _finish_resize(self):
+        self._drag_origin = None
+        self._drag_geometry = None
+        self._drag_edges = QtCore.Qt.Edges()
+        if QtWidgets.QWidget.mouseGrabber() is self:
+            self.releaseMouse()
+
+    def mouseReleaseEvent(self, event):
+        self._finish_resize()
+        super(UEWindowResizeBorder, self).mouseReleaseEvent(event)
+
+
 class UEWindowResizeGrip(QtWidgets.QSizeGrip):
     """Small visible bottom-right resize handle for a frameless window."""
 

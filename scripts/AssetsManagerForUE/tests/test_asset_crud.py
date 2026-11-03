@@ -103,7 +103,7 @@ class CrudDatabaseTests(unittest.TestCase):
         self.db.execute('CREATE TABLE asset (' + ','.join('"asset.' + col + '"' for col in
             service.ROW_FIELDS["asset"] + ("type",)) + ')')
         self.db.execute('CREATE TABLE scene (' + ','.join('"scene.' + col + '"' for col in
-            ("date", "name", "zh_name", "artist", "status", "icon", "note", "type")) + ')')
+            ("date", "name", "zh_name", "artist", "status", "icon", "note", "ue_status", "ue_artist", "type")) + ')')
         self.conn = Connection(self.db)
         self.connect = self.enterContext(mock.patch.object(service, "_connect", return_value=self.conn))
 
@@ -132,6 +132,7 @@ class CrudDatabaseTests(unittest.TestCase):
         result = self.add("scene", "Tree", "树")
         row = result["row"]
         self.assertEqual(row[3:7], ("artist", "未开始", "artist", "未开始"))
+        self.assertEqual(row[9:], ("未开始", ""))
         folder = self.root / "Project/Scenes/Nature/Tree"
         self.assertEqual({p.name for p in folder.iterdir()}, set(service.SUBFOLDERS["scene"]))
         self.assertFalse((self.root / "Project/Animations").exists())
