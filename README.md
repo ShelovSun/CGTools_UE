@@ -3,7 +3,7 @@
 Git 仓库根目录为 `UE574`，用于管理 UE Python 工具和原生插件。
 
 - [Python](Python/README.md)：AssetsManager、ShotsManager 和配套 Python 工具。
-- [CGToolsPublisher](Plugins/Marketplace/CGToolsPublisher/README.md)：UE 资产发布插件，当前版本 **1.8.0**，支持同类型资产在同一窗口批量发布。
+- [CGToolsPublisher](Plugins/Marketplace/CGToolsPublisher/README.md)：UE 资产发布插件，当前版本 **1.8.2**，支持同类型资产在同一窗口批量发布、特效双击空目录改名及取消覆盖时保留内容浏览器状态；自动显示修复配套 AssetRegistryRepair **1.0.2**。
 
 2026-11-03 将原 `Python` 仓库扩大到本目录。保留原提交历史，通过一次普通提交将原路径归入 `Python/`，没有改写历史。查看旧 Python 文件历史时可使用 `git log --follow -- Python/文件路径`。
 

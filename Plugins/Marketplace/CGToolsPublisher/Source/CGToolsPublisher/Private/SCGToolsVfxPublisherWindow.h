@@ -50,6 +50,8 @@ private:
         TSharedPtr<FDirectoryNode> Item, const TSharedRef<STableViewBase>& OwnerTable) const;
     void OnDirectorySelected(TSharedPtr<FDirectoryNode> Item, ESelectInfo::Type SelectInfo);
     void OnDirectoryClicked(TSharedPtr<FDirectoryNode> Item);
+    void OnDirectoryDoubleClicked(TSharedPtr<FDirectoryNode> Item);
+    void ShowFolderNameDialog(const FString& Directory, bool bRename);
     FReply OnNewFolder();
     bool CanCreateFolder() const;
     bool CanConfirm() const;

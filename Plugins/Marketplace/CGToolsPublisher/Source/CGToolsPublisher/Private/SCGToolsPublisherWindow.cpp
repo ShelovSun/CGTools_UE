@@ -32,6 +32,7 @@
 #include "IDesktopPlatform.h"
 #include "Input/CursorReply.h"
 #include "InputCoreTypes.h"
+#include "Interfaces/IPluginManager.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/DateTime.h"
 #include "Misc/EngineVersion.h"
@@ -947,6 +948,14 @@ namespace CGToolsPublisher
         FString& OutMessage)
     {
         OutMessage.Reset();
+        const TSharedPtr<IPlugin> RepairPlugin = IPluginManager::Get().FindPlugin(TEXT("AssetRegistryRepair"));
+        if (!RepairPlugin.IsValid() || RepairPlugin->GetDescriptor().Version < 3)
+        {
+            // Older binaries still navigate to folders when MaxAssetsToSync=0.
+            // Fail quietly rather than invoke that side effect after cancellation.
+            OutMessage = TEXT("发布后的静默资产显示修复需要 AssetRegistryRepair 1.0.2 或更新版本，请更新配套插件。");
+            return false;
+        }
         FModuleManager::Get().LoadModule(TEXT("AssetRegistryRepair"));
 
         UClass* RepairLibraryClass = FindObject<UClass>(
@@ -1040,7 +1049,7 @@ namespace CGToolsPublisher
         IncludeMapsProperty->SetPropertyValue_InContainer(ParameterMemory, false);
         ForceLoadProperty->SetPropertyValue_InContainer(ParameterMemory, true);
         MaxLoadProperty->SetPropertyValue_InContainer(ParameterMemory, 2000);
-        MaxSyncProperty->SetPropertyValue_InContainer(ParameterMemory, 30);
+        MaxSyncProperty->SetPropertyValue_InContainer(ParameterMemory, 0);
 
         RepairLibraryObject->ProcessEvent(RepairFunction, ParameterMemory);
 

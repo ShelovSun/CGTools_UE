@@ -13,6 +13,7 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture.h"
 #include "Engine/Texture2D.h"
+#include "Tests/CGToolsPublisherBrowserTestScope.h"
 #include "FileHelpers.h"
 #include "Framework/Application/SlateApplication.h"
 #include "HAL/FileManager.h"
@@ -50,6 +51,10 @@
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SWindow.h"
 #include "Widgets/Text/STextBlock.h"
+
+#if PLATFORM_WINDOWS
+#include "Windows/WindowsHWrapper.h"
+#endif
 
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Factories/Factory.h"
@@ -105,11 +110,16 @@ namespace
         return FPackageName::IsValidLongPackageName(OutFolder);
     }
 
-    bool CreateChildDirectory(const FString& Parent, const FString& InName, FString& OutDirectory,
-        FString& OutError, const FString& Root = VfxRootDirectory)
+    bool IsOrganizerDirectoryName(const FString& Name)
     {
-        OutDirectory.Reset();
-        const FString Name = InName.TrimStartAndEnd();
+        return Name.Equals(TEXT("M_F"), ESearchCase::IgnoreCase)
+            || Name.Equals(TEXT("Mat"), ESearchCase::IgnoreCase)
+            || Name.Equals(TEXT("Mesh"), ESearchCase::IgnoreCase)
+            || Name.Equals(TEXT("Tex"), ESearchCase::IgnoreCase);
+    }
+
+    bool ValidateDirectoryName(const FString& Name, FString& OutError)
+    {
         FString Stem = Name;
         int32 DotIndex;
         if (Stem.FindChar(TEXT('.'), DotIndex))
@@ -128,6 +138,15 @@ namespace
             OutError = TEXT("请输入有效的单层文件夹名称，可使用中文、字母、数字和下划线。");
             return false;
         }
+        return true;
+    }
+
+    bool CreateChildDirectory(const FString& Parent, const FString& InName, FString& OutDirectory,
+        FString& OutError, const FString& Root = VfxRootDirectory)
+    {
+        OutDirectory.Reset();
+        const FString Name = InName.TrimStartAndEnd();
+        if (!ValidateDirectoryName(Name, OutError)) { return false; }
         IFileManager& Files = IFileManager::Get();
         if (!IsDirectoryWithin(Parent, Root) || !Files.DirectoryExists(*Parent))
         {
@@ -147,6 +166,122 @@ namespace
         }
         OutDirectory = NewDirectory;
         OutError.Reset();
+        return true;
+    }
+
+    bool ValidateEmptyDirectoryTree(const FString& Directory, FString& OutError,
+        const FString& Root = VfxRootDirectory)
+    {
+        OutError.Reset();
+        const FString Source = NormalizeDirectory(Directory);
+        const FString NormalizedRoot = NormalizeDirectory(Root);
+        IPlatformFile& Physical = FPlatformFileManager::Get().GetPlatformPhysical();
+        if (!IsDirectoryWithin(Source, NormalizedRoot)
+            || Source.Equals(NormalizedRoot, ESearchCase::IgnoreCase)
+            || !Physical.DirectoryExists(*Source))
+        {
+            OutError = TEXT("只能重命名 VFX 下可访问的子文件夹，请刷新后重试。\n") + Source;
+            return false;
+        }
+        // Never follow junctions/symlinks, including ancestors of the selected directory.
+        for (FString Ancestor = Source; ; Ancestor = FPaths::GetPath(Ancestor))
+        {
+            if (Physical.IsSymlink(*Ancestor) != ESymlinkResult::NonSymlink)
+            {
+                OutError = TEXT("不支持重命名包含链接路径的文件夹。\n") + Ancestor;
+                return false;
+            }
+            if (Ancestor.Equals(NormalizedRoot, ESearchCase::IgnoreCase)) { break; }
+        }
+#if PLATFORM_WINDOWS
+        TArray<FString> Pending = { Source };
+        while (!Pending.IsEmpty())
+        {
+            const FString Current = Pending.Pop(EAllowShrinking::No);
+            WIN32_FIND_DATAW Data;
+            const HANDLE Handle = FindFirstFileW(*(Current / TEXT("*")), &Data);
+            if (Handle == INVALID_HANDLE_VALUE)
+            {
+                const DWORD Code = GetLastError();
+                if (Code == ERROR_FILE_NOT_FOUND && Physical.DirectoryExists(*Current)) { continue; }
+                OutError = FString::Printf(TEXT("无法完整检查文件夹，未执行改名。请检查网络连接和读取权限。\n%s\nWindows 错误码：%lu"), *Current, Code);
+                return false;
+            }
+            ON_SCOPE_EXIT { FindClose(Handle); };
+            // UE's directory iterator reports success for some Windows enumeration
+            // errors. Read the native error codes so unreadable is never treated as empty.
+            do
+            {
+                if (FCString::Strcmp(Data.cFileName, TEXT(".")) == 0
+                    || FCString::Strcmp(Data.cFileName, TEXT("..")) == 0)
+                {
+                    continue;
+                }
+                const FString Path = Current / Data.cFileName;
+                if ((Data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+                {
+                    OutError = TEXT("该文件夹或下级目录中含有文件，仅支持空目录改名。\n")
+                        TEXT("已有特效请在目标 VFX 工程的内容浏览器中重命名并修复引用。\n\n") + Path;
+                    return false;
+                }
+                if ((Data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+                {
+                    OutError = TEXT("不支持重命名包含链接路径的文件夹。\n") + Path;
+                    return false;
+                }
+                Pending.Add(Path);
+            } while (FindNextFileW(Handle, &Data));
+            const DWORD Code = GetLastError();
+            if (Code != ERROR_NO_MORE_FILES)
+            {
+                OutError = FString::Printf(TEXT("文件夹检查中断，未执行改名。请检查网络连接和读取权限。\n%s\nWindows 错误码：%lu"), *Current, Code);
+                return false;
+            }
+        }
+        return true;
+#else
+        OutError = TEXT("空目录安全改名当前仅支持 Windows。");
+        return false;
+#endif
+    }
+
+    bool RenameEmptyDirectory(const FString& Directory, const FString& InName, FString& OutDirectory,
+        FString& OutError, const FString& Root = VfxRootDirectory)
+    {
+        OutDirectory.Reset();
+        OutError.Reset();
+        const FString Name = InName.TrimStartAndEnd();
+        if (!ValidateDirectoryName(Name, OutError)) { return false; }
+        if (IsOrganizerDirectoryName(Name))
+        {
+            OutError = TEXT("M_F、Mat、Mesh、Tex 是隐藏的特效辅助目录名称，请使用其他名称。");
+            return false;
+        }
+        const FString Source = NormalizeDirectory(Directory);
+        const FString Destination = NormalizeDirectory(FPaths::GetPath(Source) / Name);
+        if (!ValidateEmptyDirectoryTree(Source, OutError, Root)) { return false; }
+        if (Source.Equals(Destination, ESearchCase::CaseSensitive))
+        {
+            OutDirectory = Source;
+            return true;
+        }
+        IPlatformFile& Physical = FPlatformFileManager::Get().GetPlatformPhysical();
+        if (Physical.DirectoryExists(*Destination) || Physical.FileExists(*Destination))
+        {
+            OutError = Source.Equals(Destination, ESearchCase::IgnoreCase)
+                ? TEXT("暂不支持只修改字母大小写，请使用其他名称。")
+                : TEXT("该名称已存在，请使用其他文件夹名称。");
+            return false;
+        }
+        // Windows' physical MoveFile is one non-overwriting directory rename.
+        // Do not fall back to copying/deleting or merging an existing directory.
+        if (!Physical.MoveFile(*Destination, *Source))
+        {
+            OutError = TEXT("文件夹重命名失败，请检查网络连接、写入权限及文件夹占用情况。\n")
+                + Source + TEXT("\n→ ") + Destination;
+            return false;
+        }
+        OutDirectory = Destination;
         return true;
     }
 
@@ -1021,6 +1156,7 @@ void SCGToolsVfxPublisherWindow::Construct(const FArguments& InArgs)
                     .OnGetChildren(this, &SCGToolsVfxPublisherWindow::GetDirectoryChildren)
                     .OnSelectionChanged(this, &SCGToolsVfxPublisherWindow::OnDirectorySelected)
                     .OnMouseButtonClick(this, &SCGToolsVfxPublisherWindow::OnDirectoryClicked)
+                    .OnMouseButtonDoubleClick(this, &SCGToolsVfxPublisherWindow::OnDirectoryDoubleClicked)
                     .IsEnabled_Lambda([this]() { return !bPublishing; })
                 ]
                 + SVerticalBox::Slot().AutoHeight().Padding(0.0f, 12.0f, 0.0f, 0.0f).HAlign(HAlign_Right)
@@ -1126,10 +1262,7 @@ void SCGToolsVfxPublisherWindow::GetDirectoryChildren(
         for (const FString& Name : Names)
         {
             // Organizer buckets hold dependencies, not publishing destinations.
-            if (Name.Equals(TEXT("M_F"), ESearchCase::IgnoreCase)
-                || Name.Equals(TEXT("Mat"), ESearchCase::IgnoreCase)
-                || Name.Equals(TEXT("Mesh"), ESearchCase::IgnoreCase)
-                || Name.Equals(TEXT("Tex"), ESearchCase::IgnoreCase))
+            if (IsOrganizerDirectoryName(Name))
             {
                 continue;
             }
@@ -1144,6 +1277,7 @@ TSharedRef<ITableRow> SCGToolsVfxPublisherWindow::GenerateDirectoryRow(
     TSharedPtr<FDirectoryNode> Item, const TSharedRef<STableViewBase>& OwnerTable) const
 {
     return SNew(STableRow<TSharedPtr<FDirectoryNode>>, OwnerTable).Padding(6.0f)
+    .ToolTipText(LOCTEXT("RenameEmptyVfxFolderTooltip", "双击重命名空文件夹；已有文件的目录请在目标 VFX 工程中修改。"))
     [
         SNew(SHorizontalBox)
         + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.0f, 0.0f, 8.0f, 0.0f)
@@ -1176,6 +1310,19 @@ void SCGToolsVfxPublisherWindow::OnDirectoryClicked(TSharedPtr<FDirectoryNode> I
     }
 }
 
+void SCGToolsVfxPublisherWindow::OnDirectoryDoubleClicked(TSharedPtr<FDirectoryNode> Item)
+{
+    if (bPublishing || !Item.IsValid()) { return; }
+    FString Error;
+    if (!ValidateEmptyDirectoryTree(Item->Directory, Error))
+    {
+        FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(Error),
+            LOCTEXT("RenameVfxFolderTitle", "重命名文件夹"));
+        return;
+    }
+    ShowFolderNameDialog(Item->Directory, true);
+}
+
 bool SCGToolsVfxPublisherWindow::CanConfirm() const
 {
     FString PackageFolder;
@@ -1189,21 +1336,29 @@ FReply SCGToolsVfxPublisherWindow::OnNewFolder()
     {
         return FReply::Handled();
     }
-    const FString ParentDirectory = SelectedDirectory.IsEmpty() ? VfxRootDirectory : SelectedDirectory;
-    const TSharedRef<FString> Name = MakeShared<FString>();
+    ShowFolderNameDialog(SelectedDirectory.IsEmpty() ? VfxRootDirectory : SelectedDirectory, false);
+    return FReply::Handled();
+}
+
+void SCGToolsVfxPublisherWindow::ShowFolderNameDialog(const FString& Directory, bool bRename)
+{
+    const TSharedRef<FString> Name = MakeShared<FString>(bRename ? FPaths::GetCleanFilename(Directory) : FString());
     const TSharedRef<FString> Error = MakeShared<FString>();
     const TSharedRef<SWindow> Dialog = SNew(SWindow)
-        .Title(LOCTEXT("NewVfxFolderTitle", "新建文件夹"))
+        .Title(bRename ? LOCTEXT("RenameVfxFolderTitle", "重命名文件夹") : LOCTEXT("NewVfxFolderTitle", "新建文件夹"))
         .ClientSize(FVector2D(420.0f, 140.0f))
         .SizingRule(ESizingRule::Autosized)
         .SupportsMinimize(false).SupportsMaximize(false);
     const TWeakPtr<SWindow> WeakDialog = Dialog;
-    const auto CreateFolder = [this, ParentDirectory, Name, Error, WeakDialog]()
+    const auto ApplyName = [this, Directory, bRename, Name, Error, WeakDialog]()
     {
-        FString CreatedDirectory;
-        if (CreateChildDirectory(ParentDirectory, *Name, CreatedDirectory, *Error))
+        FString UpdatedDirectory;
+        const bool bSucceeded = bRename
+            ? RenameEmptyDirectory(Directory, *Name, UpdatedDirectory, *Error)
+            : CreateChildDirectory(Directory, *Name, UpdatedDirectory, *Error);
+        if (bSucceeded)
         {
-            SelectedDirectory = CreatedDirectory;
+            SelectedDirectory = UpdatedDirectory;
             RefreshDirectoryTree();
             if (const TSharedPtr<SWindow> Window = WeakDialog.Pin())
             {
@@ -1221,13 +1376,15 @@ FReply SCGToolsVfxPublisherWindow::OnNewFolder()
             [
                 SAssignNew(NameInput, SEditableTextBox)
                 .MinDesiredWidth(360.0f)
+                .Text(FText::FromString(*Name))
+                .SelectAllTextWhenFocused(true)
                 .HintText(LOCTEXT("NewVfxFolderName", "文件夹名称"))
                 .OnTextChanged_Lambda([Name, Error](const FText& Text) { *Name = Text.ToString(); Error->Reset(); })
-                .OnTextCommitted_Lambda([CreateFolder](const FText&, ETextCommit::Type Commit)
+                .OnTextCommitted_Lambda([ApplyName](const FText&, ETextCommit::Type Commit)
                 {
                     if (Commit == ETextCommit::OnEnter)
                     {
-                        CreateFolder();
+                        ApplyName();
                     }
                 })
             ]
@@ -1242,7 +1399,7 @@ FReply SCGToolsVfxPublisherWindow::OnNewFolder()
                 SNew(SHorizontalBox)
                 + SHorizontalBox::Slot().AutoWidth().Padding(0.0f, 0.0f, 10.0f, 0.0f)
                 [
-                    SNew(SButton).Text(LOCTEXT("CreateVfxFolder", "确定")).OnClicked_Lambda(CreateFolder)
+                    SNew(SButton).Text(LOCTEXT("CreateVfxFolder", "确定")).OnClicked_Lambda(ApplyName)
                 ]
                 + SHorizontalBox::Slot().AutoWidth()
                 [
@@ -1260,7 +1417,6 @@ FReply SCGToolsVfxPublisherWindow::OnNewFolder()
         ]);
     Dialog->SetWidgetToFocusOnActivate(NameInput);
     FSlateApplication::Get().AddModalWindow(Dialog, FSlateApplication::Get().FindWidgetWindow(AsShared()), false);
-    return FReply::Handled();
 }
 
 bool SCGToolsVfxPublisherWindow::CanCreateFolder() const
@@ -1607,6 +1763,79 @@ bool FCGToolsVfxCreateFolderTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCGToolsVfxRenameFolderTest, "CGTools.Publisher.VFX.RenameEmptyFolderSafely",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FCGToolsVfxRenameFolderTest::RunTest(const FString& Parameters)
+{
+    const FString Base = NormalizeDirectory(FPaths::ProjectSavedDir() / TEXT("CGToolsPublisher/Tests"));
+    const FString Fixture = Base / FGuid::NewGuid().ToString(EGuidFormats::Digits);
+    const FString Content = Fixture / TEXT("Content");
+    const FString Root = Content / TEXT("VFX");
+    const FString Parent = Root / TEXT("Team1");
+    IFileManager& Files = IFileManager::Get();
+    ON_SCOPE_EXIT
+    {
+        if (IsDirectoryWithin(Fixture, Base) && Fixture != Base)
+        {
+            Files.DeleteDirectory(*Fixture, false, true);
+        }
+    };
+    const FString Old = Parent / TEXT("Old");
+    Files.MakeDirectory(*(Old / TEXT("Child/Deep")), true);
+    FString Renamed, Error;
+    TestTrue(TEXT("Rename an empty directory tree with a Chinese name"),
+        RenameEmptyDirectory(Old, TEXT("水花"), Renamed, Error, Root));
+    const FString Expected = Parent / TEXT("水花");
+    TestEqual(TEXT("Return the new selection path"), Renamed, Expected);
+    TestFalse(TEXT("The old directory no longer exists"), Files.DirectoryExists(*Old));
+    TestTrue(TEXT("Nested empty directories are preserved"), Files.DirectoryExists(*(Expected / TEXT("Child/Deep"))));
+    FString PackageFolder;
+    TestTrue(TEXT("The new selection is a publish destination"), GetTargetPackageFolder(Renamed, PackageFolder, Content));
+    TestEqual(TEXT("The publish path uses the new folder name"), PackageFolder, FString(TEXT("/Game/VFX/Team1/水花")));
+    TestTrue(TEXT("Unchanged name is a no-op"), RenameEmptyDirectory(Expected, TEXT("水花"), Renamed, Error, Root));
+
+    Files.MakeDirectory(*(Parent / TEXT("Existing")), true);
+    TestFalse(TEXT("Existing directories are never overwritten"),
+        RenameEmptyDirectory(Expected, TEXT("Existing"), Renamed, Error, Root));
+    FFileHelper::SaveStringToFile(TEXT("file collision"), *(Parent / TEXT("ExistingFile")));
+    TestFalse(TEXT("Existing files are never overwritten"),
+        RenameEmptyDirectory(Expected, TEXT("ExistingFile"), Renamed, Error, Root));
+    TestFalse(TEXT("The VFX container cannot be renamed"), RenameEmptyDirectory(Root, TEXT("Other"), Renamed, Error, Root));
+    TestFalse(TEXT("Folders outside the VFX root cannot be renamed"),
+        RenameEmptyDirectory(Content, TEXT("Other"), Renamed, Error, Root));
+    TestFalse(TEXT("Missing folders cannot be renamed"),
+        RenameEmptyDirectory(Parent / TEXT("Missing"), TEXT("Other"), Renamed, Error, Root));
+    for (const TCHAR* Invalid : { TEXT(""), TEXT(".."), TEXT("../Outside"), TEXT("A/B"), TEXT("A\\B"),
+        TEXT("Bad:Name"), TEXT("CON"), TEXT("LPT1"), TEXT("Trailing."), TEXT("Mat"), TEXT("m_f"), TEXT("Mesh"), TEXT("Tex") })
+    {
+        TestFalse(TEXT("Invalid or hidden destination names are rejected"),
+            RenameEmptyDirectory(Expected, Invalid, Renamed, Error, Root));
+    }
+    TestTrue(TEXT("Rejected renames leave the directory intact"), Files.DirectoryExists(*(Expected / TEXT("Child/Deep"))));
+
+    const FString Filled = Parent / TEXT("Filled");
+    const FString Package = Filled / TEXT("Tex/T_Test.uasset");
+    Files.MakeDirectory(*FPaths::GetPath(Package), true);
+    FFileHelper::SaveStringToFile(TEXT("Do not modify package contents"), *Package);
+    TestFalse(TEXT("Files inside hidden dependency folders prevent renaming"),
+        RenameEmptyDirectory(Filled, TEXT("Changed"), Renamed, Error, Root));
+    TestTrue(TEXT("Failure includes the blocking file location"), Error.Contains(TEXT("T_Test.uasset")));
+    FString Contents;
+    FFileHelper::LoadFileToString(Contents, *Package);
+    TestEqual(TEXT("Existing package contents are preserved"), Contents, FString(TEXT("Do not modify package contents")));
+    TestFalse(TEXT("A rejected rename does not create a destination"), Files.DirectoryExists(*(Parent / TEXT("Changed"))));
+
+    const FString Concurrent = Parent / TEXT("Concurrent");
+    Files.MakeDirectory(*Concurrent, true);
+    TestTrue(TEXT("The directory is initially eligible for the rename dialog"), ValidateEmptyDirectoryTree(Concurrent, Error, Root));
+    FFileHelper::SaveStringToFile(TEXT("Added while the dialog was open"), *(Concurrent / TEXT("New.txt")));
+    TestFalse(TEXT("Confirmation rechecks files added after opening the dialog"),
+        RenameEmptyDirectory(Concurrent, TEXT("Changed"), Renamed, Error, Root));
+    TestTrue(TEXT("Files added during the dialog remain in the original location"), Files.FileExists(*(Concurrent / TEXT("New.txt"))));
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCGToolsVfxMigrationTest, "CGTools.Publisher.VFX.OrganizeMigrateAndReloadReferences",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
@@ -1738,6 +1967,16 @@ bool FCGToolsVfxMigrationTest::RunTest(const FString& Parameters)
     {
         TGuardValue<bool> NormalEditorSavePolicy(GIsAutomationTesting, false);
         TGuardValue<bool> UnattendedSavePolicy(GIsRunningUnattendedScript, true);
+        FCGToolsPublisherBrowserTestScope BrowserState(EffectData);
+        FString RepairMessage;
+        TestTrue(TEXT("Shared mesh/VFX display repair succeeds without browser navigation"),
+            CGToolsPublisher::RepairSourceAssetDisplay({ SourceRoot }, RepairMessage));
+        BrowserState.VerifyUnchanged(*this);
+        const FString EmptyFolder = SourceRoot / TEXT("EmptyFolder");
+        IFileManager::Get().MakeDirectory(*FPackageName::LongPackageNameToFilename(EmptyFolder), true);
+        TestTrue(TEXT("Empty-folder repair also avoids the browser folder fallback"),
+            CGToolsPublisher::RepairSourceAssetDisplay({ EmptyFolder }, RepairMessage));
+        BrowserState.VerifyUnchanged(*this);
         const bool bCancelled = PublishEffect(EffectData, Content / RelativeTarget, Error, TargetProject,
             [this, &ConfirmationCount](const TArray<FString>& Conflicts)
             {
@@ -1749,6 +1988,7 @@ bool FCGToolsVfxMigrationTest::RunTest(const FString& Parameters)
         TestTrue(TEXT("Cancellation is silent rather than a publishing error"), Error.IsEmpty());
         TestTrue(TEXT("Cancellation leaves the published package untouched"), FirstPublishedHash == FMD5Hash::HashFile(*PublishedNiagaraFile));
         TestTrue(TEXT("Cancellation does not create a backup"), OverwriteBackup.IsEmpty());
+        BrowserState.VerifyUnchanged(*this);
         const bool bOverwritten = PublishEffect(EffectData, Content / RelativeTarget, Error, TargetProject,
             [&ConfirmationCount](const TArray<FString>&) { ++ConfirmationCount; return true; }, &OverwriteBackup);
         if (!TestTrue(TEXT("Confirmed republishing of real packages succeeds"), bOverwritten))

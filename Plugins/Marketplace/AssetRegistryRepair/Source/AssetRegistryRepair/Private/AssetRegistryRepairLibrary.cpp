@@ -267,7 +267,14 @@ namespace
         int32 MaxAssetsToSync
     )
     {
-        if (RecoveredAssets.Num() > 0 && MaxAssetsToSync != 0)
+        // Automatic callers may need registry recovery without changing the
+        // user's path, selection, search or filters. Zero disables all navigation,
+        // including the folder-only fallback when nothing needed to be loaded.
+        if (MaxAssetsToSync == 0)
+        {
+            return;
+        }
+        if (RecoveredAssets.Num() > 0)
         {
             // SyncBrowserToAssets creates a temporary multi-asset view.  If
             // recursively recovered assets from child folders are included,

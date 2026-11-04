@@ -80,6 +80,7 @@ public:
         int32 MaxAssetsToSync = 30
     );
 
+    // MaxAssetsToSync: 0 keeps the browser unchanged; negative means no asset limit.
     UFUNCTION(
         BlueprintCallable,
         Category = "Asset Registry Repair",
