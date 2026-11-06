@@ -25,6 +25,8 @@ public:
     // output destination so the host can reject unintended overwrites.
     virtual bool ValidateBatch(FString& OutDestination, FString& OutError) = 0;
     virtual void PublishBatch() = 0;
+    // A batch's generic confirmation cannot authorize file overwrites.
+    virtual bool ReviewsPublishFiles() const { return false; }
     virtual FString GetRecordLabel() const { return FString(); }
     virtual FString GetPerAssetSettingsKey() const { return GetRecordLabel(); }
     virtual void SetRecordLabel(const FString&) {}

@@ -1,4 +1,5 @@
 #include "SCGToolsPublisherBatchWindow.h"
+#include "SCGToolsPublisherWindow.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Animation/AnimSequence.h"
@@ -8,6 +9,8 @@
 #include "Misc/Paths.h"
 #include "NiagaraSystem.h"
 #include "Particles/ParticleSystem.h"
+#include "Types/SlateAttributeMetaData.h"
+#include "Widgets/Notifications/SProgressBar.h"
 #include "Widgets/Text/STextBlock.h"
 
 namespace
@@ -31,12 +34,15 @@ namespace
         bool bInvalid = false;
         bool bFail = false;
         bool bWarning = false;
+        bool bPartial = false;
+        bool bReviewsFiles = false;
         TFunction<void()> DuringPublish;
         virtual FCGToolsPublisherSharedSettings GetSharedSettings() const override { return Settings; }
         virtual void ApplySharedSettings(const FCGToolsPublisherSharedSettings& InSettings) override { Settings = InSettings; }
         virtual FString GetRecordLabel() const override { return Label; }
         virtual void SetRecordLabel(const FString& Value) override { Label = Value; }
         virtual void SetGroupPanels(const TArray<TSharedPtr<ICGToolsPublisherPanel>>& Panels) override { PeerCount = Panels.Num(); }
+        virtual bool ReviewsPublishFiles() const override { return bReviewsFiles; }
         virtual bool ValidateBatch(FString& Destination, FString& Error) override
         {
             if (bInvalid || Settings.Project.IsEmpty() || Settings.Type.IsEmpty())
@@ -51,6 +57,7 @@ namespace
             if (bFail) { State->Error = TEXT("Fixture export failure and location"); return; }
             State->Result = ECGToolsPublisherDialogResult::Published;
             State->bWarning = bWarning;
+            State->bPartial = bPartial;
             State->Completion = bWarning ? TEXT("uasset/fbx published; .ma bake failed at fixture path") : TEXT("Fixture published");
         }
     };
@@ -130,17 +137,25 @@ bool FCGToolsPublisherUnifiedWindowTest::RunTest(const FString& Parameters)
         Settings.Project = TEXT("ProjectA"); Settings.Type = TEXT("Props");
         Settings.bIcon = false; Settings.bTextures = true; Settings.bNotifyMaya = true;
     };
+    const auto IsVisible = [](const TSharedRef<SWidget>& Widget)
+    {
+        FSlateAttributeMetaData::UpdateOnlyVisibilityAttributes(*Widget,
+            FSlateAttributeMetaData::EInvalidationPermission::AllowInvalidationIfConstructed);
+        return Widget->GetVisibility().IsVisible();
+    };
     const auto Drain = [&](const TSharedRef<SCGToolsPublisherBatchWindow>& Window)
     {
         int32 Ticks = 0;
         while (Window->bRunning && ++Ticks < 60) { Window->Step(0); }
         TestFalse(TEXT("The finite batch returns to idle"), Window->bRunning);
         TestFalse(TEXT("Close is unlocked after the batch"), Window->DialogState->bPublishing);
+        TestFalse(TEXT("No progress bar remains after success, failure, cancellation or stopping"), IsVisible(Window->ProgressBar.ToSharedRef()));
     };
 
     const TSharedRef<SCGToolsPublisherBatchWindow> Window = MakeWindow(Assets);
     TestEqual(TEXT("Every selection is listed"), Window->Items.Num(), 4);
     TestEqual(TEXT("Panels are created lazily"), Fixtures.Num(), 1);
+    TestFalse(TEXT("An idle batch has no progress bar"), IsVisible(Window->ProgressBar.ToSharedRef()));
     SetSettings(Window);
     Fixtures[FName(TEXT("A"))]->Label = TEXT("Shared folder Chinese name");
     Window->AssetList->SetSelection(Window->Items[1]);
@@ -152,6 +167,7 @@ bool FCGToolsPublisherUnifiedWindowTest::RunTest(const FString& Parameters)
     Fixtures[FName(TEXT("Coins"))]->DuringPublish = [&]()
     {
         TestTrue(TEXT("The outer window stays locked while a panel pumps Slate"), Window->DialogState->bPublishing);
+        TestTrue(TEXT("The active batch displays its progress"), IsVisible(Window->ProgressBar.ToSharedRef()));
         TestTrue(TEXT("The panel knows its batch confirmation was accepted"), Fixtures[FName(TEXT("Coins"))]->State->bBatchExecution);
         const int32 OtherCalls = Fixtures[FName(TEXT("Other"))]->PublishCalls;
         Window->Step(0); // A nested progress tick must not start another export.
@@ -164,17 +180,34 @@ bool FCGToolsPublisherUnifiedWindowTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("A nonrepresentative does not migrate the folder again"), Fixtures[FName(TEXT("A"))]->PublishCalls, 0);
     TestTrue(TEXT("A grouped success updates every member"), Window->Items[0]->Result == SCGToolsPublisherBatchWindow::EResult::Succeeded && Window->Items[1]->Result == SCGToolsPublisherBatchWindow::EResult::Succeeded);
     TestTrue(TEXT("Failure retains its exact reason"), Window->Items[3]->Detail.Contains(TEXT("Fixture export failure")));
+    TestTrue(TEXT("Partial results count every selected asset and describe the grouped work"),
+        Window->Status.Contains(TEXT("完成 3 个资产，未完成 1 个资产（共 2 个发布项）")));
     Fixtures[FName(TEXT("Other"))]->bFail = false;
     Fixtures[FName(TEXT("Other"))]->bWarning = true;
     Window->OnStart(); Drain(Window);
     TestEqual(TEXT("A retry leaves successful exports alone"), Fixtures[FName(TEXT("Coins"))]->PublishCalls, 1);
     TestEqual(TEXT("Only the failure is retried"), Fixtures[FName(TEXT("Other"))]->PublishCalls, 2);
     TestTrue(TEXT("A Maya warning remains a published result with detail"), Window->Items[3]->Result == SCGToolsPublisherBatchWindow::EResult::Warning && Window->Items[3]->Detail.Contains(TEXT(".ma bake failed")));
+    TestTrue(TEXT("Successful retry includes assets completed in an earlier attempt"),
+        Window->Status.Contains(TEXT("完成 4 个资产，未完成 0 个资产（共 2 个发布项）")));
+    Window->OnStart();
+    TestFalse(TEXT("Starting an already completed batch keeps progress hidden"), IsVisible(Window->ProgressBar.ToSharedRef()));
+    TestTrue(TEXT("The completed asset count survives a no-op retry"), Window->Status.Contains(TEXT("完成 4 个资产")));
 
     Fixtures[FName(TEXT("B"))]->Label = TEXT("Changed folder label");
     Window->OnStart(); Drain(Window);
     TestEqual(TEXT("Editing a completed folder queues that folder again"), Fixtures[FName(TEXT("Coins"))]->PublishCalls, 2);
     TestEqual(TEXT("Editing one folder leaves the other completed folder alone"), Fixtures[FName(TEXT("Other"))]->PublishCalls, 2);
+
+    const TSharedRef<SCGToolsPublisherBatchWindow> Grouped = MakeWindow({ Assets[0], Assets[1] });
+    SetSettings(Grouped); Grouped->OnStart(); Drain(Grouped);
+    TestTrue(TEXT("Two models in one folder are reported as two successful assets"),
+        Grouped->Status.Contains(TEXT("完成 2 个资产，未完成 0 个资产（共 1 个发布项）")));
+    Grouped->AssetList->SetSelection(Grouped->Items[1]);
+    TestTrue(TEXT("Selecting a nonrepresentative after completion keeps its published result"),
+        Grouped->Items[1]->Result == SCGToolsPublisherBatchWindow::EResult::Succeeded
+        && Grouped->Items[1]->Detail == TEXT("Fixture published"));
+    TestFalse(TEXT("Switching completed models cannot restore the batch progress bar"), IsVisible(Grouped->ProgressBar.ToSharedRef()));
 
     const TSharedRef<SCGToolsPublisherBatchWindow> Invalid = MakeWindow({ Assets[0], Assets[3] });
     SetSettings(Invalid); Invalid->GetPanel(1);
@@ -203,6 +236,40 @@ bool FCGToolsPublisherUnifiedWindowTest::RunTest(const FString& Parameters)
     Stopped->OnStart(); Drain(Stopped);
     TestEqual(TEXT("Stopping retains the current completed export"), Fixtures[FName(TEXT("A"))]->PublishCalls, 1);
     TestEqual(TEXT("Stopping leaves the next export untouched"), Fixtures[FName(TEXT("Other"))]->PublishCalls, 0);
+
+    const TSharedRef<SCGToolsPublisherBatchWindow> Reviewed = MakeWindow({ Assets[0], Assets[1] });
+    SetSettings(Reviewed);
+    Fixtures[FName(TEXT("A"))]->bReviewsFiles = true;
+    Fixtures[FName(TEXT("A"))]->bPartial = true;
+    Reviewed->OnStart(); Drain(Reviewed);
+    TestEqual(TEXT("A file-reviewing publisher does not use a generic batch overwrite confirmation"), Confirmations, 0);
+    TestTrue(TEXT("Partial file selection is shown on every grouped model"),
+        Reviewed->Items[0]->Result == SCGToolsPublisherBatchWindow::EResult::Partial
+        && Reviewed->Items[1]->Result == SCGToolsPublisherBatchWindow::EResult::Partial);
+    TestFalse(TEXT("Partial output cannot mark a group completed"), Reviewed->Groups[0].bCompleted);
+    Fixtures[FName(TEXT("A"))]->bPartial = false;
+    Reviewed->OnStart(); Drain(Reviewed);
+    TestEqual(TEXT("A partially published group is reviewed again on retry"), Fixtures[FName(TEXT("A"))]->PublishCalls, 2);
+    TestTrue(TEXT("Publishing the remaining differences completes the group"), Reviewed->Groups[0].bCompleted);
+
+    UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+    if (!TestNotNull(TEXT("Real mesh panel fixture"), Cube)) { return false; }
+    for (const bool bEmbedded : { false, true })
+    {
+        const TSharedRef<FCGToolsPublisherDialogState> State = MakeShared<FCGToolsPublisherDialogState>();
+        State->bEmbedded = bEmbedded;
+        const TSharedRef<SCGToolsPublisherWindow> Panel = SNew(SCGToolsPublisherWindow).AssetData(FAssetData(Cube)).DialogState(State);
+        const TSharedRef<SWidget> ProgressContainer = Panel->ProgressBar->GetParentWidget().ToSharedRef();
+        const TSharedRef<SWidget> StatusContainer = Panel->StatusText->GetParentWidget().ToSharedRef();
+        TestFalse(TEXT("A ready model panel has no empty progress track"), IsVisible(ProgressContainer));
+        TestEqual(TEXT("Embedded model panels never show a duplicate ready/status row"), IsVisible(StatusContainer), !bEmbedded);
+        Panel->bIsPublishing = true;
+        TestEqual(TEXT("Only a standalone publishing panel shows its own progress"), IsVisible(ProgressContainer), !bEmbedded);
+        Panel->SetProgress(1.0f, FText::FromString(TEXT("发布完成")));
+        Panel->bIsPublishing = false;
+        TestFalse(TEXT("Model progress disappears at completion"), IsVisible(ProgressContainer));
+        TestEqual(TEXT("The standalone model retains its completed status text"), Panel->StatusText->GetText().ToString(), FString(TEXT("发布完成")));
+    }
     return true;
 }
 #endif

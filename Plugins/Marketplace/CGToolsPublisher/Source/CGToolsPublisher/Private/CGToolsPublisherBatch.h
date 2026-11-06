@@ -30,6 +30,7 @@ struct FCGToolsPublisherDialogState
     bool bEmbedded = false;
     bool bBatchExecution = false;
     bool bWarning = false;
+    bool bPartial = false;
     FString Error;
     FString Completion;
     ECGToolsPublisherDialogResult Result = ECGToolsPublisherDialogResult::Cancelled;

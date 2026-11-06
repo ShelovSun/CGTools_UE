@@ -9,6 +9,7 @@
 class FAssetThumbnail;
 class FAssetThumbnailPool;
 class SBox;
+class SProgressBar;
 
 struct FCGToolsPublisherPanelHandle
 {
@@ -43,7 +44,7 @@ public:
 
 private:
     enum class EPhase : uint8 { Idle, Validate, Publish };
-    enum class EResult : uint8 { Waiting, Checking, Ready, Publishing, Succeeded, Warning, Failed };
+    enum class EResult : uint8 { Waiting, Checking, Ready, Publishing, Succeeded, Warning, Partial, Failed };
     struct FItem
     {
         FAssetData Asset;
@@ -71,6 +72,7 @@ private:
     TSharedPtr<FAssetThumbnailPool> ThumbnailPool;
     TSharedPtr<SListView<TSharedPtr<FItem>>> AssetList;
     TSharedPtr<SBox> DetailBox;
+    TSharedPtr<SProgressBar> ProgressBar;
     FPanelFactory PanelFactory;
     TFunction<bool(const FString&)> ConfirmBatch;
     FCGToolsPublisherSharedSettings SharedSettings;
@@ -96,6 +98,7 @@ private:
     bool Step(float Delta);
     void Finish(const FString& Message);
     FString GetGroupDescription() const;
+    FString GetCompletionSummary() const;
     FText GetResultText(const TSharedPtr<FItem>& Item) const;
     FSlateColor GetResultColor(const TSharedPtr<FItem>& Item) const;
     friend class FCGToolsPublisherUnifiedWindowTest;

@@ -1,4 +1,6 @@
 #include "SCGToolsVfxPublisherWindow.h"
+#include "SCGToolsVfxDestinationBrowser.h"
+#include "CGToolsPublisherFileReview.h"
 
 #include "Animation/Skeleton.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -82,6 +84,17 @@ namespace
     const FString VfxProjectDirectory = TEXT("Y:/MCCTools/src/UE574/VFX");
     const FString VfxContentDirectory = VfxProjectDirectory / TEXT("Content");
     const FString VfxRootDirectory = VfxContentDirectory / TEXT("VFX");
+
+    TArray<FString> GetVfxPublishReviewRoots(const FString& Stage)
+    {
+        // Review the organized output and its dependencies, not unrelated effects
+        // already sharing the target folder. No server-only file is removed.
+        TArray<FString> Roots;
+        IFileManager::Get().FindFilesRecursive(Roots, *Stage, TEXT("*"), true, false);
+        const FString StageRoot = FPaths::ConvertRelativePathToFull(Stage) + TEXT("/");
+        for (FString& Path : Roots) { FPaths::MakePathRelativeTo(Path, *StageRoot); }
+        return Roots;
+    }
 
     FString NormalizeDirectory(const FString& Directory)
     {
@@ -917,7 +930,8 @@ namespace
 
     bool PublishEffect(const FAssetData& AssetData, const FString& Directory, FString& OutError,
         const FString& TargetProjectDirectory = VfxProjectDirectory,
-        const TFunction<bool(const TArray<FString>&)>& ConfirmOverwrite = {}, FString* OutBackupDirectory = nullptr)
+        const TFunction<bool(const TArray<FString>&)>& ConfirmOverwrite = {}, FString* OutBackupDirectory = nullptr,
+        const TFunction<bool(const FString&, const FString&, CGToolsPublisher::FPublishFileResult&)>& ReviewFiles = {}, bool* OutPartial = nullptr)
     {
         OutError.Reset();
         if (OutBackupDirectory)
@@ -1061,44 +1075,58 @@ namespace
             }
         }
 
-        Progress.EnterProgressFrame(5.0f, LOCTEXT("CheckServerFiles", "正在检查服务器同名文件…"));
-        TFuture<FUploadPlan> Preparation = Async(EAsyncExecution::ThreadPool,
-            [StagedContent, Directory, DestinationContent]() { return PrepareUpload(StagedContent, DestinationContent, Directory); });
-        while (!Preparation.IsReady())
+        bool bComplete = true;
+        if (ReviewFiles)
         {
-            Progress.ForceRefresh();
-            FPlatformProcess::Sleep(0.03f);
+            CGToolsPublisher::FPublishFileResult FileResult;
+            if (!ReviewFiles(StagedContent, DestinationContent, FileResult))
+            { OutError = FileResult.Error; return false; }
+            bComplete = FileResult.bComplete;
+            if (OutPartial) { *OutPartial = !bComplete; }
+            if (OutBackupDirectory) { *OutBackupDirectory = FileResult.History; }
         }
-        const FUploadPlan UploadPlan = Preparation.Get();
-        if (!UploadPlan.Error.IsEmpty())
+        else
         {
-            OutError = UploadPlan.Error;
-            return false;
+            Progress.EnterProgressFrame(5.0f, LOCTEXT("CheckServerFiles", "正在检查服务器同名文件…"));
+            TFuture<FUploadPlan> Preparation = Async(EAsyncExecution::ThreadPool,
+                [StagedContent, Directory, DestinationContent]() { return PrepareUpload(StagedContent, DestinationContent, Directory); });
+            while (!Preparation.IsReady())
+            {
+                Progress.ForceRefresh();
+                FPlatformProcess::Sleep(0.03f);
+            }
+            const FUploadPlan UploadPlan = Preparation.Get();
+            if (!UploadPlan.Error.IsEmpty())
+            {
+                OutError = UploadPlan.Error;
+                return false;
+            }
+            const TArray<FString> Conflicts = UploadPlan.GetConflicts();
+            if (!Conflicts.IsEmpty() && (!ConfirmOverwrite || !ConfirmOverwrite(Conflicts)))
+            {
+                // An empty error signals user cancellation; stay on this asset.
+                return false;
+            }
+            Progress.EnterProgressFrame(0.0f, LOCTEXT("UploadToServer", "正在备份、上传服务器并校验文件…"));
+            TFuture<FUploadResult> Upload = Async(EAsyncExecution::ThreadPool,
+                [&UploadPlan, bOverwrite = !Conflicts.IsEmpty()]() { return CommitUpload(UploadPlan, bOverwrite); });
+            while (!Upload.IsReady())
+            {
+                Progress.ForceRefresh();
+                FPlatformProcess::Sleep(0.03f);
+            }
+            const FUploadResult Result = Upload.Get();
+            if (OutBackupDirectory)
+            {
+                *OutBackupDirectory = Result.BackupDirectory;
+            }
+            if (!Result.bSucceeded)
+            {
+                OutError = Result.Error + TEXT("\n\n源特效及依赖位置未改变，修复问题后可再次发布。");
+                return false;
+            }
         }
-        const TArray<FString> Conflicts = UploadPlan.GetConflicts();
-        if (!Conflicts.IsEmpty() && (!ConfirmOverwrite || !ConfirmOverwrite(Conflicts)))
-        {
-            // An empty error signals user cancellation; stay on this asset.
-            return false;
-        }
-        Progress.EnterProgressFrame(0.0f, LOCTEXT("UploadToServer", "正在备份、上传服务器并校验文件…"));
-        TFuture<FUploadResult> Upload = Async(EAsyncExecution::ThreadPool,
-            [&UploadPlan, bOverwrite = !Conflicts.IsEmpty()]() { return CommitUpload(UploadPlan, bOverwrite); });
-        while (!Upload.IsReady())
-        {
-            Progress.ForceRefresh();
-            FPlatformProcess::Sleep(0.03f);
-        }
-        const FUploadResult Result = Upload.Get();
-        if (OutBackupDirectory)
-        {
-            *OutBackupDirectory = Result.BackupDirectory;
-        }
-        if (!Result.bSucceeded)
-        {
-            OutError = Result.Error + TEXT("\n\n源特效及依赖位置未改变，修复问题后可再次发布。");
-            return false;
-        }
+        if (!bComplete) { return true; }
         Progress.EnterProgressFrame(30.0f, LOCTEXT("VfxPublishFinished", "特效发布完成。"));
         FModuleManager::LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser")).Get()
             .SyncBrowserToAssets({ FAssetData(RootAsset.Get()) });
@@ -1149,14 +1177,10 @@ void SCGToolsVfxPublisherWindow::Construct(const FArguments& InArgs)
                 ]
                 + SVerticalBox::Slot().FillHeight(1.0f)
                 [
-                    SAssignNew(DirectoryTree, STreeView<TSharedPtr<FDirectoryNode>>)
-                    .TreeItemsSource(&DirectoryRoots)
-                    .SelectionMode(ESelectionMode::Single)
-                    .OnGenerateRow(this, &SCGToolsVfxPublisherWindow::GenerateDirectoryRow)
-                    .OnGetChildren(this, &SCGToolsVfxPublisherWindow::GetDirectoryChildren)
-                    .OnSelectionChanged(this, &SCGToolsVfxPublisherWindow::OnDirectorySelected)
-                    .OnMouseButtonClick(this, &SCGToolsVfxPublisherWindow::OnDirectoryClicked)
-                    .OnMouseButtonDoubleClick(this, &SCGToolsVfxPublisherWindow::OnDirectoryDoubleClicked)
+                    SAssignNew(DirectoryBrowser, SCGToolsVfxDestinationBrowser)
+                    .RootDirectory(VfxRootDirectory)
+                    .OnFolderSelected_Lambda([this](const FString& Directory) { SelectedDirectory = Directory; DirectoryError.Reset(); })
+                    .OnFolderDoubleClicked(this, &SCGToolsVfxPublisherWindow::OnDirectoryDoubleClicked)
                     .IsEnabled_Lambda([this]() { return !bPublishing; })
                 ]
                 + SVerticalBox::Slot().AutoHeight().Padding(0.0f, 12.0f, 0.0f, 0.0f).HAlign(HAlign_Right)
@@ -1191,136 +1215,22 @@ void SCGToolsVfxPublisherWindow::Construct(const FArguments& InArgs)
 
 void SCGToolsVfxPublisherWindow::RefreshDirectoryTree()
 {
-    if (bPublishing)
-    {
-        return;
-    }
-    const FString PreviousSelection = SelectedDirectory;
-    DirectoryTree->ClearSelection();
-    DirectoryTree->ClearExpandedItems();
-    SelectedDirectory.Reset();
-    DirectoryRoots.Reset();
+    if (bPublishing) { return; }
     DirectoryError.Reset();
-    if (!IFileManager::Get().DirectoryExists(*VfxRootDirectory))
-    {
-        DirectoryError = TEXT("目录不可访问，请确认 Y: 网络盘已连接且目录存在，然后点击【刷新】。\n") + VfxRootDirectory;
-    }
-    else
-    {
-        const TSharedPtr<FDirectoryNode> Root = MakeShared<FDirectoryNode>(VfxRootDirectory);
-        // The VFX container stays implicit; its children are the visible roots.
-        GetDirectoryChildren(Root, DirectoryRoots);
-
-        // Restore the selected branch without scanning unrelated subtrees.
-        TSharedPtr<FDirectoryNode> Selection;
-        for (const TSharedPtr<FDirectoryNode>& Candidate : DirectoryRoots)
-        {
-            if (!PreviousSelection.IsEmpty() && IsDirectoryWithin(PreviousSelection, Candidate->Directory))
-            {
-                Selection = Candidate;
-                break;
-            }
-        }
-        while (Selection.IsValid() && PreviousSelection != Selection->Directory)
-        {
-            TArray<TSharedPtr<FDirectoryNode>> Children;
-            GetDirectoryChildren(Selection, Children);
-            const TSharedPtr<FDirectoryNode>* Child = Children.FindByPredicate(
-                [&PreviousSelection](const TSharedPtr<FDirectoryNode>& Candidate)
-                {
-                    return IsDirectoryWithin(PreviousSelection, Candidate->Directory);
-                });
-            if (!Child)
-            {
-                break;
-            }
-            DirectoryTree->SetItemExpansion(Selection, true);
-            Selection = *Child;
-        }
-        if (Selection.IsValid())
-        {
-            DirectoryTree->SetSelection(Selection);
-            DirectoryTree->RequestScrollIntoView(Selection);
-        }
-    }
-    DirectoryTree->RequestTreeRefresh();
+    DirectoryBrowser->Refresh(SelectedDirectory);
 }
 
-void SCGToolsVfxPublisherWindow::GetDirectoryChildren(
-    TSharedPtr<FDirectoryNode> Item, TArray<TSharedPtr<FDirectoryNode>>& OutChildren)
+void SCGToolsVfxPublisherWindow::OnDirectoryDoubleClicked(const FString& Directory)
 {
-    if (!Item.IsValid())
-    {
-        return;
-    }
-    if (!Item->bChildrenLoaded)
-    {
-        // Slate requests children as rows become visible; cache one level at a time.
-        TArray<FString> Names;
-        IFileManager::Get().FindFiles(Names, *(Item->Directory / TEXT("*")), false, true);
-        Names.Sort();
-        for (const FString& Name : Names)
-        {
-            // Organizer buckets hold dependencies, not publishing destinations.
-            if (IsOrganizerDirectoryName(Name))
-            {
-                continue;
-            }
-            Item->Children.Add(MakeShared<FDirectoryNode>(Item->Directory / Name));
-        }
-        Item->bChildrenLoaded = true;
-    }
-    OutChildren.Append(Item->Children);
-}
-
-TSharedRef<ITableRow> SCGToolsVfxPublisherWindow::GenerateDirectoryRow(
-    TSharedPtr<FDirectoryNode> Item, const TSharedRef<STableViewBase>& OwnerTable) const
-{
-    return SNew(STableRow<TSharedPtr<FDirectoryNode>>, OwnerTable).Padding(6.0f)
-    .ToolTipText(LOCTEXT("RenameEmptyVfxFolderTooltip", "双击重命名空文件夹；已有文件的目录请在目标 VFX 工程中修改。"))
-    [
-        SNew(SHorizontalBox)
-        + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.0f, 0.0f, 8.0f, 0.0f)
-        [
-            SNew(SImage).Image_Lambda([this, Item]()
-            {
-                return FAppStyle::GetBrush(DirectoryTree->IsItemExpanded(Item)
-                    ? "ContentBrowser.AssetTreeFolderOpen" : "ContentBrowser.AssetTreeFolderClosed");
-            })
-        ]
-        + SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Center)
-        [
-            SNew(STextBlock).Text(FText::FromString(FPaths::GetCleanFilename(Item->Directory)))
-        ]
-    ];
-}
-
-void SCGToolsVfxPublisherWindow::OnDirectorySelected(TSharedPtr<FDirectoryNode> Item, ESelectInfo::Type SelectInfo)
-{
-    SelectedDirectory = Item.IsValid() ? Item->Directory : FString();
-    // Keyboard selection also opens the selected folder.
-    OnDirectoryClicked(Item);
-}
-
-void SCGToolsVfxPublisherWindow::OnDirectoryClicked(TSharedPtr<FDirectoryNode> Item)
-{
-    if (Item.IsValid())
-    {
-        DirectoryTree->SetItemExpansion(Item, true);
-    }
-}
-
-void SCGToolsVfxPublisherWindow::OnDirectoryDoubleClicked(TSharedPtr<FDirectoryNode> Item)
-{
-    if (bPublishing || !Item.IsValid()) { return; }
+    if (bPublishing) { return; }
     FString Error;
-    if (!ValidateEmptyDirectoryTree(Item->Directory, Error))
+    if (!ValidateEmptyDirectoryTree(Directory, Error))
     {
         FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(Error),
             LOCTEXT("RenameVfxFolderTitle", "重命名文件夹"));
         return;
     }
-    ShowFolderNameDialog(Item->Directory, true);
+    ShowFolderNameDialog(Directory, true);
 }
 
 bool SCGToolsVfxPublisherWindow::CanConfirm() const
@@ -1446,14 +1356,20 @@ FReply SCGToolsVfxPublisherWindow::OnConfirm()
     }
     bPublishing = true;
     TGuardValue<bool> DialogPublishingGuard(DialogState->bPublishing, true);
+    DialogState->bPartial = false;
+    DialogState->Result = ECGToolsPublisherDialogResult::Cancelled;
+    DialogState->Error.Reset(); DialogState->Completion.Reset();
     ON_SCOPE_EXIT { bPublishing = false; };
     FString Error, BackupDirectory;
-    const auto ConfirmOverwrite = [this, &Destination](const TArray<FString>& Conflicts)
+    bool bPartial = false;
+    const auto ReviewFiles = [this, &Destination](const FString& Stage, const FString& Target, CGToolsPublisher::FPublishFileResult& Result)
     {
-        return DialogState->bBatchExecution || ConfirmVfxOverwrite(AssetData.AssetName.ToString(), Destination, Conflicts,
-            FSlateApplication::Get().FindWidgetWindow(AsShared()));
+        return CGToolsPublisher::ReviewAndCommitPublishFiles(Stage, Target, GetVfxPublishReviewRoots(Stage),
+            VfxProjectDirectory / TEXT("Saved/CGToolsPublisher/VFXBackups"),
+            TEXT("特效：") + AssetData.AssetName.ToString() + TEXT("\n目标：") + Destination,
+            FSlateApplication::Get().FindWidgetWindow(AsShared()), Result);
     };
-    if (!PublishEffect(AssetData, Destination, Error, VfxProjectDirectory, ConfirmOverwrite, &BackupDirectory))
+    if (!PublishEffect(AssetData, Destination, Error, VfxProjectDirectory, {}, &BackupDirectory, ReviewFiles, &bPartial))
     {
         if (!Error.IsEmpty())
         {
@@ -1462,7 +1378,8 @@ FReply SCGToolsVfxPublisherWindow::OnConfirm()
         }
         return FReply::Handled();
     }
-    DialogState->Completion = TEXT("特效及工程内依赖已整理迁移完成。\n\n") + Destination
+    DialogState->bPartial = bPartial;
+    DialogState->Completion = (bPartial ? TEXT("特效部分发布，仍有差异文件未选择。\n\n") : TEXT("特效及工程内依赖已整理迁移完成。\n\n")) + Destination
             + (BackupDirectory.IsEmpty() ? FString() : TEXT("\n\n覆盖前的文件备份：\n") + BackupDirectory)
             + TEXT("\n\n在目标 VFX 工程中刷新内容浏览器即可查看。");
     if (!DialogState->bBatchExecution)
@@ -1470,7 +1387,7 @@ FReply SCGToolsVfxPublisherWindow::OnConfirm()
         FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(DialogState->Completion), LOCTEXT("VfxPublishSucceeded", "特效发布完成"));
     }
     DialogState->Result = ECGToolsPublisherDialogResult::Published;
-    CloseWindow();
+    if (!bPartial) { CloseWindow(); }
     return FReply::Handled();
 }
 
@@ -1505,12 +1422,8 @@ void SCGToolsVfxPublisherWindow::ApplySharedSettings(const FCGToolsPublisherShar
     {
         SelectedDirectory = Settings.Directory;
         RefreshDirectoryTree();
-        // A deleted destination must not silently fall back to its parent.
-        if (SelectedDirectory != Settings.Directory)
-        {
-            SelectedDirectory = Settings.Directory;
-            DirectoryError = TEXT("目标目录不存在或不可访问：") + SelectedDirectory;
-        }
+        // Keep the exact shared destination while the tree restores asynchronously.
+        // ValidateBatch/PublishEffect check that it still exists; never use a parent fallback.
     }
 }
 
@@ -1639,6 +1552,25 @@ bool FCGToolsVfxUploadTest::RunTest(const FString& Parameters)
     TArray<FString> Leftovers;
     Files.FindFilesRecursive(Leftovers, *RollbackServer, TEXT("*.tmp"), true, false);
     TestTrue(TEXT("Failed promotion cleans temporary upload files"), Leftovers.IsEmpty());
+
+    const FString OtherEffect = RelativeRoot / TEXT("NS_Other.uasset");
+    const FString ExternalDependency = TEXT("Projects/Shared/CoreParameters.uasset");
+    Files.MakeDirectory(*(Stage / TEXT("Projects/Shared")), true);
+    TestTrue(TEXT("Create unrelated server effect"), FFileHelper::SaveStringToFile(TEXT("keep other effect"), *(Server / OtherEffect)));
+    TestTrue(TEXT("Create dependency outside the chosen VFX folder"), FFileHelper::SaveStringToFile(TEXT("shared dependency"), *(Stage / ExternalDependency)));
+    TestTrue(TEXT("Change the current effect on the server"), FFileHelper::SaveStringToFile(TEXT("older effect"), *(Server / Effect)));
+    auto ReviewPlan = CGToolsPublisher::BuildPublishFilePlan(Stage, Server, GetVfxPublishReviewRoots(Stage));
+    TestTrue(TEXT("VFX file review compares staged output without errors"), ReviewPlan.Error.IsEmpty());
+    TestEqual(TEXT("Only the current effect, sidecar and external dependency are listed"), ReviewPlan.Files.Num(), 3);
+    TestFalse(TEXT("Other effects do not appear as missing rows"), ReviewPlan.Files.ContainsByPredicate([](const auto& File)
+        { return File->Difference == CGToolsPublisher::EPublishFileDifference::Missing; }));
+    TestTrue(TEXT("External dependencies remain in the comparison"), ReviewPlan.Files.ContainsByPredicate([&](const auto& File)
+        { return File->Relative == ExternalDependency && File->Difference == CGToolsPublisher::EPublishFileDifference::Added; }));
+    ReviewPlan.SelectAll(true);
+    const auto Reviewed = CGToolsPublisher::CommitPublishFiles(ReviewPlan, TestRoot / TEXT("Backups"));
+    TestTrue(TEXT("The staged effect and external dependency can be completely published"), Reviewed.bSucceeded && Reviewed.bComplete);
+    FFileHelper::LoadFileToString(Contents, *(Server / OtherEffect));
+    TestEqual(TEXT("An unlisted server-only effect is retained"), Contents, FString(TEXT("keep other effect")));
     return true;
 }
 
@@ -1961,6 +1893,12 @@ bool FCGToolsVfxMigrationTest::RunTest(const FString& Parameters)
         return false;
     }
     const FString PublishedNiagaraFile = Content / RelativeTarget / TEXT("NS_Test.uasset");
+    TAtomic<bool> BrowserCancelled(false);
+    const auto BrowserListing = CGToolsVfxBrowser::ReadDirectory(Content / RelativeTarget, BrowserCancelled);
+    TestTrue(TEXT("The publish destination browser recognizes real Niagara packages by metadata"), BrowserListing.Entries.ContainsByPredicate([](const auto& Entry)
+        { return Entry.ClassName == TEXT("NiagaraSystem") && Entry.Name == TEXT("NS_Test"); }));
+    TestTrue(TEXT("The publish destination browser recognizes real Cascade packages by metadata"), BrowserListing.Entries.ContainsByPredicate([](const auto& Entry)
+        { return Entry.ClassName == TEXT("ParticleSystem"); }));
     const FMD5Hash FirstPublishedHash = FMD5Hash::HashFile(*PublishedNiagaraFile);
     FString OverwriteBackup;
     int32 ConfirmationCount = 0;
@@ -1988,6 +1926,23 @@ bool FCGToolsVfxMigrationTest::RunTest(const FString& Parameters)
         TestTrue(TEXT("Cancellation is silent rather than a publishing error"), Error.IsEmpty());
         TestTrue(TEXT("Cancellation leaves the published package untouched"), FirstPublishedHash == FMD5Hash::HashFile(*PublishedNiagaraFile));
         TestTrue(TEXT("Cancellation does not create a backup"), OverwriteBackup.IsEmpty());
+        BrowserState.VerifyUnchanged(*this);
+        bool bReviewed = false;
+        const bool bReviewCancelled = PublishEffect(EffectData, Content / RelativeTarget, Error, TargetProject, {}, &OverwriteBackup,
+            [this, &bReviewed, &RelativeTarget](const FString& Stage, const FString& Server, CGToolsPublisher::FPublishFileResult& Result)
+            {
+                bReviewed = true;
+                const auto Plan = CGToolsPublisher::BuildPublishFilePlan(Stage, Server, GetVfxPublishReviewRoots(Stage));
+                TestTrue(TEXT("The runtime file review receives the effect and dependencies"), Plan.Files.Num() >= 4 && Plan.Error.IsEmpty());
+                TestFalse(TEXT("VFX review has no unrelated server-only missing rows"), Plan.Files.ContainsByPredicate([](const auto& File)
+                    { return File->Difference == CGToolsPublisher::EPublishFileDifference::Missing; }));
+                TestEqual(TEXT("Runtime review defaults to no selected files"), Plan.NumSelected(), 0);
+                return false;
+            });
+        TestTrue(TEXT("The new runtime file-review callback is reached"), bReviewed);
+        TestFalse(TEXT("Cancelling the runtime file review does not publish"), bReviewCancelled);
+        TestTrue(TEXT("File-review cancellation is silent"), Error.IsEmpty());
+        TestTrue(TEXT("File-review cancellation leaves published package bytes unchanged"), FirstPublishedHash == FMD5Hash::HashFile(*PublishedNiagaraFile));
         BrowserState.VerifyUnchanged(*this);
         const bool bOverwritten = PublishEffect(EffectData, Content / RelativeTarget, Error, TargetProject,
             [&ConfirmationCount](const TArray<FString>&) { ++ConfirmationCount; return true; }, &OverwriteBackup);

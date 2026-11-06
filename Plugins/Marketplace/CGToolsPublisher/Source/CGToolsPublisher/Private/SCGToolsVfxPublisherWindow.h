@@ -7,6 +7,8 @@
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/Views/STreeView.h"
 
+class SCGToolsVfxDestinationBrowser;
+
 namespace CGToolsVfxPublisher
 {
     bool IsEffectAsset(const FAssetData& Asset);
@@ -25,32 +27,18 @@ public:
     virtual void ApplySharedSettings(const FCGToolsPublisherSharedSettings& Settings) override;
     virtual bool ValidateBatch(FString& OutDestination, FString& OutError) override;
     virtual void PublishBatch() override { OnConfirm(); }
+    virtual bool ReviewsPublishFiles() const override { return true; }
 
 private:
-    struct FDirectoryNode
-    {
-        explicit FDirectoryNode(const FString& InDirectory) : Directory(InDirectory) {}
-
-        FString Directory;
-        TArray<TSharedPtr<FDirectoryNode>> Children;
-        bool bChildrenLoaded = false;
-    };
-
     FAssetData AssetData;
     TSharedPtr<FCGToolsPublisherDialogState> DialogState;
     FString SelectedDirectory;
     FString DirectoryError;
-    TArray<TSharedPtr<FDirectoryNode>> DirectoryRoots;
-    TSharedPtr<STreeView<TSharedPtr<FDirectoryNode>>> DirectoryTree;
+    TSharedPtr<SCGToolsVfxDestinationBrowser> DirectoryBrowser;
     bool bPublishing = false;
 
     void RefreshDirectoryTree();
-    void GetDirectoryChildren(TSharedPtr<FDirectoryNode> Item, TArray<TSharedPtr<FDirectoryNode>>& OutChildren);
-    TSharedRef<ITableRow> GenerateDirectoryRow(
-        TSharedPtr<FDirectoryNode> Item, const TSharedRef<STableViewBase>& OwnerTable) const;
-    void OnDirectorySelected(TSharedPtr<FDirectoryNode> Item, ESelectInfo::Type SelectInfo);
-    void OnDirectoryClicked(TSharedPtr<FDirectoryNode> Item);
-    void OnDirectoryDoubleClicked(TSharedPtr<FDirectoryNode> Item);
+    void OnDirectoryDoubleClicked(const FString& Directory);
     void ShowFolderNameDialog(const FString& Directory, bool bRename);
     FReply OnNewFolder();
     bool CanCreateFolder() const;

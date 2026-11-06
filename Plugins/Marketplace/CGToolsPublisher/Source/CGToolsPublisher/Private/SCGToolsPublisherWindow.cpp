@@ -1,4 +1,5 @@
 #include "SCGToolsPublisherWindow.h"
+#include "CGToolsPublisherFileReview.h"
 #include "CGToolsPublisherAssetUtils.h"
 #include "CGToolsPublisherAssetFolder.h"
 #include "CGToolsPublisherMeshExport.h"
@@ -1460,6 +1461,11 @@ void SCGToolsPublisherWindow::Construct(const FArguments& InArgs)
                         [
                             SNew(SBox)
                             .HeightOverride(10.0f)
+                            .Visibility_Lambda([this]()
+                            {
+                                return !DialogState->bEmbedded && bIsPublishing
+                                    ? EVisibility::Visible : EVisibility::Collapsed;
+                            })
                             [
                                 SAssignNew(ProgressBar, SProgressBar)
                                 .Percent_Lambda([this]() { return Progress; })
@@ -1471,6 +1477,7 @@ void SCGToolsPublisherWindow::Construct(const FArguments& InArgs)
                         .Padding(0.0f, 3.0f, 0.0f, 0.0f)
                         [
                             SNew(SHorizontalBox)
+                            .Visibility(DialogState->bEmbedded ? EVisibility::Collapsed : EVisibility::Visible)
                             + SHorizontalBox::Slot()
                             .AutoWidth()
                             .VAlign(VAlign_Center)
@@ -2437,6 +2444,9 @@ FReply SCGToolsPublisherWindow::OnPublishClicked()
     }
 
     TGuardValue<bool> DialogPublishingGuard(DialogState->bPublishing, true);
+    DialogState->bPartial = false;
+    DialogState->Result = ECGToolsPublisherDialogResult::Cancelled;
+    DialogState->Error.Reset(); DialogState->Completion.Reset();
     bIsPublishing = true;
     SetProgress(0.03f, LOCTEXT("CheckingDatabase", "正在检查数据库记录…"));
 
@@ -2468,7 +2478,7 @@ FReply SCGToolsPublisherWindow::OnPublishClicked()
         return FReply::Handled();
     }
 
-    if (DatabaseCheck.bExists && !DialogState->bBatchExecution)
+    if (DatabaseCheck.bExists)
     {
         const FString OverwriteMessage = FString::Printf(
             TEXT("数据库中已存在同名资产。\n\n")
@@ -2476,8 +2486,8 @@ FReply SCGToolsPublisherWindow::OnPublishClicked()
             TEXT("资产名：%s\n")
             TEXT("发布类型：%s\n\n")
             TEXT("数据库表：public.%s\n\n")
-            TEXT("继续操作将覆盖该资产的数据库发布记录；若服务器上已有旧发布文件，提交前会备份到 history。\n\n")
-            TEXT("是否确认覆盖并继续？"),
+            TEXT("继续后将列出冲突、新增和本次缺失的文件，由你勾选覆盖或新增。服务器独有文件保留；覆盖前备份到 history。\n\n")
+            TEXT("是否继续？"),
             *Project,
             *AssetName,
             *AssetType,
@@ -2504,55 +2514,10 @@ FReply SCGToolsPublisherWindow::OnPublishClicked()
     const FString AssetRoot = GetAssetRoot();
     const FString FinalContent = AssetRoot / TEXT("UE/Content");
     const FString FinalProjectFile = AssetRoot / TEXT("UE") / (AssetName + TEXT(".uproject"));
-    const FString FinalFbxFile = AssetRoot / TEXT("FBX") / (AssetName + TEXT(".fbx"));
     const FString FinalIconFile = AssetRoot / TEXT("Icon") / (AssetName + TEXT(".png"));
     const FString FinalTextureDirectory = AssetRoot / TEXT("Texture");
 
     IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
-    const bool bPublishedFilesExist =
-        PlatformFile.DirectoryExists(*FinalContent)
-        || PlatformFile.FileExists(*FinalProjectFile)
-        || (bPublishFbx && PlatformFile.FileExists(*FinalFbxFile))
-        || (bPublishIcon && PlatformFile.FileExists(*FinalIconFile))
-        || (bPublishTextures && PlatformFile.DirectoryExists(*FinalTextureDirectory));
-
-    FString Confirmation = FString::Printf(
-        TEXT("即将发布%s：%s\n\n项目：%s\n类型：%s\\%s\n目标：%s\n\n")
-        TEXT("UE 资产将使用原生迁移，自动带齐材质、贴图及其他包依赖。\n")
-        TEXT("发布 FBX：%s\n发布 Icon：%s\n发布 Texture：%s\n"),
-        *GetAssetKindLabel(),
-        *AssetName,
-        *Project,
-        *GetPublishBaseFolder(),
-        *AssetType,
-        *AssetRoot,
-        bPublishFbx ? TEXT("是") : TEXT("否"),
-        bPublishIcon ? TEXT("是") : TEXT("否"),
-        bPublishTextures ? TEXT("是") : TEXT("否")
-    );
-    Confirmation += FString::Printf(
-        TEXT("\nUE 发布范围：%s 下的全部资源及依赖。\nFBX 和 Icon 使用当前选中的模型：%s。\n"),
-        *MeshAssetFolder, *AssetData.AssetName.ToString());
-    if (bPublishedFilesExist)
-    {
-        Confirmation += TEXT(
-            "\n警告：服务器上已有发布文件；确认后会先备份旧文件，"
-            "再覆盖当前发布内容。\n"
-        );
-    }
-    Confirmation += TEXT("\n是否继续？");
-
-    if (!DialogState->bBatchExecution && FMessageDialog::Open(
-            EAppMsgType::YesNo,
-            FText::FromString(Confirmation),
-            LOCTEXT("PublishConfirmTitle", "发布 UE 资产")
-        ) != EAppReturnType::Yes)
-    {
-        bIsPublishing = false;
-        SetProgress(0.0f, LOCTEXT("Cancelled", "已取消发布"));
-        return FReply::Handled();
-    }
-
     TUniquePtr<FScopedSlowTask> PublishSlowTask = MakeUnique<FScopedSlowTask>(
         1.0f,
         LOCTEXT("PublishingSlowTask", "正在发布 UE 资产…")
@@ -2694,53 +2659,40 @@ FReply SCGToolsPublisherWindow::OnPublishClicked()
     }
 
     FString HistoryPath;
+    CGToolsPublisher::FPublishFileResult FileResult;
     if (bSucceeded)
     {
-        UpdatePublishProgress(0.76f, LOCTEXT("PromotingPublish", "正在备份旧版本并上传服务器…"));
-        struct FAsyncPromotionResult
+        UpdatePublishProgress(0.72f, LOCTEXT("ComparingPublishFiles", "正在比较发布文件…"));
+        TArray<FString> Roots = { TEXT("UE/Content"), TEXT("UE") / (AssetName + TEXT(".uproject")) };
+        if (bPublishFbx) { Roots.Add(TEXT("FBX")); }
+        if (bPublishIcon) { Roots.Add(TEXT("Icon")); }
+        if (bPublishTextures) { Roots.Add(TEXT("Texture")); }
+        const auto Plan = MakeShared<CGToolsPublisher::FPublishFilePlan>(
+            CGToolsPublisher::PreparePublishFilePlan(StagingRoot, AssetRoot, Roots));
+        if (!Plan->Error.IsEmpty()) { bSucceeded = false; Error = Plan->Error; }
+        else
         {
-            bool bSucceeded = false;
-            FString HistoryPath;
-            FString Error;
-        };
-
-        TFuture<FAsyncPromotionResult> PromotionFuture = Async(
-            EAsyncExecution::ThreadPool,
-            [
-                AssetName,
-                AssetRoot,
-                StagingRoot,
-                RelativeAssetFile,
-                bPublishFbx,
-                bPublishIcon,
-                bPublishTextures
-            ]()
+            PublishSlowTask.Reset();
+            const FString Label = FString::Printf(TEXT("%s：%s\n项目：%s　类型：%s\n目标：%s"),
+                *GetAssetKindLabel(), *AssetName, *Project, *AssetType, *AssetRoot);
+            if (!CGToolsPublisher::ReviewPublishFiles(Plan, Label, FSlateApplication::Get().FindWidgetWindow(AsShared())))
             {
-                FAsyncPromotionResult Result;
-                Result.bSucceeded = PromoteStagedPublish(
-                    AssetName,
-                    AssetRoot,
-                    StagingRoot,
-                    RelativeAssetFile,
-                    bPublishFbx,
-                    bPublishIcon,
-                    bPublishTextures,
-                    Result.HistoryPath,
-                    Result.Error
-                );
-                return Result;
+                PlatformFile.DeleteDirectoryRecursively(*StagingRoot);
+                bIsPublishing = false;
+                SetProgress(0.0f, LOCTEXT("FileReviewCancelled", "已取消，服务器文件和数据库未修改"));
+                return FReply::Handled();
             }
-        );
-
-        while (!PromotionFuture.IsReady())
-        {
-            PublishSlowTask->TickProgress();
-            FPlatformProcess::Sleep(0.03f);
+            PublishSlowTask = MakeUnique<FScopedSlowTask>(1.0f, LOCTEXT("CommittingSelectedFiles", "正在备份并上传勾选的文件…"));
+            PublishSlowTask->MakeDialog(false, false);
+            UpdatePublishProgress(0.76f, LOCTEXT("PromotingPublish", "正在备份旧版本并上传服务器…"));
+            auto Future = Async(EAsyncExecution::ThreadPool, [Plan, AssetRoot]()
+                { return CGToolsPublisher::CommitPublishFiles(*Plan, AssetRoot / TEXT("history")); });
+            while (!Future.IsReady()) { PublishSlowTask->TickProgress(); FPlatformProcess::Sleep(0.03f); }
+            FileResult = Future.Get();
+            bSucceeded = FileResult.bSucceeded;
+            HistoryPath = FileResult.History;
+            Error = FileResult.Error;
         }
-        FAsyncPromotionResult PromotionResult = PromotionFuture.Get();
-        bSucceeded = PromotionResult.bSucceeded;
-        HistoryPath = MoveTemp(PromotionResult.HistoryPath);
-        Error = MoveTemp(PromotionResult.Error);
     }
 
     PlatformFile.DeleteDirectoryRecursively(*StagingRoot);
@@ -2754,6 +2706,18 @@ FReply SCGToolsPublisherWindow::OnPublishClicked()
             LOCTEXT("PublishFailed", "发布 UE 资产失败：\n\n{0}"),
             FText::FromString(Error)
         ));
+        return FReply::Handled();
+    }
+
+    if (!FileResult.bComplete)
+    {
+        PublishSlowTask.Reset(); bIsPublishing = false;
+        SetProgress(1.0f, LOCTEXT("PartialPublish", "部分文件已发布，数据库发布状态未更新"));
+        DialogState->bPartial = true;
+        DialogState->Result = ECGToolsPublisherDialogResult::Published;
+        DialogState->Completion = FString::Printf(TEXT("部分发布：已写入 %d 个文件，仍有 %d 个差异文件未勾选。\n目标：%s\n数据库发布状态未更新，重新发布可继续选择。\n备份：%s"),
+            FileResult.Copied, FileResult.Skipped, *AssetRoot, *HistoryPath);
+        if (!DialogState->bBatchExecution) { FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(DialogState->Completion)); }
         return FReply::Handled();
     }
 

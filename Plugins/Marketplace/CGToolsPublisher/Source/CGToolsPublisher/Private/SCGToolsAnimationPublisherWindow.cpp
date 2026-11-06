@@ -1,4 +1,5 @@
 #include "SCGToolsAnimationPublisherWindow.h"
+#include "CGToolsPublisherFileReview.h"
 #include "CGToolsPublisherDatabase.h"
 #include "CGToolsPublisherMayaBridge.h"
 
@@ -193,8 +194,12 @@ namespace
     struct FAnimationPublishResult
     {
         bool bMayaPublished = false;
+        bool bPartial = false;
+        FString FileSummary;
         FString MayaWarning;
     };
+
+    using FAnimationFileCommit = TFunction<bool(const FAnimationTarget&, const FString&, bool, FAnimationPublishResult&, FString&)>;
 
     using FAnimationAssetChecker = FCGToolsDatabaseResult (*)(const FString&, const FString&);
 
@@ -447,7 +452,7 @@ namespace
 
     bool PublishAnimation(UAnimSequence* Animation, const FAnimationTarget& Target, FString& OutError,
         FAnimationPublishResult& OutResult, FAnimationMayaBaker BakeMaya = &CGToolsPublisher::BakeAnimationToMaya,
-        FAnimationAssetChecker CheckAsset = &CheckAnimationAssetRecord)
+        FAnimationAssetChecker CheckAsset = &CheckAnimationAssetRecord, const FAnimationFileCommit& ReviewCommit = {})
     {
         OutError.Reset();
         OutResult = FAnimationPublishResult();
@@ -522,9 +527,11 @@ namespace
         }
         // A failed/cancelled bake can leave a partial .ma in staging. Include
         // it only when the bridge explicitly reports a validated result.
-        if (!CommitAnimationFiles(Target, Staging, OutError, bMayaReady))
+        if (!(ReviewCommit ? ReviewCommit(Target, Staging, bMayaReady, OutResult, OutError)
+            : CommitAnimationFiles(Target, Staging, OutError, bMayaReady)))
         {
             // Retain local outputs and backups if a server write or recovery failed.
+            if (OutError.IsEmpty()) { return false; } // A cancelled file review does not report an export failure.
             bKeepStaging = true;
             OutError += TEXT("\n本地暂存与备份保留在：") + Staging;
             if (!OutResult.MayaWarning.IsEmpty())
@@ -533,7 +540,7 @@ namespace
             }
             return false;
         }
-        OutResult.bMayaPublished = bMayaReady;
+        if (!ReviewCommit) { OutResult.bMayaPublished = bMayaReady; }
         return true;
     }
 }
@@ -683,7 +690,7 @@ FReply SCGToolsAnimationPublisherWindow::OnConfirm()
     if (IFileManager::Get().FileExists(*Target.Uasset) || IFileManager::Get().FileExists(*Target.Fbx)
         || IFileManager::Get().FileExists(*Target.Maya))
     {
-        Confirmation += TEXT("\n\n同名文件已存在，点击【Yes】将覆盖 .uasset 和 .fbx；.ma 仅在反求成功时覆盖，失败时保留旧文件。");
+        Confirmation += TEXT("\n\n同名文件已存在。导出后将列出文件差异，只有勾选的文件才会覆盖；.ma 反求失败时保留服务器旧文件。");
     }
     if (!DialogState->bBatchExecution && FMessageDialog::Open(EAppMsgType::YesNo, FText::FromString(Confirmation)) != EAppReturnType::Yes)
     {
@@ -691,20 +698,51 @@ FReply SCGToolsAnimationPublisherWindow::OnConfirm()
     }
     TGuardValue<bool> PublishingGuard(bPublishing, true);
     TGuardValue<bool> DialogPublishingGuard(DialogState->bPublishing, true);
+    DialogState->bPartial = false;
+    DialogState->Result = ECGToolsPublisherDialogResult::Cancelled;
+    DialogState->Error.Reset(); DialogState->Completion.Reset();
     TStrongObjectPtr<UAnimSequence> Animation(Cast<UAnimSequence>(AssetData.GetAsset()));
     FAnimationPublishResult PublishResult;
-    if (!PublishAnimation(Animation.Get(), Target, Error, PublishResult))
+    const FAnimationFileCommit ReviewCommit = [this](const FAnimationTarget& Output, const FString& Staging, bool bMayaReady,
+        FAnimationPublishResult& Result, FString& OutError)
+    {
+        const FString Upload = Staging / TEXT("Upload");
+        IFileManager& Files = IFileManager::Get();
+        Files.MakeDirectory(*Upload, true);
+        TArray<FString> Roots;
+        for (const FString& Extension : { FString(TEXT("uasset")), FString(TEXT("fbx")), FString(TEXT("ma")) })
+        {
+            const FString Relative = Output.BaseName + TEXT(".") + Extension;
+            Roots.Add(Relative);
+            if (Extension == TEXT("ma") && !bMayaReady) { continue; }
+            if (Files.Copy(*(Upload / Relative), *(Staging / (TEXT("Animation.") + Extension)), false, false) != COPY_OK)
+            { OutError = TEXT("无法准备动画发布文件：") + Upload / Relative; return false; }
+        }
+        CGToolsPublisher::FPublishFileResult FileResult;
+        if (!CGToolsPublisher::ReviewAndCommitPublishFiles(Upload, Output.Directory, Roots, Output.Directory / TEXT("history"),
+            TEXT("动画：") + Output.BaseName + TEXT("\n目标：") + Output.Directory,
+            FSlateApplication::Get().FindWidgetWindow(AsShared()), FileResult))
+        { OutError = FileResult.Error; return false; }
+        Result.bPartial = !FileResult.bComplete;
+        Result.bMayaPublished = bMayaReady && FileResult.bComplete;
+        Result.FileSummary = FString::Printf(TEXT("\n已写入 %d 个文件，未选择 %d 个差异文件。\n备份：%s"),
+            FileResult.Copied, FileResult.Skipped, *FileResult.History);
+        return true;
+    };
+    if (!PublishAnimation(Animation.Get(), Target, Error, PublishResult, &CGToolsPublisher::BakeAnimationToMaya, &CheckAnimationAssetRecord, ReviewCommit))
     {
         DialogState->Error = Error;
-        if (!DialogState->bBatchExecution) { FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(Error)); }
+        if (!DialogState->bBatchExecution && !Error.IsEmpty()) { FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(Error)); }
         return FReply::Handled();
     }
-    FString Completion = FString::Printf(TEXT("动画发布完成：\n%s\n%s"), *Target.Uasset, *Target.Fbx);
+    FString Completion = PublishResult.bPartial ? TEXT("动画部分发布，仍有未选择的差异文件。\n目标：") + Target.Directory
+        : FString::Printf(TEXT("动画发布完成：\n%s\n%s"), *Target.Uasset, *Target.Fbx);
+    Completion += PublishResult.FileSummary;
     if (PublishResult.bMayaPublished)
     {
         Completion += TEXT("\n") + Target.Maya;
     }
-    else
+    else if (!PublishResult.bPartial)
     {
         Completion += TEXT("\n\n") + PublishResult.MayaWarning;
         if (IFileManager::Get().FileExists(*Target.Maya))
@@ -717,6 +755,7 @@ FReply SCGToolsAnimationPublisherWindow::OnConfirm()
         }
     }
     DialogState->bWarning = !PublishResult.bMayaPublished;
+    DialogState->bPartial = PublishResult.bPartial;
     if (bNotifyMaya && PublishResult.bMayaPublished)
     {
         FString MayaMessage;
@@ -731,7 +770,7 @@ FReply SCGToolsAnimationPublisherWindow::OnConfirm()
     DialogState->Completion = Completion;
     if (!DialogState->bBatchExecution) { FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(Completion)); }
     DialogState->Result = ECGToolsPublisherDialogResult::Published;
-    CloseWindow();
+    if (!PublishResult.bPartial) { CloseWindow(); }
     return FReply::Handled();
 }
 

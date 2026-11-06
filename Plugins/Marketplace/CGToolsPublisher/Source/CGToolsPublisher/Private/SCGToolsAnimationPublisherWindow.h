@@ -23,6 +23,7 @@ public:
     virtual bool ValidateBatch(FString& OutDestination, FString& OutError) override;
     virtual FString GetPerAssetSettingsKey() const override;
     virtual void PublishBatch() override { OnConfirm(); }
+    virtual bool ReviewsPublishFiles() const override { return true; }
 
 private:
     FAssetData AssetData;

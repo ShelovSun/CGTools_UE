@@ -47,6 +47,7 @@ public:
     virtual void ApplySharedSettings(const FCGToolsPublisherSharedSettings& Settings) override;
     virtual bool ValidateBatch(FString& OutDestination, FString& OutError) override;
     virtual void PublishBatch() override { OnPublishClicked(); }
+    virtual bool ReviewsPublishFiles() const override { return true; }
     FString GetSourceFolder() const { return MeshAssetFolder; }
     static FCGToolsPublisherConfig LoadConfig();
     virtual FString GetRecordLabel() const override;
@@ -56,6 +57,7 @@ public:
 
 private:
     friend class FCGToolsPublisherMeshPromotionTest;
+    friend class FCGToolsPublisherUnifiedWindowTest;
     FAssetData AssetData;
     TSharedPtr<FCGToolsPublisherDialogState> DialogState;
     TStrongObjectPtr<UObject> PublishAsset;

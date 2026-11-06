@@ -135,7 +135,11 @@ void SCGToolsPublisherBatchWindow::Construct(const FArguments& InArgs)
             + SVerticalBox::Slot().AutoHeight().Padding(0, 8, 0, 4)
             [ SNew(STextBlock).Text_Lambda([this]() { return FText::FromString(Status); }).AutoWrapText(true) ]
             + SVerticalBox::Slot().AutoHeight()
-            [ SNew(SProgressBar).Percent_Lambda([this]() { return Work.IsEmpty() ? 0.0f : static_cast<float>(Next) / Work.Num(); }) ]
+            [
+                SAssignNew(ProgressBar, SProgressBar)
+                .Visibility_Lambda([this]() { return bRunning ? EVisibility::Visible : EVisibility::Collapsed; })
+                .Percent_Lambda([this]() { return Work.IsEmpty() ? 0.0f : static_cast<float>(Next) / Work.Num(); })
+            ]
             + SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(0, 10, 0, 0)
             [
                 SNew(SHorizontalBox)
@@ -234,6 +238,7 @@ FText SCGToolsPublisherBatchWindow::GetResultText(const TSharedPtr<FItem>& Item)
     case EResult::Publishing: return LOCTEXT("Publishing", "发布中");
     case EResult::Succeeded: return LOCTEXT("Succeeded", "发布成功");
     case EResult::Warning: return LOCTEXT("Warning", "已发布，有提示");
+    case EResult::Partial: return LOCTEXT("Partial", "部分发布，点击查看");
     case EResult::Failed: return LOCTEXT("Failed", "未完成，点击查看原因");
     default: return LOCTEXT("Waiting", "待发布");
     }
@@ -244,7 +249,7 @@ FSlateColor SCGToolsPublisherBatchWindow::GetResultColor(const TSharedPtr<FItem>
     switch (Item->Result)
     {
     case EResult::Failed: return FLinearColor(1.0f, 0.25f, 0.2f);
-    case EResult::Warning: return FLinearColor(1.0f, 0.7f, 0.15f);
+    case EResult::Warning: case EResult::Partial: return FLinearColor(1.0f, 0.7f, 0.15f);
     case EResult::Succeeded: return FLinearColor(0.25f, 0.85f, 0.4f);
     case EResult::Publishing: case EResult::Checking: case EResult::Ready: return FLinearColor(0.3f, 0.7f, 1.0f);
     default: return FSlateColor::UseSubduedForeground();
@@ -263,6 +268,17 @@ FString SCGToolsPublisherBatchWindow::GetGroupDescription() const
 void SCGToolsPublisherBatchWindow::SetGroupResult(int32 Index, EResult Result, const FString& Detail)
 {
     for (int32 Member : Groups[Index].Members) { Items[Member]->Result = Result; Items[Member]->Detail = Detail; }
+}
+
+FString SCGToolsPublisherBatchWindow::GetCompletionSummary() const
+{
+    int32 CompletedAssets = 0;
+    for (const FGroup& Group : Groups)
+    {
+        if (Group.bCompleted) { CompletedAssets += Group.Members.Num(); }
+    }
+    return FString::Printf(TEXT("批量发布结束：完成 %d 个资产，未完成 %d 个资产（共 %d 个发布项）。点击资产查看详细结果；再次发布仅处理未完成项。"),
+        CompletedAssets, Items.Num() - CompletedAssets, Groups.Num());
 }
 
 FReply SCGToolsPublisherBatchWindow::OnStart()
@@ -289,7 +305,7 @@ FReply SCGToolsPublisherBatchWindow::OnStart()
         { Work.Add(Index); Groups[Index].ValidationError.Reset(); SetGroupResult(Index, EResult::Waiting, FString()); }
         else { Destinations.Add(Groups[Index].Destination.Replace(TEXT("\\"), TEXT("/")).ToLower(), Index); }
     }
-    if (Work.IsEmpty()) { Status = TEXT("全部发布项已完成。"); return FReply::Handled(); }
+    if (Work.IsEmpty()) { Status = GetCompletionSummary(); return FReply::Handled(); }
     bRunning = true; bStopRequested = false; bValidationFailed = false;
     DialogState->bPublishing = true; Phase = EPhase::Validate;
     Status = TEXT("正在检查全部发布项…");
@@ -350,6 +366,11 @@ bool SCGToolsPublisherBatchWindow::Step(float)
     if (Phase == EPhase::Validate)
     {
         if (bValidationFailed) { Finish(TEXT("校验未通过，尚未发布。点击未完成项查看原因，修改后再次批量发布。")); return false; }
+        if (GetPanel(Groups[Work[0]].Representative).Panel->ReviewsPublishFiles())
+        {
+            Phase = EPhase::Publish; Next = 0;
+            return true;
+        }
         FString Confirmation = FString::Printf(TEXT("是否批量发布 %d 个发布项（所选共 %d 个资产）？\n\n项目：%s\n类型：%s\n"), Work.Num(), Items.Num(), *SharedSettings.Project, *SharedSettings.Type);
         if (!SharedSettings.Directory.IsEmpty()) { Confirmation += TEXT("目标目录：") + SharedSettings.Directory + TEXT("\n"); }
         Confirmation += TEXT("\n同名内容将按原发布规则备份并覆盖；源资产位置保留。\n每个所选模型分别生成 FBX/Icon；同文件夹只迁移一次 UE 包。\n动画始终尝试生成 .ma，反求失败仍发布 .uasset 和 .fbx。\n\n");
@@ -376,24 +397,23 @@ bool SCGToolsPublisherBatchWindow::Step(float)
         for (int32 Member : Group.Members) { Panels.Add(GetPanel(Member).Panel); }
         Handle.Panel->SetGroupPanels(Panels);
         Handle.State->Result = ECGToolsPublisherDialogResult::Cancelled;
-        Handle.State->Error.Reset(); Handle.State->Completion.Reset(); Handle.State->bWarning = false;
+        Handle.State->Error.Reset(); Handle.State->Completion.Reset(); Handle.State->bWarning = false; Handle.State->bPartial = false;
         TGuardValue<bool> ExecutionGuard(Handle.State->bBatchExecution, true);
         Handle.Panel->PublishBatch();
-        Group.bCompleted = Handle.State->Result == ECGToolsPublisherDialogResult::Published;
+        const bool bPublished = Handle.State->Result == ECGToolsPublisherDialogResult::Published;
+        Group.bCompleted = bPublished && !Handle.State->bPartial;
         if (Group.bCompleted)
         {
             for (int32 Member : Group.Members)
             { Items[Member]->PublishedSettingsKey = GetPanel(Member).Panel->GetPerAssetSettingsKey(); }
         }
-        SetGroupResult(Index, Group.bCompleted ? (Handle.State->bWarning ? EResult::Warning : EResult::Succeeded) : EResult::Failed,
-            Group.bCompleted ? Handle.State->Completion : Handle.State->Error.IsEmpty() ? TEXT("发布已取消或未完成，请检查 Output Log 后重试。") : Handle.State->Error);
+        SetGroupResult(Index, bPublished ? (Handle.State->bPartial ? EResult::Partial : Handle.State->bWarning ? EResult::Warning : EResult::Succeeded) : EResult::Failed,
+            bPublished ? Handle.State->Completion : Handle.State->Error.IsEmpty() ? TEXT("发布已取消或未完成。") : Handle.State->Error);
         UE_LOG(LogTemp, Display, TEXT("CGTools batch: %s\n%s"), *Item->Asset.GetSoftObjectPath().ToString(), *Item->Detail);
         ++Next;
         return true;
     }
-    int32 Completed = 0;
-    for (const FGroup& Group : Groups) { Completed += Group.bCompleted ? 1 : 0; }
-    Finish(FString::Printf(TEXT("批量发布结束：完成 %d 项，未完成 %d 项。点击资产查看详细结果；再次发布仅处理未完成项。"), Completed, Groups.Num() - Completed));
+    Finish(GetCompletionSummary());
     return false;
 }
 
