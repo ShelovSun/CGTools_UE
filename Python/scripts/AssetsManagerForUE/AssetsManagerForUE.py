@@ -39,6 +39,7 @@ from .utils.ue_window_style import (
     apply_ue_stylesheet,
     unreal_window_icon,
 )
+from .utils.ue_window_minimize import UEWindowMinimizeController
 
 
 class AssetsManagerUI(QtWidgets.QWidget):
@@ -46,7 +47,7 @@ class AssetsManagerUI(QtWidgets.QWidget):
     scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/')
     sm_temp = "{}/ShotManagerTemp".format(os.environ.get('APPDATA'))
     SM_SETTING_JSON = "{}/setting.json".format(sm_temp)
-    VERSION = "4.3.31"
+    VERSION = "4.3.36"
     def __init__(self, parent=None):
         super(AssetsManagerUI, self).__init__(parent)
 
@@ -108,11 +109,14 @@ class AssetsManagerUI(QtWidgets.QWidget):
         root.setContentsMargins(1, 1, 1, 1)
         root.setSpacing(0)
 
+        self._window_minimizer = UEWindowMinimizeController(self)
         self.title_bar = UEWindowTitleBar(
             self,
             self.windowTitle(),
             close_callback=self.close,
             allow_maximize=True,
+            allow_minimize=True,
+            minimize_callback=self._window_minimizer.minimize,
         )
         root.addWidget(self.title_bar)
 

@@ -499,6 +499,7 @@ QLabel#UEWindowTitle
     padding: 0px;
 }
 
+QPushButton[ueWindowControl="true"],
 QPushButton#UEWindowCloseButton
 {
     background: transparent;
@@ -508,6 +509,18 @@ QPushButton#UEWindowCloseButton
     padding: 0px;
     qproperty-normalGlyphColor: #bdbdbd;
     qproperty-hoverGlyphColor: #ffffff;
+}
+
+QPushButton[ueWindowControl="true"]:hover
+{
+    background: #363636;
+    border: none;
+}
+
+QPushButton[ueWindowControl="true"]:pressed
+{
+    background: #444444;
+    border: none;
 }
 
 QPushButton#UEWindowCloseButton:hover

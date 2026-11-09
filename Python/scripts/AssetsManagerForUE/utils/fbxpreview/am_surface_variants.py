@@ -1,13 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""多皮肤资产的轻量发现器。
+"""多皮肤资产和多模型场景的轻量发现器。
 
-发布约定：
-    Icon/<asset>_<surface>.png
-    FBX/<asset>_<surface>.fbx
+Assets 配对 <asset>_<surface>，Scenes 配对实际模型名的 Icon 和 FBX。
 
 目录枚举全部在线程池执行；调用方只拿到已经同时存在 Icon 与 FBX 的配对结果，
-不会读取或解析 FBX。结果按皮肤名自然排序，作为卡片和预览器一致的“首个皮肤”。
+不会读取或解析 FBX。结果自然排序，卡片和预览器使用同一个首项。
 """
 
 import os
@@ -20,6 +18,28 @@ from PySide6 import QtCore
 _IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp")
 
 
+def isSceneIconPath(icon_path):
+    return "/scenes/" in str(icon_path or "").replace("\\", "/").lower()
+
+
+def supportsSurfaceVariants(icon_path, asset_name):
+    path = str(icon_path or "").replace("\\", "/").lower()
+    return bool(asset_name and ("/assets/" in path or "/scenes/" in path))
+
+
+def _identical_icons(first, second):
+    """Recognize legacy folder aliases without reading any FBX content."""
+    if os.path.getsize(first) != os.path.getsize(second):
+        return False
+    with open(first, "rb") as a, open(second, "rb") as b:
+        while True:
+            chunk = a.read(65536)
+            if chunk != b.read(65536):
+                return False
+            if not chunk:
+                return True
+
+
 def _natural_key(value):
     return [int(part) if part.isdigit() else part.lower()
             for part in re.split(r"(\d+)", value)]
@@ -28,8 +48,9 @@ def _natural_key(value):
 def discoverSurfaceVariants(icon_path, asset_name):
     """返回 ``[(surface_name, icon_path, fbx_path), ...]``。
 
-    只认 ``<asset>_`` 前缀，并要求同名 FBX 存在；主 ``<asset>.png/.fbx``
-    不属于皮肤清单。任何网络目录/权限错误都按无皮肤处理，不影响普通资产显示。
+    Assets 使用 ``<asset>_<skin>``；Scenes 使用任意同名 Icon/FBX 配对。
+    场景旧文件夹名图片若与某个模型图片完全相同则视为历史副本并忽略；
+    实际同名模型有独立图片时保留。任何目录/权限错误均回退到普通图片。
     """
     if not icon_path or not asset_name:
         return []
@@ -43,12 +64,15 @@ def discoverSurfaceVariants(icon_path, asset_name):
         return []
 
     prefix = (asset_name + "_").lower()
+    scene = isSceneIconPath(icon_path)
+    def matches(stem):
+        return scene or stem.lower().startswith(prefix)
     try:
         fbx_by_stem = {}
         with os.scandir(fbx_dir) as entries:
             for entry in entries:
                 stem, ext = os.path.splitext(entry.name)
-                if ext.lower() == ".fbx" and stem.lower().startswith(prefix):
+                if ext.lower() == ".fbx" and matches(stem) and entry.is_file():
                     fbx_by_stem[stem.lower()] = entry.path.replace("\\", "/")
 
         variants = []
@@ -56,16 +80,21 @@ def discoverSurfaceVariants(icon_path, asset_name):
             for entry in entries:
                 stem, ext = os.path.splitext(entry.name)
                 stem_lower = stem.lower()
-                if ext.lower() not in _IMAGE_EXTENSIONS or not stem_lower.startswith(prefix):
+                if ext.lower() not in _IMAGE_EXTENSIONS or not matches(stem) or not entry.is_file():
                     continue
                 fbx_path = fbx_by_stem.get(stem_lower)
                 if not fbx_path:
                     continue
-                surface_name = stem[len(asset_name) + 1:]
+                surface_name = stem if scene else stem[len(asset_name) + 1:]
                 if surface_name:
                     variants.append((surface_name,
                                      entry.path.replace("\\", "/"),
                                      fbx_path))
+        if scene and len(variants) > 1:
+            canonical = [v for v in variants if v[0].lower() == asset_name.lower()]
+            models = [v for v in variants if v[0].lower() != asset_name.lower()]
+            variants = models + [v for v in canonical
+                                 if not any(_identical_icons(v[1], m[1]) for m in models)]
     except (OSError, IOError):
         return []
 
@@ -160,5 +189,9 @@ class SurfaceVariantLoader(QtCore.QObject):
     def clearCache(self):
         """发布后点击刷新时失效目录结果；运行中的请求仍允许安全结束。"""
         self._cache.clear()
+
+    def invalidate(self, icon_path, asset_name):
+        """Expire one completed listing without disturbing other assets."""
+        self._cache.pop(self._key(icon_path, asset_name), None)
 
 

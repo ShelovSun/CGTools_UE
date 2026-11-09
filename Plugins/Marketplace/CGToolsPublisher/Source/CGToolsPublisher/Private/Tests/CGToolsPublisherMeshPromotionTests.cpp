@@ -49,14 +49,14 @@ bool FCGToolsPublisherMeshPromotionTest::RunTest(const FString& Parameters)
     TSharedPtr<SCGToolsPublisherWindow> Canonical = StaticCastSharedPtr<SCGToolsPublisherWindow>(Panels[2]);
     FString Error, History;
     A->SetGroupPanels({ Panels[0], Panels[1] });
-    TestTrue(TEXT("A folder without an identically named selection exports a canonical alias"), A->ExportMeshOutputs(Stage, true, true, Error));
-    for (const FString& Name : { FString(TEXT("Coin_A")), FString(TEXT("Coin_B")), FString(TEXT("Coins")) })
+    TestTrue(TEXT("A static folder without an identically named selection exports only selected models"), A->ExportMeshOutputs(Stage, true, true, Error));
+    for (const FString& Name : { FString(TEXT("Coin_A")), FString(TEXT("Coin_B")) })
     {
-        TestTrue(TEXT("Every selected model and the folder alias has FBX"), Files.FileSize(*(Stage / TEXT("FBX") / (Name + TEXT(".fbx")))) > 0);
-        TestTrue(TEXT("Every selected model and the folder alias has Icon"), Files.FileSize(*(Stage / TEXT("Icon") / (Name + TEXT(".png")))) > 0);
+        TestTrue(TEXT("Every selected model has FBX"), Files.FileSize(*(Stage / TEXT("FBX") / (Name + TEXT(".fbx")))) > 0);
+        TestTrue(TEXT("Every selected model has Icon"), Files.FileSize(*(Stage / TEXT("Icon") / (Name + TEXT(".png")))) > 0);
     }
-    TestTrue(TEXT("The fallback alias uses the first model's FBX bytes"), Read(Stage / TEXT("FBX/Coins.fbx")) == Read(Stage / TEXT("FBX/Coin_A.fbx")));
-    TestTrue(TEXT("The fallback alias uses the first model's own screenshot"), Read(Stage / TEXT("Icon/Coins.png")) == Read(Stage / TEXT("Icon/Coin_A.png")));
+    TestFalse(TEXT("No invented folder FBX"), Files.FileExists(*(Stage / TEXT("FBX/Coins.fbx"))));
+    TestFalse(TEXT("No invented folder Icon"), Files.FileExists(*(Stage / TEXT("Icon/Coins.png"))));
     TestTrue(TEXT("Different model screenshots remain distinct"), Read(Stage / TEXT("Icon/Coin_A.png")) != Read(Stage / TEXT("Icon/Coin_B.png")));
 
     Canonical->SetGroupPanels(Panels);

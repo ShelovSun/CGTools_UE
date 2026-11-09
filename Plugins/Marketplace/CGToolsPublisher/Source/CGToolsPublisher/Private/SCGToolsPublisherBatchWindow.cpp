@@ -260,6 +260,10 @@ FString SCGToolsPublisherBatchWindow::GetGroupDescription() const
 {
     if (!SelectedItem.IsValid()) { return FString(); }
     const FGroup& Group = Groups[SelectedItem->Group];
+    if (Group.Members.Num() > 1 && CGToolsPublisher::GetSelectionKind({ SelectedItem->Asset }) == ECGToolsPublisherKind::StaticMesh)
+    {
+        return FString::Printf(TEXT("%d 个模型分别以各自名称生成 FBX/Icon，UE 包合并发布；中文名共用。"), Group.Members.Num());
+    }
     return Group.Members.Num() > 1
         ? FString::Printf(TEXT("%d 个模型各自生成 FBX/Icon，UE 包合并发布；中文名共用。文件夹名的 FBX/Icon 使用：%s"), Group.Members.Num(), *Items[Group.Representative]->Asset.AssetName.ToString())
         : FString();

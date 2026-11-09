@@ -1,7 +1,7 @@
 {
   "FileVersion": 3,
-  "Version": 44,
-  "VersionName": "1.8.7",
+  "Version": 45,
+  "VersionName": "1.8.8",
   "FriendlyName": "CGTools Publisher",
   "Description": "Native UE editor publisher for CGTools server assets and ShotManager records.",
   "Category": "CGTools",

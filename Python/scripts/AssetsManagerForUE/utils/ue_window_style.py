@@ -55,14 +55,20 @@ def unreal_window_icon():
     return QtGui.QIcon(path) if os.path.isfile(path) else QtGui.QIcon()
 
 
-class _UEWindowCloseButton(QtWidgets.QPushButton):
-    """Close button with a painted cross, independent of the active font."""
+class _UEWindowControlButton(QtWidgets.QPushButton):
+    """Paint window controls independently of the active font or icon theme."""
 
-    def __init__(self, parent=None):
-        super(_UEWindowCloseButton, self).__init__(parent)
+    def __init__(self, glyph, parent=None):
+        super(_UEWindowControlButton, self).__init__(parent)
+        self._glyph = glyph
         self._normal_glyph_color = QtGui.QColor()
         self._hover_glyph_color = QtGui.QColor()
+        self.setProperty("ueWindowControl", True)
         self.setText("")
+
+    def setGlyph(self, glyph):
+        self._glyph = glyph
+        self.update()
 
     def _get_normal_glyph_color(self):
         return self._normal_glyph_color
@@ -91,7 +97,7 @@ class _UEWindowCloseButton(QtWidgets.QPushButton):
     )
 
     def paintEvent(self, event):
-        super(_UEWindowCloseButton, self).paintEvent(event)
+        super(_UEWindowControlButton, self).paintEvent(event)
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
         color = (self._hover_glyph_color if self.underMouse()
@@ -99,18 +105,26 @@ class _UEWindowCloseButton(QtWidgets.QPushButton):
         painter.setPen(QtGui.QPen(color, 1.25))
         center = self.rect().center()
         radius = 4
-        painter.drawLine(
-            center.x() - radius,
-            center.y() - radius,
-            center.x() + radius,
-            center.y() + radius,
-        )
-        painter.drawLine(
-            center.x() + radius,
-            center.y() - radius,
-            center.x() - radius,
-            center.y() + radius,
-        )
+        if self._glyph == "minimize":
+            painter.drawLine(center.x() - radius, center.y() + 3,
+                             center.x() + radius, center.y() + 3)
+        elif self._glyph == "maximize":
+            painter.drawRect(center.x() - radius, center.y() - radius,
+                             radius * 2, radius * 2)
+        elif self._glyph == "restore":
+            # Offset outlines, with the rear outline hidden by the front one.
+            painter.drawLine(center.x() - 1, center.y() - 5,
+                             center.x() + 5, center.y() - 5)
+            painter.drawLine(center.x() + 5, center.y() - 5,
+                             center.x() + 5, center.y() + 1)
+            painter.drawLine(center.x() + 3, center.y() + 1,
+                             center.x() + 5, center.y() + 1)
+            painter.drawRect(center.x() - 4, center.y() - 3, 7, 7)
+        else:
+            painter.drawLine(center.x() - radius, center.y() - radius,
+                             center.x() + radius, center.y() + radius)
+            painter.drawLine(center.x() + radius, center.y() - radius,
+                             center.x() - radius, center.y() + radius)
         painter.end()
 
 
@@ -119,11 +133,14 @@ class UEWindowTitleBar(QtWidgets.QWidget):
 
     HEIGHT = 36
 
-    def __init__(self, window, title, close_callback=None, allow_maximize=False):
+    def __init__(self, window, title, close_callback=None, allow_maximize=False,
+                 allow_minimize=False, minimize_callback=None, maximize_callback=None):
         super(UEWindowTitleBar, self).__init__(window)
         self._window = window
         self._close_callback = close_callback or window.close
         self._allow_maximize = bool(allow_maximize)
+        self._allow_minimize = bool(allow_minimize)
+        self._maximize_callback = maximize_callback
         self._drag_offset = None
         self._title_background_color = QtGui.QColor()
         self._separator_color = QtGui.QColor()
@@ -143,7 +160,8 @@ class UEWindowTitleBar(QtWidgets.QWidget):
         # Symmetric side holders keep the title centered in the whole window.
         left_holder = QtWidgets.QWidget(self)
         left_holder.setObjectName("UEWindowTitleSide")
-        left_holder.setFixedWidth(36)
+        side_width = 36 + 34 * (self._allow_minimize + self._allow_maximize)
+        left_holder.setFixedWidth(side_width)
         left_layout = QtWidgets.QHBoxLayout(left_holder)
         left_layout.setContentsMargins(2, 0, 6, 0)
         left_layout.setSpacing(0)
@@ -157,6 +175,7 @@ class UEWindowTitleBar(QtWidgets.QWidget):
         if not logo.isNull():
             self.logo_label.setPixmap(logo)
         left_layout.addWidget(self.logo_label)
+        left_layout.addStretch(1)
         layout.addWidget(left_holder)
 
         self.title_label = QtWidgets.QLabel(str(title), self)
@@ -167,24 +186,68 @@ class UEWindowTitleBar(QtWidgets.QWidget):
 
         right_holder = QtWidgets.QWidget(self)
         right_holder.setObjectName("UEWindowTitleSide")
-        right_holder.setFixedWidth(36)
+        right_holder.setFixedWidth(side_width)
         right_layout = QtWidgets.QHBoxLayout(right_holder)
         right_layout.setContentsMargins(1, 2, 1, 2)
         right_layout.setSpacing(0)
 
-        self.close_button = _UEWindowCloseButton(right_holder)
-        self.close_button.setObjectName("UEWindowCloseButton")
-        self.close_button.setFixedSize(34, 32)
-        self.close_button.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.close_button.setToolTip(u"\u5173\u95ed")
-        self.close_button.clicked.connect(self._close_callback)
+        self.minimize_button = None
+        self.maximize_button = None
+        if self._allow_minimize:
+            self.minimize_button = self._create_button(
+                right_holder, "UEWindowMinimizeButton", "minimize",
+                u"最小化", minimize_callback or window.showMinimized)
+            right_layout.addWidget(self.minimize_button)
+        if self._allow_maximize:
+            self.maximize_button = self._create_button(
+                right_holder, "UEWindowMaximizeButton", "maximize",
+                u"最大化", self._toggle_maximized)
+            right_layout.addWidget(self.maximize_button)
+        self.close_button = self._create_button(
+            right_holder, "UEWindowCloseButton", "close",
+            u"关闭", self._close_callback)
         right_layout.addWidget(self.close_button)
         layout.addWidget(right_holder)
+        window.installEventFilter(self)
+        self._sync_window_controls()
 
         # A new tool window gets the shared theme as soon as it adopts this
         # title bar. Callers only need extra QSS for their own content widgets.
         if not window.property("ueStylesheetApplied"):
             apply_ue_stylesheet(window)
+
+    @staticmethod
+    def _create_button(parent, name, glyph, tooltip, callback):
+        button = _UEWindowControlButton(glyph, parent)
+        button.setObjectName(name)
+        button.setFixedSize(34, 32)
+        button.setFocusPolicy(QtCore.Qt.NoFocus)
+        button.setToolTip(tooltip)
+        button.setAccessibleName(tooltip)
+        button.clicked.connect(callback)
+        return button
+
+    def _sync_window_controls(self):
+        if self.maximize_button is not None:
+            restore = self._window.isMaximized() or self._window.isFullScreen()
+            self.maximize_button.setGlyph("restore" if restore else "maximize")
+            tooltip = u"还原" if restore else u"最大化"
+            self.maximize_button.setToolTip(tooltip)
+            self.maximize_button.setAccessibleName(tooltip)
+
+    def eventFilter(self, watched, event):
+        if watched is self._window and event.type() == QtCore.QEvent.WindowStateChange:
+            self._sync_window_controls()
+        return super(UEWindowTitleBar, self).eventFilter(watched, event)
+
+    def _toggle_maximized(self):
+        if self._maximize_callback is not None:
+            self._maximize_callback()
+            return
+        if self._window.isMaximized() or self._window.isFullScreen():
+            self._window.showNormal()
+        else:
+            self._window.showMaximized()
 
     def setTitle(self, title):
         self.title_label.setText(str(title))
@@ -265,10 +328,7 @@ class UEWindowTitleBar(QtWidgets.QWidget):
     def mouseDoubleClickEvent(self, event):
         if (self._allow_maximize
                 and event.button() == QtCore.Qt.LeftButton):
-            if self._window.isMaximized():
-                self._window.showNormal()
-            else:
-                self._window.showMaximized()
+            self._toggle_maximized()
             event.accept()
             return
         super(UEWindowTitleBar, self).mouseDoubleClickEvent(event)

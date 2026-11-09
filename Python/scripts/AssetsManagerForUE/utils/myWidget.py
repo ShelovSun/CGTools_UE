@@ -5,6 +5,7 @@
 import os
 import math
 from . import imagesequence
+from .asset_card_thumbnail import load_card_image, supports_surface_icons
 from ..my_vendor import six
 from PySide6 import QtGui
 from PySide6 import QtCore
@@ -59,6 +60,7 @@ class ImageWorker(QtCore.QRunnable):
         QtCore.QRunnable.__init__(self, *args)
 
         self._path = None
+        self._assetName = ""
         self._size = 256  # 缩放上限（缩略图无需全分辨率，参考独立版 assetManager）
         self._shouldLoad = None  # 开跑前的可视性回调：返回 False 则跳过，把线程让给当前可见 item
         self.signals = WorkerSignals()
@@ -79,6 +81,9 @@ class ImageWorker(QtCore.QRunnable):
         """目标缩放尺寸（像素）。"""
         self._size = size
 
+    def setAssetName(self, name):
+        self._assetName = name
+
     def run(self):
         """The starting point for the thread - 在工作线程里就把大图缩小。"""
         try:
@@ -88,16 +93,10 @@ class ImageWorker(QtCore.QRunnable):
             if shouldLoad is not None and not shouldLoad():
                 self.signals.skipped.emit()
                 return
-            if not self._path or not os.path.exists(six.text_type(self._path)):
-                self.signals.triggered.emit(None)
+            image = load_card_image(self._path, self._assetName, self._size * 2, shouldLoad)
+            if shouldLoad is not None and not shouldLoad():
+                self.signals.skipped.emit()
                 return
-            image = QtGui.QImage(six.text_type(self._path))
-            # 优化：过大的图在后台线程缩小，主线程不再处理全分辨率大图（这是卡顿主因）
-            if not image.isNull() and (image.width() > self._size * 2 or
-                                       image.height() > self._size * 2):
-                image = image.scaled(self._size * 2, self._size * 2,
-                                     QtCore.Qt.KeepAspectRatio,
-                                     QtCore.Qt.SmoothTransformation)
             self.signals.triggered.emit(image)
         except Exception as error:
             print("Cannot load thumbnail image:%s" % error)
@@ -1183,6 +1182,7 @@ class Item(QtWidgets.QListWidgetItem):
         self._ignorePendingThumbnail = False
         self._thumbnailLoading = False    # 缩略图是否正在后台解码，避免每次重绘重复入队
         self._pendingThumbnailPath = None  # 当前后台正在解码的路径，回调时据此写回 _srcPixmapPath
+        self._thumbnailRefreshRequested = False
 
     def __eq__(self, other):
         return id(other) == id(self)
@@ -1298,6 +1298,8 @@ class Item(QtWidgets.QListWidgetItem):
         :rtype: None
         """
         self._itemData = data
+        self._ignorePendingThumbnail = self._thumbnailLoading
+        self._thumbnailRefreshRequested = False
         self._srcPixmap = None       # 数据变了：作废缓存的原图，让下次绘制按新路径重新加载
         self._srcPixmapPath = None
         self.setImageSequencePath()
@@ -1397,6 +1399,8 @@ class Item(QtWidgets.QListWidgetItem):
 
         :rtype: None
         """
+        self._ignorePendingThumbnail = self._thumbnailLoading
+        self._thumbnailRefreshRequested = True
         self._srcPixmap = None       # 主动刷新：丢弃缓存原图，按最新磁盘内容重新加载
         self._srcPixmapPath = None
         self.updateIcon()
@@ -1454,6 +1458,11 @@ class Item(QtWidgets.QListWidgetItem):
         self._srcPixmap = QtGui.QPixmap.fromImage(cached)
         self._srcPixmapPath = self.itemData()[7]
         self._thumbnailIcon = QtGui.QIcon(self._srcPixmap)
+        # A screenshot updates the base Icon file; rebuild multi-skin cards from
+        # their paired skin icons rather than leaving the card as one base image.
+        if supports_surface_icons(self.itemData()[7], self.name()):
+            self._thumbnailRefreshRequested = True
+            self.requestThumbnailLoad()
         self.repaintItem()
 
     def requestThumbnailLoad(self):
@@ -1469,12 +1478,15 @@ class Item(QtWidgets.QListWidgetItem):
         thumbnailPath = self.itemData()[7]
         if not thumbnailPath:
             return
-        if self._srcPixmap is not None and self._srcPixmapPath == thumbnailPath:
+        if (self._srcPixmap is not None and self._srcPixmapPath == thumbnailPath
+                and not self._thumbnailRefreshRequested):
             return  # 已缓存该路径原图，无需再加载
         self._thumbnailLoading = True
         self._pendingThumbnailPath = thumbnailPath
+        self._thumbnailRefreshRequested = False
         self._worker.setPath(thumbnailPath)
         self._worker.setSize(self.MAX_ICON_SIZE)
+        self._worker.setAssetName(self.name())
         self.ThreadPool.start(self._worker)
 
     def setVisibleInViewport(self, visible, autoload=True):
@@ -1610,6 +1622,7 @@ class Item(QtWidgets.QListWidgetItem):
         self._thumbnailLoading = False
         if self._ignorePendingThumbnail:
             self._ignorePendingThumbnail = False
+            self.requestThumbnailLoad()
             return
         # 异步回调期间列表可能已被 clear/重排 -> 本 item 的 C++ 对象已销毁；
         # 用一次 C++ 方法探测（Python 属性访问探测不到），已删则整段放弃，避免 use-after-delete。
@@ -1662,6 +1675,7 @@ class Item(QtWidgets.QListWidgetItem):
                 self._workerStarted = True
                 self._worker.setPath(thumbnailPath)
                 self._worker.setSize(self.MAX_ICON_SIZE)  # 后台缩放到该尺寸上限
+                self._worker.setAssetName(self.name())
                 self.ThreadPool.start(self._worker)  # 开始进程池 ImageWorker
                 self._thumbnailIcon = self.defaultThumbnailIcon()
             else:
@@ -2220,7 +2234,8 @@ class Item(QtWidgets.QListWidgetItem):
                     pixmap = self._placeholderPixmap()
                 else:
                     # 关闭后台线程时的同步回退（保留原行为）
-                    pixmap = QtGui.QPixmap(thumbnailPath)
+                    image = load_card_image(thumbnailPath, self.name(), self.MAX_ICON_SIZE * 2)
+                    pixmap = QtGui.QPixmap.fromImage(image) if image is not None else QtGui.QPixmap()
                     self._srcPixmap = pixmap
                     self._srcPixmapPath = thumbnailPath
 

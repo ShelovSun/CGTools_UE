@@ -38,7 +38,7 @@ from PySide6 import QtOpenGL
 
 from . import am_fbxMesh as fbxMesh
 from .am_thumbnail_loader import ThumbnailLoader
-from .am_surface_variants import SurfaceVariantLoader
+from .am_surface_variants import SurfaceVariantLoader, isSceneIconPath, supportsSurfaceVariants
 
 try:
     # Qt6:QOpenGLWidget 从 QtWidgets 迁到独立的 QtOpenGLWidgets 模块
@@ -1575,17 +1575,30 @@ class PreviewGLWidget(QtWidgets.QWidget):
         if self._preview_mode == "2d":
             self._showFallback(self._fallback_icon)
         fbx = self._deriveFbxPath(path, self._name)
-        self._scheduleLoad(fbx, path)
+        if isSceneIconPath(path):
+            # Do not parse a legacy folder alias while discovery is pending.
+            self._load_timer.stop()
+            self._pending_fbx = None
+            self._pending_icon = None
+        else:
+            self._scheduleLoad(fbx, path)
         self._requestSurfaceVariants(path)
 
     def _requestSurfaceVariants(self, icon_path):
-        """异步发现当前资产的逐皮 Icon+FBX；普通/场景资产保持原预览路径。"""
+        """异步发现资产皮肤或场景模型，不在 GUI 线程枚举目录。"""
         self._surface_request_serial += 1
         serial = self._surface_request_serial
         path = (icon_path or "").replace("\\", "/")
-        if not self._base_name or "/assets/" not in path.lower():
-            self._clearSurfaceControls()
+        self._clearSurfaceControls()
+        if not supportsSurfaceVariants(path, self._base_name):
             return
+        # Rediscover this scene on selection after publishing; concurrent
+        # requests still share the existing background worker.
+        if isSceneIconPath(path):
+            self._surface_loader.invalidate(path, self._base_name)
+        scene = isSceneIconPath(path)
+        self._surface_prev_btn.setToolTip(u"上一个模型" if scene else u"上一个皮肤")
+        self._surface_next_btn.setToolTip(u"下一个模型" if scene else u"下一个皮肤")
         self._surface_loader.request(
             path, self._base_name,
             lambda variants, token=serial: self._onSurfaceVariants(token, variants))
@@ -1595,6 +1608,12 @@ class PreviewGLWidget(QtWidgets.QWidget):
             return
         if len(variants) < 2:
             self._clearSurfaceControls()
+            if variants and isSceneIconPath(self._fallback_icon):
+                self._surface_variants = list(variants)
+                self._selectSurface(0)
+            elif not variants and isSceneIconPath(self._fallback_icon):
+                self._scheduleLoad(self._deriveFbxPath(self._fallback_icon, self._name),
+                                   self._fallback_icon)
             return
 
         self._surface_variants = list(variants)
@@ -1647,7 +1666,7 @@ class PreviewGLWidget(QtWidgets.QWidget):
             button = QtWidgets.QToolButton(self._surface_bar)
             button.setFixedSize(button_size, button_size)
             button.setIconSize(QtCore.QSize(button_size - 4, button_size - 4))
-            button.setToolTip("%s_%s" % (self._base_name, surface))
+            button.setToolTip(os.path.splitext(os.path.basename(icon_path))[0])
             button.clicked.connect(
                 lambda _checked=False, value=index: self._selectSurface(value))
             self._surface_layout.addWidget(button)
@@ -1695,7 +1714,7 @@ class PreviewGLWidget(QtWidgets.QWidget):
         self._surface_index = index
         self._updateSurfaceButtonState()
         surface, icon_path, fbx_path = self._surface_variants[index]
-        self._setTitleText("%s_%s" % (self._base_name, surface), self._base_zh_name)
+        self._setTitleText(os.path.splitext(os.path.basename(fbx_path))[0], self._base_zh_name)
 
         # 取消尚未触发的主 <asset>.fbx 防抖加载，避免它晚于皮肤选择并覆盖当前模型。
         self._load_timer.stop()

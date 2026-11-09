@@ -58,6 +58,7 @@ public:
 private:
     friend class FCGToolsPublisherMeshPromotionTest;
     friend class FCGToolsPublisherUnifiedWindowTest;
+    friend class FCGToolsPublisherStaticModelOutputsTest;
     FAssetData AssetData;
     TSharedPtr<FCGToolsPublisherDialogState> DialogState;
     TStrongObjectPtr<UObject> PublishAsset;
@@ -110,6 +111,8 @@ private:
     FString GetSelectedType() const;
     bool ResolveMeshAssetFolder(FString& OutType, FString& OutName, FString& OutError);
     FString GetAssetName() const;
+    bool UsesModelOutputNames() const;
+    FString GetOutputBaseName() const;
     FString GetAssetRoot() const;
 
     TSharedRef<SWidget> GenerateComboItem(TSharedPtr<FString> Item) const;

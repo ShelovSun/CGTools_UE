@@ -1777,12 +1777,13 @@ void SCGToolsPublisherWindow::RefreshTargetPath()
 
     const FString AssetRoot = GetAssetRoot();
     const FString AssetName = GetAssetName();
+    const FString OutputName = GetOutputBaseName();
     TArray<FString> PublishedItems;
     PublishedItems.Add(TEXT("UE/Content/（整个资产文件夹及完整依赖）"));
     PublishedItems.Add(FString::Printf(TEXT("UE/%s.uproject"), *AssetName));
     if (PublishFbxCheckBox.IsValid() && PublishFbxCheckBox->IsChecked())
     {
-        PublishedItems.Add(FString::Printf(TEXT("FBX/%s.fbx"), *AssetName));
+        PublishedItems.Add(FString::Printf(TEXT("FBX/%s.fbx"), *OutputName));
     }
     if (PublishTextureCheckBox.IsValid() && PublishTextureCheckBox->IsChecked())
     {
@@ -1790,7 +1791,7 @@ void SCGToolsPublisherWindow::RefreshTargetPath()
     }
     if (PublishIconCheckBox.IsValid() && PublishIconCheckBox->IsChecked())
     {
-        PublishedItems.Add(FString::Printf(TEXT("Icon/%s.png"), *AssetName));
+        PublishedItems.Add(FString::Printf(TEXT("Icon/%s.png"), *OutputName));
     }
 
     FString TargetDescription = AssetRoot + TEXT("\n");
@@ -2514,7 +2515,7 @@ FReply SCGToolsPublisherWindow::OnPublishClicked()
     const FString AssetRoot = GetAssetRoot();
     const FString FinalContent = AssetRoot / TEXT("UE/Content");
     const FString FinalProjectFile = AssetRoot / TEXT("UE") / (AssetName + TEXT(".uproject"));
-    const FString FinalIconFile = AssetRoot / TEXT("Icon") / (AssetName + TEXT(".png"));
+    const FString FinalIconFile = AssetRoot / TEXT("Icon") / (GetOutputBaseName() + TEXT(".png"));
     const FString FinalTextureDirectory = AssetRoot / TEXT("Texture");
 
     IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
@@ -2953,9 +2954,47 @@ bool SCGToolsPublisherWindow::ExportFbx(
     return CGToolsPublisher::ExportMeshFbx(Asset, DestinationFile, OutError);
 }
 
+bool SCGToolsPublisherWindow::UsesModelOutputNames() const
+{
+    return !bSkeletalMeshPublish && DialogState.IsValid() && DialogState->bEmbedded;
+}
+
+FString SCGToolsPublisherWindow::GetOutputBaseName() const
+{
+    return UsesModelOutputNames() ? AssetData.AssetName.ToString() : GetAssetName();
+}
+
 bool SCGToolsPublisherWindow::ExportMeshOutputs(const FString& StagingRoot,
     bool bPublishFbx, bool bPublishIcon, FString& Error) const
 {
+    if (UsesModelOutputNames())
+    {
+        // A batch still migrates the owning folder once, but never invents a
+        // folder-named FBX/Icon. Each model uses its own panel's captured icon.
+        TArray<const SCGToolsPublisherWindow*> Panels;
+        TSet<FString> Names;
+        for (const TWeakPtr<SCGToolsPublisherWindow>& WeakPanel : BatchMeshPanels)
+        {
+            const TSharedPtr<SCGToolsPublisherWindow> Panel = WeakPanel.Pin();
+            if (!Panel.IsValid() || !Panel->PublishAsset.IsValid())
+            { Error = TEXT("批量发布中的模型已失效。"); return false; }
+            const FString Name = Panel->AssetData.AssetName.ToString().ToLower();
+            if (Names.Contains(Name))
+            { Error = TEXT("同一资产文件夹内有重名模型，无法生成独立的 FBX/Icon：") + Name; return false; }
+            Names.Add(Name);
+            Panels.Add(Panel.Get());
+        }
+        if (Panels.IsEmpty()) { Panels.Add(this); }
+        for (const SCGToolsPublisherWindow* Panel : Panels)
+        {
+            const FString Name = Panel->AssetData.AssetName.ToString();
+            if (bPublishFbx && !Panel->ExportFbx(Panel->PublishAsset.Get(),
+                StagingRoot / TEXT("FBX") / (Name + TEXT(".fbx")), Error)) { return false; }
+            if (bPublishIcon && !Panel->ExportIcon(Panel->PublishAsset.Get(),
+                StagingRoot / TEXT("Icon") / (Name + TEXT(".png")), Error)) { return false; }
+        }
+        return true;
+    }
     const FString AssetName = GetAssetName();
     bool bSucceeded = true;
     if (bPublishFbx) { bSucceeded = ExportFbx(PublishAsset.Get(), StagingRoot / TEXT("FBX") / (AssetName + TEXT(".fbx")), Error); }
