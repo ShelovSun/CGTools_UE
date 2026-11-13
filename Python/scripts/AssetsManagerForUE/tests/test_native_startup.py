@@ -30,6 +30,12 @@ class Signal:
 
 
 class NativeStartupTests(unittest.TestCase):
+    def test_real_main_window_module_compiles_before_launcher_dispatch(self):
+        # The launcher tests below replace the heavy import. Compile the real
+        # entry module too, so a syntax error cannot hide behind that test seam.
+        main = SCRIPTS / 'AssetsManagerForUE' / 'AssetsManagerForUE.py'
+        compile(main.read_bytes(), str(main), 'exec')
+
     def setUp(self):
         self.events = []
         self.callbacks = {}

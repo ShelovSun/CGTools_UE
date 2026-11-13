@@ -47,7 +47,8 @@ class AssetsManagerUI(QtWidgets.QWidget):
     scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/')
     sm_temp = "{}/ShotManagerTemp".format(os.environ.get('APPDATA'))
     SM_SETTING_JSON = "{}/setting.json".format(sm_temp)
-    VERSION = "4.3.36"
+    VERSION = "4.4.1"
+
     def __init__(self, parent=None):
         super(AssetsManagerUI, self).__init__(parent)
 
@@ -104,7 +105,7 @@ class AssetsManagerUI(QtWidgets.QWidget):
             pass
 
     def build_ui(self):
-        """纯代码搭建主窗：资产/场景/蓝图/特效/组件五个懒加载页。"""
+        """纯代码搭建主窗：合并资产库/蓝图/组件/特效四个懒加载页。"""
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(1, 1, 1, 1)
         root.setSpacing(0)
@@ -133,17 +134,18 @@ class AssetsManagerUI(QtWidgets.QWidget):
         self._tab_build_pending = set()
         self._startup_load_enabled = False
         self.asset_page = self._createLazyPage(u"正在准备资产工具…")
-        self.scene_page = self._createLazyPage(u"正在准备场景工具…")
         self.blueprint_page = self._createLazyPage(u"正在准备蓝图工具…")
         self.vfx_page = self._createLazyPage(u"正在准备特效工具…")
         self.component_page = self._createLazyPage(u"正在准备组件工具…")
         self.tabWidget.addTab(self.asset_page, u"资产")
-        self.tabWidget.addTab(self.scene_page, u"场景")
         self.tabWidget.addTab(self.blueprint_page, u"蓝图")
         self.tabWidget.addTab(self.component_page, u"组件")
         self.tabWidget.addTab(self.vfx_page, u"特效")
 
         '''风格外观 / 记忆的窗口位置大小与上次 tab'''
+        legacy_settings = QtCore.QSettings('AssetsManagerUE', 'AssetsManagerUESettings')
+        self._legacy_scene_tab = (int(legacy_settings.value('tabLayoutVersion', 1)) < 2
+                                  and int(legacy_settings.value('tab', 0)) == 1)
         pos, size, tab = self.readSettings()
         if pos is not None and size is not None:
             self.resize(size)
@@ -152,7 +154,7 @@ class AssetsManagerUI(QtWidgets.QWidget):
             self.resize(950, 600)
             self.move(2000, 120)
         tab = int(tab) if tab is not None else 0
-        if tab not in (0, 1, 2, 3, 4):
+        if tab not in (0, 1, 2, 3):
             tab = 0
         self.getStyleSheet()
 
@@ -235,6 +237,7 @@ class AssetsManagerUI(QtWidgets.QWidget):
         settings.setValue('pos', self.pos())
         settings.setValue('size', self.size())
         settings.setValue('tab', self.tabWidget.currentIndex())
+        settings.setValue('tabLayoutVersion', 2)
 
     @staticmethod
     def readSettings():
@@ -242,6 +245,8 @@ class AssetsManagerUI(QtWidgets.QWidget):
         pos = settings.value('pos')
         size = settings.value('size')
         tab = settings.value('tab')
+        if int(settings.value('tabLayoutVersion', 1)) < 2:
+            tab = {0: 0, 1: 0, 2: 1, 3: 2, 4: 3}.get(int(tab or 0), 0)
 
         return pos, size, tab
 
@@ -253,7 +258,7 @@ class AssetsManagerUI(QtWidgets.QWidget):
 
     def _stop_child_threads(self):
         """停止各 tab 子界面持有的 QThread（MyThread 等），让旧窗口能被回收。"""
-        for page in (self.asset_page, self.scene_page, self.blueprint_page,
+        for page in (self.asset_page, self.blueprint_page,
                      self.component_page, self.vfx_page):
             layout = page.layout() if page is not None else None
             if layout is None:
@@ -292,7 +297,7 @@ class AssetsManagerUI(QtWidgets.QWidget):
         if idx in self._tab_initialized:
             self._tab_build_pending.discard(idx)
             return
-        pages = (self.asset_page, self.scene_page, self.blueprint_page,
+        pages = (self.asset_page, self.blueprint_page,
                  self.component_page, self.vfx_page)
         if idx not in range(len(pages)):
             self._tab_build_pending.discard(idx)
@@ -301,17 +306,14 @@ class AssetsManagerUI(QtWidgets.QWidget):
         layout = page.layout()
         try:
             if idx == 0:
-                from .sources import assetTools
-                widget = assetTools.AssetToolsUI(
-                    self.isSQL, user=self.user, password=self.password)
+                from .sources import libraryTools
+                widget = libraryTools.LibraryToolsUI(
+                    self.isSQL, user=self.user, password=self.password,
+                    initial_scope=('scene', None) if self._legacy_scene_tab else None)
             elif idx == 1:
-                from .sources import sceneTools
-                widget = sceneTools.SceneToolsUI(
-                    self.isSQL, user=self.user, password=self.password)
-            elif idx == 2:
                 from .sources import blueprintTools
                 widget = blueprintTools.BlueprintToolsUI()
-            elif idx == 3:
+            elif idx == 2:
                 from .sources import componentTools
                 widget = componentTools.ComponentToolsUI()
             else:

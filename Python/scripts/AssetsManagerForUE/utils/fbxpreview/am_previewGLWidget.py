@@ -315,6 +315,7 @@ class GLView(QOpenGLWidget):
             self.setMesh(md.interleaved, md.submeshes, images, md.bbox_min, md.bbox_max)
         # 否则(动画不支持且无静态回退)保持当前显示不变
 
+    @QtCore.Slot()
     def _advanceFrame(self):
         if not self._is_animated or self._frame_count <= 1:
             return

@@ -657,7 +657,9 @@ class MainQListWiget(QtWidgets.QListWidget):
         x = rect.x()
         for field, width in zip(self.listFieldIndices(), self.listColumnWidths()):
             cell = QtCore.QRect(x, rect.y(), width, rect.height() - 3)
-            if cell.contains(point) and field in fields:
+            allowed = getattr(self, 'rowFieldEditable', None)
+            if (cell.contains(point) and field in fields
+                    and (allowed is None or allowed(item.itemData(), field))):
                 return item, field, cell
             x += width
         return None
@@ -694,10 +696,11 @@ class MainQListWiget(QtWidgets.QListWidget):
             item = self.item(index.row())
             self.statusChangeRequested.emit(tuple(item.itemData()), field, value)
 
-    def updateStatusData(self, name, indices, value):
+    def updateStatusData(self, name, indices, value, predicate=None):
         """Update cached and visible rows without rebuilding previews/selection."""
         def updated(row):
-            if len(row) > 1 and str(row[1]) == name:
+            if (len(row) > 1 and str(row[1]) == name
+                    and (predicate is None or predicate(row))):
                 row = list(row)
                 for index in indices:
                     if index < len(row):
@@ -2379,6 +2382,9 @@ class Item(QtWidgets.QListWidgetItem):
 
                 editable = (field_index in items_widget._statusColumns
                             or items_widget._detailColumns.get(field_index) == "artist")
+                allowed = getattr(items_widget, 'rowFieldEditable', None)
+                if allowed is not None:
+                    editable = editable and allowed(data, field_index)
                 text_rect = cell.adjusted(6, 0, -17 if editable else -6, 0)
                 elided = metrics.elidedText(text, QtCore.Qt.ElideRight,
                                             max(0, text_rect.width()))

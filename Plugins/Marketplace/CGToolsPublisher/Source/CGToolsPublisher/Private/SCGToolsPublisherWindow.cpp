@@ -1407,7 +1407,7 @@ void SCGToolsPublisherWindow::Construct(const FArguments& InArgs)
                             .Padding(0.0f, 5.0f, 0.0f, 0.0f)
                             [
                                 SAssignNew(PublishFbxCheckBox, SCheckBox)
-                                .IsChecked(ECheckBoxState::Checked)
+                                .IsChecked(bSkeletalMeshPublish ? ECheckBoxState::Unchecked : ECheckBoxState::Checked)
                                 .OnCheckStateChanged_Lambda([this](ECheckBoxState)
                                 {
                                     RefreshTargetPath();

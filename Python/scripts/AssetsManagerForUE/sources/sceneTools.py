@@ -21,6 +21,7 @@ if venv_path not in sys.path:
 
 sys.path.append(scriptsPath.replace('sources', ''))
 from ..utils import exportFunctions, assetFunctions, messageBox, myWidget, thumbnail_update
+from ..utils.source_folder_menu import open_source_folder
 from ..utils.ue_window_style import (
     UEWindowFrameOverlay,
     UEWindowTitleBar,
@@ -591,7 +592,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
 
     def __init__(self, isSQL=True,
                  user="",
-                 password=""):
+                 password="", defer_initial_load=False):
         super(SceneToolsUI, self).__init__()
 
         self.scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/').replace('sources', '')
@@ -624,6 +625,9 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         self._status_editor.saved.connect(self._detailSaved)
         self._record_controller = asset_crud_ui.RecordController(self, "scene", self._statusContext)
         self._record_controller.changed.connect(self._recordChanged)
+        if defer_initial_load:
+            self.init_ui_thread = None
+            return
         self.firstView()
         self.viewThumbnail()
         # 数据加载(DB 查询)延迟到窗口显示后
@@ -1280,6 +1284,9 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         if currentItem is None:
             return
         self.main_listWgt.setCurrentItem(currentItem)
+        self.show_item_menu(currentItem)
+
+    def show_item_menu(self, currentItem):
         asset_root = self._assetRootForItem(currentItem)
 
         menu = QtWidgets.QMenu(self.main_listWgt)
@@ -1321,11 +1328,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         menu.exec_(QtGui.QCursor.pos())
 
     def openDir(self, folder_path=None):
-        folder_path = os.path.normpath(str(folder_path or ""))
-        if not folder_path or not os.path.isdir(folder_path):
-            self.infoMsg('warning', u'文件夹不存在：{0}'.format(folder_path))
-            return
-        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(folder_path))
+        return open_source_folder(self, folder_path)
 
     def loadingText(self):
         # print("loadingGif()")
@@ -1713,7 +1716,7 @@ class SceneToolsUI(QtWidgets.QMainWindow):
             return
         currentProject = str(self.proj_comb.currentText())
         currentType = str(selected_types[0].text())
-        if currentType != "Map":
+        if currentType.casefold() != "map":
             item_data = item.itemData()
             try:
                 role_name = str(item_data[1])

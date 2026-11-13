@@ -31,6 +31,8 @@ class AssetActionWidget(QtWidgets.QWidget):
     actionActivated = QtCore.Signal(str)
     loadActionRequested = QtCore.Signal(str)
     importActionRequested = QtCore.Signal(str)
+    loadActionsRequested = QtCore.Signal(list)
+    importActionsRequested = QtCore.Signal(list)
 
     def __init__(self, parent=None):
         super(AssetActionWidget, self).__init__(parent)
@@ -86,7 +88,8 @@ class AssetActionWidget(QtWidgets.QWidget):
         self._list.setItemsExpandable(False)
         self._list.setUniformRowHeights(True)
         self._list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
-        self._list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self._list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self._list.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self._list.itemClicked.connect(self._on_item_clicked)
         self._list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self._list.customContextMenuRequested.connect(self._show_context_menu)
@@ -236,10 +239,9 @@ class AssetActionWidget(QtWidgets.QWidget):
 
     def _sort_action_items(self):
         """仅排序 FBX 行；“资产预览”和提示行保持原位。"""
-        selected_path = None
         current = self._list.currentItem()
-        if current is not None:
-            selected_path = current.data(0, QtCore.Qt.UserRole)
+        selected = list(self._list.selectedItems())
+        was_blocked = self._list.blockSignals(True)
 
         action_items = []
         for index in range(self._list.topLevelItemCount() - 1, -1, -1):
@@ -256,10 +258,13 @@ class AssetActionWidget(QtWidgets.QWidget):
         # 第 0 行固定是“资产预览”；提示行只在没有动作时出现。
         for offset, item in enumerate(action_items, 1):
             self._list.insertTopLevelItem(offset, item)
-            if selected_path and item.data(0, QtCore.Qt.UserRole) == selected_path:
-                self._list.setCurrentItem(item)
+        if current is not None:
+            self._list.setCurrentItem(current, 0, QtCore.QItemSelectionModel.NoUpdate)
+        for item in selected:
+            item.setSelected(True)
         # take/insert 后重新应用当前搜索词，避免排序使已过滤条目重新显示。
         self._apply_filter()
+        self._list.blockSignals(was_blocked)
 
     def _apply_filter(self, text=None):
         """按关键字隐藏不匹配的动作项(大小写不敏感子串匹配)。
@@ -273,7 +278,10 @@ class AssetActionWidget(QtWidgets.QWidget):
             if data == "":
                 it.setHidden(False)  # 资产预览锚点始终可见
                 continue
-            it.setHidden(bool(kw) and kw not in it.text(0).lower())
+            hidden = bool(kw) and kw not in it.text(0).lower()
+            if hidden:
+                it.setSelected(False)
+            it.setHidden(hidden)
 
     def _add_hint(self, text):
         it = QtWidgets.QTreeWidgetItem([text, "", ""])
@@ -297,28 +305,55 @@ class AssetActionWidget(QtWidgets.QWidget):
         if not path:
             return
 
-        path = os.path.normpath(str(path))
-        folder = os.path.dirname(path)
-        self._list.setCurrentItem(item)
+        if item.isSelected():
+            self._list.setCurrentItem(item, 0, QtCore.QItemSelectionModel.NoUpdate)
+        else:
+            self._list.clearSelection()
+            self._list.setCurrentItem(item)
+            item.setSelected(True)
+        paths = self._selected_action_paths()
+        packages = [os.path.splitext(path)[0] + ".uasset" for path in paths]
 
         menu = QtWidgets.QMenu(self._list)
         open_folder_action = menu.addAction(u"打开文件夹")
-        open_folder_action.setEnabled(os.path.isdir(folder))
-        package_path = os.path.splitext(path)[0] + ".uasset"
+        open_folder_action.setEnabled(any(os.path.isdir(os.path.dirname(path)) for path in paths))
         load_action = menu.addAction(u"加载动作")
-        load_action.setEnabled(not self._load_busy and os.path.isfile(package_path))
-        load_action.setToolTip(u"加载同名 UE 动画包：{0}".format(package_path))
+        load_action.setEnabled(not self._load_busy and any(os.path.isfile(path) for path in packages))
+        load_action.setToolTip(u"按列表顺序加载选中的 {0} 个同名 UE 动画包".format(len(packages)))
         import_action = menu.addAction(u"导入动作FBX")
-        import_action.setEnabled(not self._load_busy and os.path.isfile(path))
+        import_action.setEnabled(not self._load_busy and any(os.path.isfile(path) for path in paths))
+        import_action.setToolTip(u"按列表顺序导入选中的 {0} 个 FBX".format(len(paths)))
         menu.setToolTipsVisible(True)
 
         chosen = menu.exec_(self._list.viewport().mapToGlobal(point))
         if chosen == open_folder_action:
-            self._open_action_folder(path)
+            if len(paths) == 1:
+                self._open_action_folder(paths[0])
+            else:
+                # Multiple selected files often share one Action directory.
+                # Open each directory once instead of spawning duplicate windows.
+                for folder in dict.fromkeys(os.path.dirname(path) for path in paths):
+                    QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(folder))
         elif chosen == load_action and load_action.isEnabled():
-            self.loadActionRequested.emit(package_path.replace("\\", "/"))
+            if len(packages) == 1:
+                self.loadActionRequested.emit(packages[0])
+            else:
+                self.loadActionsRequested.emit(packages)
         elif chosen == import_action and import_action.isEnabled():
-            self.importActionRequested.emit(path.replace("\\", "/"))
+            if len(paths) == 1:
+                self.importActionRequested.emit(paths[0])
+            else:
+                self.importActionsRequested.emit(paths)
+
+    def _selected_action_paths(self):
+        """Snapshot visible selected files in the current displayed sort order."""
+        paths = []
+        for index in range(self._list.topLevelItemCount()):
+            item = self._list.topLevelItem(index)
+            path = item.data(0, QtCore.Qt.UserRole)
+            if path and item.isSelected() and not item.isHidden():
+                paths.append(os.path.normpath(str(path)).replace("\\", "/"))
+        return paths
 
     @staticmethod
     def _open_action_folder(path):

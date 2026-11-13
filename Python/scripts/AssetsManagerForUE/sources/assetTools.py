@@ -18,8 +18,12 @@ from PySide6 import QtWidgets, QtCore, QtGui
 
 from functools import partial
 from ..utils import assetFunctions, messageBox, myWidget, thumbnail_update, search_diagnostics
+from ..utils.source_folder_menu import open_source_folder
 from ..config import commonSetting, databaseHost
 from . import action_service, asset_fbx_service, ue_asset_service, status_edit_service, asset_crud_ui
+from .action_batch import ActionBatch, ActionImportProgress, suspend_window_callbacks
+from . import action_import_diagnostics
+from . import action_import_service
 
 _FLAT = "border-style: flat; background: transparent;"
 _DRAINING_THREAD_JOBS = []
@@ -175,6 +179,13 @@ class AssetToolsUI(QtWidgets.QWidget):
         self._copy_worker = None
         self._copy_item_key = ""
         self._copy_plan = None
+        self._action_batch = ActionBatch(self)
+        self._action_batch.itemRequested.connect(self._runActionBatchItem)
+        self._action_batch.finished.connect(self._onActionBatchFinished)
+        self._action_batch_result = None
+        self._action_batch_dispatching = False
+        self._action_import_running = False
+        self._action_import_result = None
         self._load_check = ue_asset_service.AssetLoadCheck(self)
         self._load_check.finished.connect(self._onLoadChecked)
 
@@ -400,6 +411,9 @@ class AssetToolsUI(QtWidgets.QWidget):
             action.actionActivated.connect(self.on_action_selected)
             action.loadActionRequested.connect(self.loadActionFile)
             action.importActionRequested.connect(self.importActionFile)
+            action.loadActionsRequested.connect(self.loadActionFiles)
+            action.importActionsRequested.connect(self.importActionFiles)
+            action.setLoadBusy(self._action_batch.active or self._copy_thread is not None)
 
             if self._preview_placeholder is not None:
                 self._preview_host_layout.removeWidget(self._preview_placeholder)
@@ -551,11 +565,7 @@ class AssetToolsUI(QtWidgets.QWidget):
         """
         打开资产文件夹
         """
-        folder_info = QtCore.QFileInfo(dir_path)
-        if folder_info.exists():
-            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(folder_info.absoluteFilePath()))
-        else:
-            self.infoMsg('warning', 'Can not find {0}'.format(dir_path))
+        return open_source_folder(self, dir_path)
 
     def get_viewThumbnail_bttn(self):
         """
@@ -815,7 +825,8 @@ class AssetToolsUI(QtWidgets.QWidget):
 
     def _canLoadUEAsset(self, item):
         return (self._hasUELoadableStatus(item) and item.ueSourceAvailability() is True
-                and self._copy_thread is None and not self._load_check.isRunning())
+                and self._copy_thread is None and not self._load_check.isRunning()
+                and not self._action_batch.active)
 
     def _updateLoadButton(self):
         item = self.main_listWgt.currentItem()
@@ -856,6 +867,10 @@ class AssetToolsUI(QtWidgets.QWidget):
         if currentItem is None:
             return
         self.main_listWgt.setCurrentItem(currentItem)
+        self.show_item_menu(currentItem)
+
+    def show_item_menu(self, currentItem):
+        """Keep menu actions attached to the actual card in a mixed library."""
         menu = QtWidgets.QMenu(self.main_listWgt)
         show_action = QtGui.QAction(u'打开资产文件夹', self)
         show_action.setIcon(QtGui.QIcon("{}/icon/folder_white.png".format(self.scriptsPath)))
@@ -891,11 +906,14 @@ class AssetToolsUI(QtWidgets.QWidget):
         for index in range(self.main_listWgt.count()):
             item = self.main_listWgt.item(index)
             try:
-                if str(item.itemData()[7]) == str(key):
+                if self._itemKey(item) == str(key):
                     return item
             except (IndexError, TypeError, RuntimeError):
                 pass
         return None
+
+    def _itemKey(self, item):
+        return str(item.itemData()[7])
 
     @staticmethod
     def _sourceCacheKey(root):
@@ -1055,13 +1073,13 @@ class AssetToolsUI(QtWidgets.QWidget):
         if item is None:
             self.infoMsg("warning", u"请先选择一张资产卡片")
             return
-        if self._copy_thread is not None or self._load_check.isRunning():
+        if self._copy_thread is not None or self._load_check.isRunning() or self._action_batch.active:
             self.infoMsg("warning", u"已有资产正在检查或加载，请等待当前任务完成")
             return
         asset_root = ue_asset_service.asset_root_from_item_data(item.itemData())
         try:
             target = ue_asset_service.project_content_dir()
-            key = str(item.itemData()[7])
+            key = self._itemKey(item)
             self._load_check.start(key, asset_root, target)
         except Exception as exc:
             self.infoMsg("error", str(exc))
@@ -1233,7 +1251,9 @@ class AssetToolsUI(QtWidgets.QWidget):
         self._copy_plan = None
         self._updateLoadButton()
         if self.action_wgt is not None:
-            self.action_wgt.setLoadBusy(False)
+            self.action_wgt.setLoadBusy(self._action_batch.active)
+        if self._action_batch.active:
+            self._finishActionBatchItem()
 
     def locateUEAsset(self, item=None):
         item = item or self.main_listWgt.currentItem()
@@ -1261,6 +1281,7 @@ class AssetToolsUI(QtWidgets.QWidget):
         self._status_editor.shutdown()
         self._record_controller.shutdown()
         self._state_closed = True
+        self._action_batch.cancel()
         self._load_check.cancel()
         self._state_requests.clear()
         self._state_pending.clear()
@@ -1316,30 +1337,14 @@ class AssetToolsUI(QtWidgets.QWidget):
         导入动画到指定的骨架网格体
         """
         AF = assetFunctions.AssetFunctions()
-        asset_reg = unreal.AssetRegistryHelpers.get_asset_registry()
-        asset_list_before = asset_reg.get_assets_by_path(animations_folder)
-        try:
-            animation_mesh_task = AF.buildImportTask(animation_mesh_fbx, animations_folder,
-                                                     AF.buildAnimationImportOptions(skeleton_path))
-            AF.executeImportTasks([animation_mesh_task])
-        except:
-            unreal.log_warning('Can not import {0}'.format(animation_mesh_fbx))
-
-        asset_list_after = asset_reg.get_assets_by_path(animations_folder)
-        new_assets = list(set(asset_list_after) - set(asset_list_before))
-        if not new_assets:
-            unreal.log_warning(u'导入动作未生成任何资产: {0} (检查: 该fbx是否含动画 / 骨架 {1} 的骨骼是否与动作匹配)'.format(
-                animation_mesh_fbx, skeleton_path))
-        for asset in new_assets:
-            asset_path = '%s.%s' % (asset.package_name, asset.asset_name)  # UE5.7: AssetData 无 object_path
-            if asset.asset_class == 'SkeletalMesh':
-                unreal.EditorAssetLibrary.delete_asset(asset_path)
-                print('Deleted asset: ' + asset_path)
-            elif asset.asset_class == 'AnimSequence':
-                anim = unreal.load_asset(asset_path)
-                unreal.AnimationLibrary.set_is_root_motion_lock_forced(anim, True)
-                print('"Force Root Lock" enabled for: ' + asset_path)
-                unreal.EditorAssetLibrary.save_asset(asset_path, only_if_is_dirty=False)
+        from ue_qt_host import suspend_event_pump
+        with suspend_event_pump(), suspend_window_callbacks(self):
+            outcome = action_import_service.import_animation(
+                animation_mesh_fbx, skeleton_path, animations_folder, unreal, AF)
+        if self._action_batch.active:
+            self._action_batch_result = (outcome['state'], outcome['message'])
+        self.infoMsg('info' if outcome['state'] == 'succeeded' else 'warning', outcome['message'])
+        return outcome['state'] in ('succeeded', 'warning')
 
     def importFile(self):
         """
@@ -1357,11 +1362,113 @@ class AssetToolsUI(QtWidgets.QWidget):
             role_name = item_data[1]
             asset_fbx_service.import_asset(path, currentType, role_name)
 
+    def loadActionFiles(self, paths):
+        self._startActionBatch("load", paths)
+
+    def importActionFiles(self, paths):
+        self._startActionBatch("import", paths)
+
+    def _startActionBatch(self, operation, paths):
+        if (self._state_closed or self._action_batch.active or self._copy_thread is not None
+                or self._load_check.isRunning()):
+            self.infoMsg("warning", u"已有资产或动作正在处理，请等待完成")
+            return
+        if self._action_batch.start(operation, list(paths), auto_advance=operation != "import"):
+            if self.action_wgt is not None:
+                self.action_wgt.setLoadBusy(True)
+            self._updateLoadButton()
+            if operation == "import":
+                self._runActionImportBatch()
+
+    def _runActionImportBatch(self):
+        self._action_import_running = True
+        self._action_import_result = None
+        try:
+            with ActionImportProgress(self, unreal, self._action_batch.total) as progress:
+                while self._action_batch.active:
+                    # Finish outside the modal scope, after restoring the tool.
+                    if len(self._action_batch.results) == self._action_batch.total:
+                        self._action_batch.nextItem()
+                        break
+                    if progress.shouldCancel():
+                        self._action_batch.skipPending(u"用户取消，尚未导入")
+                        break
+                    path = self._action_batch.nextPath()
+                    progress.advance(len(self._action_batch.results) + 1, path)
+                    self._action_batch.nextItem()
+        except Exception as exc:
+            self.infoMsg("error", u"批量导入中断：{0}".format(exc))
+            self._action_batch.skipPending(u"批量导入中断：{0}".format(exc), state="failed")
+        finally:
+            self._action_import_running = False
+            result = self._action_import_result
+            self._action_import_result = None
+            if result is not None:
+                self._onActionBatchFinished(result)
+
+    def _runActionBatchItem(self, operation, path):
+        if self._state_closed:
+            self._action_batch.cancel()
+            return
+        self._action_batch_result = None
+        self._action_batch_dispatching = True
+        label = u"加载动作" if operation == "load" else u"导入动作 FBX"
+        self.infoMsg("info", u"{0}：{1}".format(label, path))
+        try:
+            if operation == "load":
+                self.loadActionFile(path)
+            else:
+                succeeded = self.importActionFile(path)
+                if self._action_batch_result is None:
+                    self._action_batch_result = (
+                        "succeeded" if succeeded else "failed", "" if succeeded else u"导入未成功")
+        except Exception as exc:
+            self._action_batch_result = ("failed", str(exc))
+        finally:
+            self._action_batch_dispatching = False
+        # Async copies advance only after their QThread has actually finished.
+        if self._copy_thread is None:
+            self._finishActionBatchItem()
+
+    def _finishActionBatchItem(self):
+        if self._action_batch.active and self._action_batch.current:
+            state, message = self._action_batch_result or ("failed", u"操作结束但没有返回结果")
+            self._action_batch.finishItem(state, message)
+            self._action_batch_result = None
+
+    def _onActionBatchFinished(self, result):
+        if self._action_import_running:
+            self._action_import_result = result
+            return
+        if self._state_closed:
+            return
+        if self.action_wgt is not None:
+            self.action_wgt.setLoadBusy(False)
+        self._updateLoadButton()
+        items = result["items"]
+        succeeded = sum(item["state"] in ("succeeded", "warning") for item in items)
+        warnings = [item for item in items if item["state"] == "warning"]
+        unsaved = [item for item in items if item["state"] == "unsaved"]
+        skipped = sum(item["state"] == "skipped" for item in items)
+        failed = [item for item in items if item["state"] == "failed"]
+        label = u"批量加载动作" if result["operation"] == "load" else u"批量导入动作 FBX"
+        summary = u"{0}完成：成功 {1}，跳过 {2}，失败 {3}".format(label, succeeded, skipped, len(failed))
+        if result['operation'] == 'import':
+            summary = u'{0}完成：成功 {1}（其中警告 {2}），未保存 {3}，跳过 {4}，失败 {5}'.format(
+                label, succeeded, len(warnings), len(unsaved), skipped, len(failed))
+        self.infoMsg("warning" if failed or warnings or unsaved else "info", summary)
+        if failed or warnings or unsaved:
+            labels = {'warning': u'已导入并保存（有警告）', 'unsaved': u'已导入，但未保存', 'failed': u'导入失败'}
+            details = "\n\n".join(u"【{0}】{1}\n{2}".format(labels[item['state']], item["path"], item["message"])
+                                   for item in items if item['state'] in labels)
+            QtWidgets.QMessageBox.warning(self, label, summary + "\n\n" + details)
+
     def loadActionFile(self, action_package=None):
         """加载同名动画包；缺少角色/道具时，经确认一并加载其 UE 发布包。"""
         if not action_package:
             return
-        if self._copy_thread is not None or self._load_check.isRunning():
+        if (self._copy_thread is not None or self._load_check.isRunning()
+                or (self._action_batch.active and not self._action_batch_dispatching)):
             self.infoMsg("warning", u"已有资产或动作正在加载，请等待完成")
             return
         try:
@@ -1375,6 +1482,8 @@ class AssetToolsUI(QtWidgets.QWidget):
                     QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                     QtWidgets.QMessageBox.Yes)
                 if reply != QtWidgets.QMessageBox.Yes:
+                    if self._action_batch.active:
+                        self._action_batch_result = ("skipped", u"用户取消先加载资产")
                     return
             plan = action_service.build_import_plan(action_package, include_asset=include_asset)
             if plan.get("state") == "conflict":
@@ -1424,6 +1533,8 @@ class AssetToolsUI(QtWidgets.QWidget):
                     if self._sourceCacheKey(ue_asset_service.asset_root_from_item_data(item.itemData())) == root_key:
                         self._setItemUEPlan(item, prerequisite)
             self.infoMsg("info", plan["message"])
+            if self._action_batch.active:
+                self._action_batch_result = ("succeeded", plan["message"])
             object_path = plan["main_object_path"]
             if not ue_asset_service.sync_to_content_browser(object_path):
                 QtCore.QTimer.singleShot(250, lambda: (
@@ -1435,15 +1546,28 @@ class AssetToolsUI(QtWidgets.QWidget):
     def _onActionCopyFailed(self, message):
         if not self._state_closed:
             self.infoMsg("error", message)
-            QtWidgets.QMessageBox.warning(self, u"加载动作失败", str(message))
+            if self._action_batch.active:
+                self._action_batch_result = ("failed", str(message))
+            else:
+                QtWidgets.QMessageBox.warning(self, u"加载动作失败", str(message))
 
     def importActionFile(self, action_fbx=None):
         """
         导入动作到 UE 该资产的 Action 文件夹下（作 AnimSequence）。由右侧动作库右键"导入动作FBX"触发，传动作 .fbx 全路径。
         """
         if not action_fbx:
-            return
+            return False
+        if (self._copy_thread is not None or self._load_check.isRunning()
+                or (self._action_batch.active and not self._action_batch_dispatching)):
+            self.infoMsg("warning", u"已有资产或动作正在处理，请等待完成")
+            return False
         p = str(action_fbx).replace("\\", "/")
+        if not os.path.isfile(p):
+            message = u"找不到动作 FBX：{0}".format(p)
+            self.infoMsg("error", message)
+            if self._action_batch.active:
+                self._action_batch_result = ("failed", message)
+            return False
         character_name = p.split('/Action/')[0].split('/')[-1]
         type_name = p.split('/Action/')[0].split('/')[-2]
         character_folder = '/Game/Assets/{0}/{1}'.format(type_name, character_name)
@@ -1459,9 +1583,20 @@ class AssetToolsUI(QtWidgets.QWidget):
                         existing.append(str(a))
             unreal.log_warning(u'导入动作失败：找不到骨架 {0}。该目录下现有骨架: {1}'.format(
                 skeleton_path, existing or u'无（请先 Import 该资产以生成骨架）'))
-            self.infoMsg("warning", u"找不到骨架 %s_Skeleton，请先 Import 该资产" % character_name)
-            return
-        self.importAniFBX(p, skeleton_path, animations_folder)
+            message = u"找不到骨架 {0}，请先导入该资产".format(skeleton_path)
+            self.infoMsg("warning", message)
+            if self._action_batch.active:
+                self._action_batch_result = ("failed", message)
+            return False
+        try:
+            with action_import_diagnostics.capture(p, skeleton_path, animations_folder, unreal):
+                return self.importAniFBX(p, skeleton_path, animations_folder)
+        except Exception as exc:
+            self.infoMsg("error", str(exc))
+            unreal.log_warning(u"导入动作失败：{0}\n{1}".format(p, exc))
+            if self._action_batch.active:
+                self._action_batch_result = ("failed", str(exc))
+            return False
 
     @staticmethod
     def repathAssets(character_folder):

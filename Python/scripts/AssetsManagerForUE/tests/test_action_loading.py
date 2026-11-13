@@ -19,7 +19,7 @@ except ImportError:
     sys.modules["unreal"] = unreal
 
 from PySide6 import QtWidgets
-from AssetsManagerForUE.sources import action_service, ue_asset_service
+from AssetsManagerForUE.sources import action_service, ue_asset_service, assetTools
 from test_asset_availability import OfflineAssetToolsUI
 
 
@@ -37,6 +37,9 @@ class ActionLoadingTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="action_load_")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        environment = mock.patch.dict(os.environ, LOCALAPPDATA=str(self.root))
+        environment.start()
+        self.addCleanup(environment.stop)
         self.server = self.root / "Server/GOF"
         self.source = self.server / "Animations/Characters/BaSiTeV4/Action/BaSiTeV4_Walk.uasset"
         self.source.parent.mkdir(parents=True)
@@ -271,6 +274,259 @@ class ActionLoadingTests(unittest.TestCase):
     def test_invalid_animation_location_is_rejected_before_copying(self):
         with self.assertRaises(ValueError):
             action_service.build_import_plan(str(self.server / "Assets/Characters/Hero/Action/Walk.uasset"))
+
+    def wait_batch(self):
+        deadline = time.monotonic() + 8
+        while (self.ui._action_batch.active or self.ui._copy_thread is not None) and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(0.002)
+        self.assertFalse(self.ui._action_batch.active, 'batch must finish')
+        self.assertIsNone(self.ui._copy_thread, 'copy thread must be released')
+
+    def batch_sources(self):
+        paths = [self.source]
+        for name in ('BaSiTeV4_Run', 'BaSiTeV4_Jump'):
+            path = self.source.with_name(name + '.uasset')
+            path.write_bytes(name.encode('ascii'))
+            paths.append(path)
+        return paths
+
+    def register_batch(self, plan):
+        plan['message'] = 'registered ' + plan['action_context']['source_file']
+        return plan
+
+    def test_batch_load_waits_for_each_real_copy_and_deduplicates_files(self):
+        paths = self.batch_sources()
+        results, registered = [], []
+        self.ui._action_batch.finished.connect(results.append)
+        def register(plan):
+            self.assertIsNotNone(self.ui._copy_thread)
+            registered.append(Path(plan['action_context']['source_file']))
+            return self.register_batch(plan)
+        with mock.patch.object(action_service, 'register_import', side_effect=register):
+            self.ui.loadActionFiles([str(path) for path in paths] + [str(paths[0])])
+            self.wait_batch()
+        self.assertEqual(registered, paths)
+        self.assertEqual([item['state'] for item in results[0]['items']], ['succeeded'] * 3)
+        for path in paths:
+            self.assertEqual(self.target.with_name(path.name).read_bytes(), path.read_bytes())
+        self.warning.assert_not_called()
+
+    def test_one_conflict_and_one_missing_file_do_not_stop_later_actions(self):
+        paths = self.batch_sources()
+        self.target.parent.mkdir(parents=True)
+        self.target.write_bytes(b'user edited animation')
+        missing = paths[1].with_name('Missing.uasset')
+        results = []
+        self.ui._action_batch.finished.connect(results.append)
+        with mock.patch.object(action_service, 'register_import', side_effect=self.register_batch):
+            self.ui.loadActionFiles([str(paths[0]), str(missing), str(paths[2])])
+            self.wait_batch()
+        self.assertEqual([item['state'] for item in results[0]['items']], ['failed', 'failed', 'succeeded'])
+        self.assertEqual(self.target.read_bytes(), b'user edited animation')
+        self.assertTrue(self.target.with_name(paths[2].name).is_file())
+        self.warning.assert_called_once()
+        self.assertIn(str(missing).replace('\\', '/'), self.warning.call_args.args[2])
+
+    def test_registration_failure_advances_only_after_thread_exit(self):
+        paths = self.batch_sources()[:2]
+        results = []
+        self.ui._action_batch.finished.connect(results.append)
+        with mock.patch.object(action_service, 'register_import', side_effect=[RuntimeError('missing skeleton'), self.register_batch(action_service.build_import_plan(str(paths[1])))]):
+            self.ui.loadActionFiles([str(path) for path in paths])
+            self.wait_batch()
+        self.assertEqual([item['state'] for item in results[0]['items']], ['failed', 'succeeded'])
+        self.assertIn('missing skeleton', results[0]['items'][0]['message'])
+        self.warning.assert_called_once()
+
+    def test_ready_files_and_declined_prerequisites_finish_without_a_worker(self):
+        self.target.parent.mkdir(parents=True)
+        self.target.write_bytes(self.source.read_bytes())
+        results = []
+        self.ui._action_batch.finished.connect(results.append)
+        with mock.patch.object(action_service, 'register_import', side_effect=self.register_batch), mock.patch.object(ue_asset_service, 'AssetCopyWorker') as worker:
+            self.ui.loadActionFiles([str(self.source)])
+            self.wait_batch()
+            worker.assert_not_called()
+        self.assertEqual(results[-1]['items'][0]['state'], 'succeeded')
+        self.has_mesh = False
+        self.ui.loadActionFiles([str(self.source)])
+        self.wait_batch()
+        self.assertEqual(results[-1]['items'][0]['state'], 'skipped')
+
+    def test_fbx_batch_continues_after_import_failure_and_preserves_order(self):
+        paths = [str(path.with_suffix('.fbx')) for path in self.batch_sources()]
+        results = []
+        self.ui._action_batch.finished.connect(results.append)
+        with mock.patch.object(self.ui, 'importActionFile', side_effect=[True, RuntimeError('FBX mismatch'), True]) as importer:
+            self.ui.importActionFiles(paths)
+            self.wait_batch()
+        self.assertEqual([call.args[0] for call in importer.call_args_list], [path.replace('\\', '/') for path in paths])
+        self.assertEqual([item['state'] for item in results[0]['items']], ['succeeded', 'failed', 'succeeded'])
+        self.warning.assert_called_once()
+
+    def test_fbx_batch_uses_one_native_progress_and_restores_ui_before_failure_summary(self):
+        import ue_qt_host
+        paths = [str(path.with_suffix('.fbx')) for path in self.batch_sources()]
+        native = mock.MagicMock()
+        native.__enter__.return_value = native
+        native.should_cancel.return_value = False
+        engine = types.SimpleNamespace(ScopedSlowTask=mock.Mock(return_value=native))
+        def run(_path):
+            self.assertFalse(self.ui.isEnabled())
+            self.assertGreater(ue_qt_host._STATE.suspend_depth, 0)
+            if _path == paths[1].replace('\\', '/'):
+                raise RuntimeError('bad animation')
+            return True
+        self.warning.side_effect = lambda *_args: self.assertTrue(self.ui.isEnabled())
+        with mock.patch.object(assetTools, 'unreal', engine), mock.patch.object(self.ui, 'importActionFile', side_effect=run):
+            self.ui.importActionFiles(paths)
+        engine.ScopedSlowTask.assert_called_once_with(3, '批量导入动作 FBX')
+        native.make_dialog.assert_called_once_with(True)
+        self.assertEqual([call.args[1].split(']')[0] for call in native.enter_progress_frame.call_args_list],
+                         ['[1/3', '[2/3', '[3/3'])
+        native.__exit__.assert_called_once()
+        self.assertTrue(self.ui.isEnabled())
+        self.assertFalse(self.ui._action_batch.active)
+        self.assertEqual(ue_qt_host._STATE.suspend_depth, 0)
+        self.warning.assert_called_once()
+
+    def test_native_cancel_keeps_completed_files_and_skips_remaining_files(self):
+        paths = [str(path.with_suffix('.fbx')) for path in self.batch_sources()]
+        native = mock.MagicMock()
+        native.__enter__.return_value = native
+        native.should_cancel.side_effect = [False, True]
+        engine = types.SimpleNamespace(ScopedSlowTask=mock.Mock(return_value=native))
+        results = []
+        self.ui._action_batch.finished.connect(results.append)
+        with mock.patch.object(assetTools, 'unreal', engine), mock.patch.object(self.ui, 'importActionFile', return_value=True) as importer:
+            self.ui.importActionFiles(paths)
+        self.assertEqual(importer.call_count, 1)
+        self.assertEqual([item['state'] for item in results[0]['items']], ['succeeded', 'skipped', 'skipped'])
+        self.assertTrue(self.ui.isEnabled())
+        self.warning.assert_not_called()
+
+    def test_progress_creation_failure_releases_ui_and_reports_all_unstarted_files(self):
+        import ue_qt_host
+        paths = [str(path.with_suffix('.fbx')) for path in self.batch_sources()]
+        native = mock.MagicMock()
+        native.__enter__.return_value = native
+        native.make_dialog.side_effect = RuntimeError('cannot show progress')
+        engine = types.SimpleNamespace(ScopedSlowTask=mock.Mock(return_value=native))
+        with mock.patch.object(assetTools, 'unreal', engine), mock.patch.object(self.ui, 'importActionFile') as importer:
+            self.ui.importActionFiles(paths)
+        importer.assert_not_called()
+        self.assertTrue(self.ui.isEnabled())
+        self.assertFalse(self.ui._action_batch.active)
+        self.assertEqual(ue_qt_host._STATE.suspend_depth, 0)
+        self.warning.assert_called_once()
+        self.assertIn('cannot show progress', self.warning.call_args.args[2])
+
+    def test_second_request_is_rejected_and_shutdown_cancels_unstarted_files(self):
+        paths = self.batch_sources()
+        self.ui.loadActionFiles([str(path) for path in paths])
+        self.ui.loadActionFiles([str(paths[0])])
+        self.ui.shutdownThreads()
+        self.app.processEvents()
+        self.assertFalse(self.ui._action_batch.active)
+        self.assertFalse(self.target.exists())
+        self.assertIsNone(self.ui._copy_thread)
+
+    def fbx_import_fixture(self):
+        path = self.source.with_suffix('.fbx')
+        path.write_bytes(b'test FBX task input')
+        animation = mock.Mock()
+        animation.get_class.return_value.get_name.return_value = 'AnimSequence'
+        animation.get_path_name.return_value = self.context['package_name'] + '.BaSiTeV4_Walk'
+        animation.get_editor_property.return_value.get_path_name.return_value = (
+            '/Game/Assets/Characters/BaSiTeV4/BaSiTeV4_Skeleton.BaSiTeV4_Skeleton')
+        engine = types.SimpleNamespace(load_asset=mock.Mock(return_value=animation),
+            EditorAssetLibrary=mock.Mock(), AnimationLibrary=mock.Mock(), log_warning=mock.Mock())
+        engine.EditorAssetLibrary.save_asset.return_value = True
+        engine.AnimationLibrary.get_num_keys.return_value = 36
+        task = mock.Mock()
+        task.get_objects.return_value = []
+        task.get_editor_property.return_value = [self.context['package_name'] + '.BaSiTeV4_Walk']
+        factory = mock.Mock()
+        factory.buildImportTask.return_value = task
+        return path, animation, engine, factory
+
+    def test_fbx_reimport_uses_task_outputs_even_for_an_existing_animation(self):
+        path, animation, engine, factory = self.fbx_import_fixture()
+        with mock.patch.object(assetTools, 'unreal', engine), mock.patch.object(assetTools.assetFunctions, 'AssetFunctions', return_value=factory):
+            self.assertTrue(self.ui.importActionFile(str(path)))
+        engine.AnimationLibrary.set_is_root_motion_lock_forced.assert_called_once_with(animation, True)
+        engine.EditorAssetLibrary.save_asset.assert_called_once()
+        factory.executeImportTasks.assert_called_once()
+
+    def test_fbx_save_failure_returns_a_failure_instead_of_claiming_success(self):
+        path, _animation, engine, factory = self.fbx_import_fixture()
+        engine.EditorAssetLibrary.save_asset.return_value = False
+        with mock.patch.object(assetTools, 'unreal', engine), mock.patch.object(assetTools.assetFunctions, 'AssetFunctions', return_value=factory):
+            self.assertFalse(self.ui.importActionFile(str(path)))
+        self.assertIn('保存动作失败', self.ui.msg_label.text())
+
+    def test_fbx_task_without_any_animation_is_reported_as_a_failure(self):
+        path, _animation, engine, factory = self.fbx_import_fixture()
+        factory.buildImportTask.return_value.get_editor_property.return_value = []
+        with mock.patch.object(assetTools, 'unreal', engine), mock.patch.object(assetTools.assetFunctions, 'AssetFunctions', return_value=factory):
+            self.assertFalse(self.ui.importActionFile(str(path)))
+        self.assertIn('未生成动画序列', self.ui.msg_label.text())
+
+    def test_native_exception_with_current_task_output_is_saved_and_counted_as_warning(self):
+        path, animation, engine, factory = self.fbx_import_fixture()
+        factory.executeImportTasks.side_effect = RuntimeError('Unable to retrieve bone index for track: FaceJoint')
+        results = []
+        self.ui._action_batch.finished.connect(results.append)
+        with mock.patch.object(assetTools, 'unreal', engine), mock.patch.object(assetTools.assetFunctions, 'AssetFunctions', return_value=factory):
+            self.ui.importActionFiles([str(path)])
+        self.assertEqual(results[0]['items'][0]['state'], 'warning')
+        engine.EditorAssetLibrary.save_asset.assert_called_once()
+        self.assertIn('成功 1（其中警告 1）', self.warning.call_args.args[2])
+        self.assertIn('失败 0', self.warning.call_args.args[2])
+        self.assertIn('FaceJoint', results[0]['items'][0]['message'])
+
+    def test_existing_asset_without_any_current_task_output_cannot_claim_success(self):
+        path, _animation, engine, factory = self.fbx_import_fixture()
+        factory.executeImportTasks.side_effect = SystemError('returned NULL without setting an exception')
+        factory.buildImportTask.return_value.get_editor_property.return_value = []
+        with mock.patch.object(assetTools, 'unreal', engine), mock.patch.object(assetTools.assetFunctions, 'AssetFunctions', return_value=factory):
+            self.assertFalse(self.ui.importActionFile(str(path)))
+        engine.load_asset.assert_called_once_with('/Game/Assets/Characters/BaSiTeV4/BaSiTeV4_Skeleton')
+        engine.EditorAssetLibrary.save_asset.assert_not_called()
+        self.assertIn('本次导入任务未返回动画输出', self.ui.msg_label.text())
+
+    def test_task_object_is_valid_proof_even_if_its_path_array_is_empty(self):
+        path, animation, engine, factory = self.fbx_import_fixture()
+        factory.buildImportTask.return_value.get_editor_property.return_value = []
+        factory.buildImportTask.return_value.get_objects.return_value = [animation]
+        factory.executeImportTasks.side_effect = RuntimeError('native import warning')
+        with mock.patch.object(assetTools, 'unreal', engine), mock.patch.object(assetTools.assetFunctions, 'AssetFunctions', return_value=factory):
+            self.assertTrue(self.ui.importActionFile(str(path)))
+        engine.EditorAssetLibrary.save_asset.assert_called_once()
+        self.assertIn('已导入并保存', self.ui.msg_label.text())
+
+    def test_batch_save_failure_is_reported_separately_as_unsaved(self):
+        path, _animation, engine, factory = self.fbx_import_fixture()
+        engine.EditorAssetLibrary.save_asset.return_value = False
+        results = []
+        self.ui._action_batch.finished.connect(results.append)
+        with mock.patch.object(assetTools, 'unreal', engine), mock.patch.object(assetTools.assetFunctions, 'AssetFunctions', return_value=factory):
+            self.ui.importActionFiles([str(path)])
+        self.assertEqual(results[0]['items'][0]['state'], 'unsaved')
+        self.assertIn('未保存 1', self.warning.call_args.args[2])
+        self.assertIn('失败 0', self.warning.call_args.args[2])
+
+    def test_empty_animation_keys_and_wrong_skeleton_fail_validation_before_save(self):
+        for invalid in ('empty_keys', 'wrong_skeleton'):
+            path, _animation, engine, factory = self.fbx_import_fixture()
+            if invalid == 'empty_keys':
+                engine.AnimationLibrary.get_num_keys.return_value = 0
+            else:
+                _animation.get_editor_property.return_value.get_path_name.return_value = '/Game/Other_Skeleton.Other_Skeleton'
+            with mock.patch.object(assetTools, 'unreal', engine), mock.patch.object(assetTools.assetFunctions, 'AssetFunctions', return_value=factory):
+                self.assertFalse(self.ui.importActionFile(str(path)))
+            engine.EditorAssetLibrary.save_asset.assert_not_called()
 
 
 if __name__ == "__main__":

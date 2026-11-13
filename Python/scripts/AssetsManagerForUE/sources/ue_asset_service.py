@@ -88,6 +88,9 @@ def _forward(path):
 
 def asset_root_from_item_data(item_data):
     """从旧版数据库第 8 列 icon 路径反推资产根目录。"""
+    if (isinstance(item_data, (list, tuple)) and len(item_data) > 11 and isinstance(item_data[11], dict)
+            and item_data[11].get('library_row')):
+        return _forward(item_data[11].get('root') or '')
     try:
         icon_path = _forward(item_data[7])
     except (IndexError, TypeError):

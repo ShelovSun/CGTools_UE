@@ -24,6 +24,7 @@ ue_qt_host —— 在 Unreal Editor 中正确承载 PySide/Qt 工具窗口的共
 
 import sys
 import types
+from contextlib import contextmanager
 
 try:
     import unreal
@@ -40,6 +41,24 @@ if _STATE_KEY not in sys.modules:
     _s.tick_handle = None
     sys.modules[_STATE_KEY] = _s
 _STATE = sys.modules[_STATE_KEY]
+if not hasattr(_STATE, "suspend_depth"):
+    _STATE.suspend_depth = 0
+
+
+@contextmanager
+def suspend_event_pump():
+    """Defer Qt callbacks while a synchronous UE call pumps Slate internally.
+
+    Interchange imports can tick Slate while a Python exception is pending.
+    Running Qt slots in that nested tick can replace the original exception.
+    Keep the existing timer/worker events queued until the UE call has returned.
+    Nesting is supported; no callbacks or windows are destroyed.
+    """
+    _STATE.suspend_depth += 1
+    try:
+        yield
+    finally:
+        _STATE.suspend_depth -= 1
 
 
 def _find_app(explicit=None):
@@ -70,6 +89,8 @@ def _ensure_event_pump():
         return
 
     def _pump(delta_seconds):
+        if _STATE.suspend_depth:
+            return
         app = _find_app()
         if app is not None:
             app.processEvents()

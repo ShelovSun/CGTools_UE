@@ -79,6 +79,7 @@ void SCGToolsPublisherBatchWindow::Construct(const FArguments& InArgs)
     ConfirmBatch = InArgs._ConfirmBatch;
     FCGToolsPublisherConfig Config;
     const ECGToolsPublisherKind Kind = CGToolsPublisher::GetSelectionKind(InArgs._Assets);
+    SharedSettings.bFbx = Kind != ECGToolsPublisherKind::SkeletalMesh;
     if (!PanelFactory && (Kind == ECGToolsPublisherKind::StaticMesh || Kind == ECGToolsPublisherKind::SkeletalMesh))
     {
         Config = SCGToolsPublisherWindow::LoadConfig();
