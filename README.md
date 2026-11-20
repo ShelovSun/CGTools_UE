@@ -3,7 +3,7 @@
 Git 仓库根目录为 `UE574`，用于管理 UE Python 工具和原生插件。
 
 - [Python](Python/README.md)：AssetsManager、ShotsManager 和配套 Python 工具。
-- [AssetsManager 4.4.1](Python/scripts/AssetsManagerForUE/README.md)：资产/场景合并目录树，保留各自属性和操作；紧凑目录布局、动作库多选与批量进度，修正动画导入结果并减少打开服务器目录的等待。
+- [AssetsManager 4.4.5](Python/scripts/AssetsManagerForUE/README.md)：动作及前置资产共用冲突/缺失选择，补充加载完成弹窗并修正动作选中和 tooltip 文字；统一加载准备界面、文件夹样式及四页 64–400px 缩放，修复目录收起卡顿，使用说明按需打开后跟随组件切换。本轮调整统一沿用 4.4.5。
 - [CGToolsPublisher](Plugins/Marketplace/CGToolsPublisher/README.md)：UE 资产发布插件，当前版本 **1.8.9**，支持同类型资产在同一窗口批量发布；骨骼网格体单选及批量发布默认不勾选 FBX，可手动开启。多选静态网格体只生成各模型自身名称的 FBX/Icon，配合 AssetsManager 的场景拼图和模型切换。支持特效双击空目录改名、取消覆盖时保留内容浏览器状态、目标目录树只读特效缩略图。四类发布均提供文件差异勾选及表头全选框，过滤缓存/临时文件，保留服务器独有文件，区分部分发布；特效只比较本次整理输出及依赖。批量结束收起进度条并按所选数量统计。自动显示修复配套 AssetRegistryRepair **1.0.2**。
 
 2026-11-03 将原 `Python` 仓库扩大到本目录。保留原提交历史，通过一次普通提交将原路径归入 `Python/`，没有改写历史。查看旧 Python 文件历史时可使用 `git log --follow -- Python/文件路径`。

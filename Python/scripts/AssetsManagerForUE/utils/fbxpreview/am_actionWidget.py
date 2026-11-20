@@ -78,7 +78,7 @@ class AssetActionWidget(QtWidgets.QWidget):
             "QTreeWidget{background:rgb(35,36,39); border:none; color:rgb(215,215,215);}"
             "QTreeWidget::item{height:18px; padding:0px 3px; border:0px;}"
             "QTreeWidget::item:selected{background:rgb(70,125,209); color:white;}"
-            "QTreeWidget::item:hover{background:rgb(55,58,64);}"
+            "QTreeWidget::item:hover:!selected{background:rgb(55,58,64);}"
             "QHeaderView::section{height:21px; padding:0px 4px; background:rgb(82,82,82);"
             " color:white; border:0px; border-right:1px solid rgb(55,55,55);}")
         self._list.setIndentation(0)

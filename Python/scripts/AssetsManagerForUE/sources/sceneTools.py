@@ -392,27 +392,26 @@ def choose_ue_conflict_files(parent, plan, plugin_files=False):
                 relative_path, source_entry)
 
     class_names_by_stem = {}
-    external_paths = []
-    external_stems = []
+    external_groups = {}
+    source_content_root = (
+        plan.get("source_content_root") or plan.get("source_root") or "")
     for package_stem, (relative_path, source_entry) in primary_entries.items():
         extension = os.path.splitext(relative_path)[1].lower()
         if extension == ".umap":
             class_names_by_stem[package_stem] = "World"
             continue
         source_path = str(source_entry.get("source") or "")
-        if source_path and os.path.isfile(source_path):
-            external_paths.append(source_path)
-            external_stems.append(package_stem)
+        entry_root = str(source_entry.get("source_content_root") or source_content_root)
+        if source_path and entry_root and os.path.isfile(source_path):
+            external_groups.setdefault(entry_root, []).append((package_stem, source_path))
 
-    source_content_root = (
-        plan.get("source_content_root") or plan.get("source_root") or "")
-    if external_paths and source_content_root:
+    for entry_root, group in external_groups.items():
         external_classes, _type_error = (
             ue_asset_service.get_external_asset_class_names(
-                external_paths, source_content_root))
+                [path for _stem, path in group], entry_root))
         for package_stem, class_name in zip(
-                external_stems, external_classes):
-            if class_name:
+                [stem for stem, _path in group], external_classes):
+            if class_name and str(class_name).lower() != "none":
                 class_names_by_stem[package_stem] = class_name
 
     for package_stem, (relative_path, _source_entry) in primary_entries.items():
@@ -420,7 +419,7 @@ def choose_ue_conflict_files(parent, plan, plugin_files=False):
             continue
         class_name = ue_asset_service.project_asset_class_name(
             relative_path)
-        if class_name:
+        if class_name and str(class_name).lower() != "none":
             class_names_by_stem[package_stem] = class_name
 
     conflict_rows = []

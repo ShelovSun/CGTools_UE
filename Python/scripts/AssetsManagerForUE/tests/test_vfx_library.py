@@ -170,7 +170,7 @@ class VfxLibraryTests(unittest.TestCase):
         self.assertNotIn("Team1/火/Tex", ui._categories)
         icon = ui._effect_icon.pixmap(16, 16).toImage()
         self.assertFalse(icon.isNull())
-        self.assertNotEqual(icon, QtGui.QIcon(ui._folder_icon).pixmap(16, 16).toImage())
+        self.assertNotEqual(icon, vfxTools.folder_icon().pixmap(16, 16).toImage())
         for item in ui._asset_items.values():
             self.assertEqual(item.childCount(), 0)
             self.assertEqual(item.icon(0).pixmap(16, 16).toImage(), icon)
@@ -276,11 +276,34 @@ class VfxLibraryTests(unittest.TestCase):
         self.assertEqual(ui._currentCategory(), "Team1/火/NS_Fire")
         self.assertIsNotNone(self.card("NS_Child"))
 
+    def test_collapse_with_selected_effect_refreshes_accessible_rows_only(self):
+        ui = self.build_ui("Team1/火/NS_Fire.uasset")
+        was_active = QtGui.QAccessible.isActive()
+        QtGui.QAccessible.setActive(True)
+        try:
+            accessible = QtGui.QAccessible.queryAccessibleInterface(ui.category_list)
+            for index in range(accessible.childCount()):
+                accessible.child(index)
+            selected_tree = ui.category_list.currentItem()
+            selected_card = ui.card_list.currentItem()
+            with mock.patch.object(ui, '_rebuildCards') as rebuild, \
+                    mock.patch.object(ui, '_queueThumbnails') as thumbnails, \
+                    mock.patch.object(os.path, 'isfile', side_effect=AssertionError('Unexpected file IO')):
+                ui._category_items['Team1/火'].setExpanded(False)
+            rebuild.assert_not_called()
+            thumbnails.assert_not_called()
+            self.assertIs(ui.category_list.currentItem(), selected_tree)
+            self.assertIs(ui.card_list.currentItem(), selected_card)
+            for index in range(accessible.childCount()):
+                self.assertEqual(accessible.indexOfChild(accessible.child(index)), index)
+        finally:
+            QtGui.QAccessible.setActive(was_active)
+
     def test_folder_cards_have_folder_icon_no_status_and_cannot_load_or_drag(self):
         ui = self.build_ui()
         folder = self.card("Team1")
         self.assertEqual(folder.itemData()[7], ui._folder_icon)
-        self.assertTrue(ui._folder_icon.endswith("/icon/floder.png"))
+        self.assertEqual(ui._folder_icon, vfxTools.FOLDER_THUMBNAIL)
         self.assertEqual(folder.ueState(), "folder")
         self.assertFalse(folder.dragEnabled())
         self.assertEqual(folder.ueMainObjectPath(), "")

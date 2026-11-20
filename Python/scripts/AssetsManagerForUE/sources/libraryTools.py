@@ -3,6 +3,7 @@ import json,os
 from PySide6 import QtCore,QtGui,QtWidgets
 from ..config import commonSetting
 from ..utils import myWidget
+from ..utils.folder_style import folder_icon, style_directory_view
 from . import assetTools,sceneTools,library_service as service,asset_fbx_service
 from .library_editing import LibraryStatusEditor
 
@@ -70,16 +71,13 @@ class LibraryToolsUI(assetTools.AssetToolsUI):
 
     def build_ui(self):
         super().build_ui()
+        self.main_listWgt.setLoadingMessage(u'正在准备资产…')
         self.type_listWgt.hide()  # Retained solely for old helper compatibility.
         self.type_treeWidget=QtWidgets.QTreeWidget()
         self.type_treeWidget.setObjectName('LibraryDirectoryTree')
         self.type_treeWidget.setHeaderHidden(True)
         self.type_treeWidget.setMinimumWidth(150)
-        # Keep Qt's native branch arrows; avoid nested indentation wasting the sidebar.
-        self.type_treeWidget.setIndentation(12)
-        self.type_treeWidget.setIconSize(QtCore.QSize(12,12))
-        self.type_treeWidget.setUniformRowHeights(True)
-        self.type_treeWidget.setAnimated(False)
+        style_directory_view(self.type_treeWidget)
         self.type_treeWidget.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.mainWindow_splitter.widget(0).layout().addWidget(self.type_treeWidget,1)
         self.type_treeWidget.itemSelectionChanged.connect(self._treeChanged)
@@ -110,6 +108,7 @@ class LibraryToolsUI(assetTools.AssetToolsUI):
         if self._state_closed: return
         self._query_generation+=1
         self.listWidgetAddItems([])
+        self.main_listWgt.setLoadingMessage(u'正在准备资产…')
         self._status_editor.setLoading()
         self.infoMsg('info',u'正在后台读取目录和资产…' if discover else u'正在后台读取资产…')
         task=_LibraryTask(self._query_generation,self.user,self.password,self.isSQL,project,scope,
@@ -134,12 +133,18 @@ class LibraryToolsUI(assetTools.AssetToolsUI):
             self._buildTree()
         self._configureColumns()
         self.listWidgetAddItems(payload['rows'])
+        self.main_listWgt.setLoadingMessage()
+
+    def _assetDataFailed(self,generation,error):
+        super()._assetDataFailed(generation,error)
+        if not self._state_closed and generation==self._query_generation:
+            self.main_listWgt.setLoadingMessage(u'资产准备失败，请点击刷新重试。')
 
     def _buildTree(self):
         tree=self.type_treeWidget
         tree.blockSignals(True)
         tree.clear()
-        icon=QtGui.QIcon(os.path.join(self.scriptsPath,'icon','folder_white.png'))
+        icon=folder_icon()
         root=QtWidgets.QTreeWidgetItem(tree,[u'全部目录'])
         root.setData(0,QtCore.Qt.UserRole,('all',None))
         root.setIcon(0,icon)

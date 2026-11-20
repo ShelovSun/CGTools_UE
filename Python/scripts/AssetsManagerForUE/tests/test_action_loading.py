@@ -18,8 +18,8 @@ except ImportError:
     unreal.log_warning = lambda text: None
     sys.modules["unreal"] = unreal
 
-from PySide6 import QtWidgets
-from AssetsManagerForUE.sources import action_service, ue_asset_service, assetTools
+from PySide6 import QtCore, QtWidgets
+from AssetsManagerForUE.sources import action_service, ue_asset_service, assetTools, sceneTools
 from test_asset_availability import OfflineAssetToolsUI
 
 
@@ -59,7 +59,8 @@ class ActionLoadingTests(unittest.TestCase):
             AssetRegistryHelpers=types.SimpleNamespace(get_asset_registry=lambda: self.registry,
                                                        create_asset_data=mock.Mock()),
             EditorAssetLibrary=mock.Mock(),
-            EditorLoadingAndSavingUtils=mock.Mock(), find_object=mock.Mock(return_value=None))
+            EditorLoadingAndSavingUtils=mock.Mock(), find_object=mock.Mock(return_value=None),
+            find_package=mock.Mock(return_value=None))
         self.animation = mock.Mock()
         self.animation.get_name.return_value = "BaSiTeV4_Walk"
         self.animation.get_path_name.return_value = self.context["package_name"] + ".BaSiTeV4_Walk"
@@ -69,6 +70,10 @@ class ActionLoadingTests(unittest.TestCase):
             mock.patch.object(ue_asset_service, "unreal", self.engine),
             mock.patch.object(ue_asset_service, "_project_content_dir", return_value=str(self.content)),
             mock.patch.object(ue_asset_service, "sync_to_content_browser", return_value=True),
+            mock.patch.object(ue_asset_service, "get_external_asset_class_names",
+                              side_effect=lambda paths, root: (["AnimSequence" if "/Action/" in path
+                                                                 else "Material" for path in paths], "")),
+            mock.patch.object(ue_asset_service, "project_asset_class_name", return_value=""),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -78,6 +83,9 @@ class ActionLoadingTests(unittest.TestCase):
         self.warning_patch = mock.patch.object(QtWidgets.QMessageBox, "warning")
         self.warning = self.warning_patch.start()
         self.addCleanup(self.warning_patch.stop)
+        self.information_patch = mock.patch.object(QtWidgets.QMessageBox, "information")
+        self.information = self.information_patch.start()
+        self.addCleanup(self.information_patch.stop)
         self.ui = OfflineAssetToolsUI(isSQL=False)
         self.app.processEvents()
 
@@ -105,6 +113,9 @@ class ActionLoadingTests(unittest.TestCase):
         self.wait_finished()
         self.question.assert_not_called()
         self.warning.assert_not_called()
+        self.information.assert_called_once()
+        self.assertEqual(self.information.call_args.args[1], "加载动作完成")
+        self.assertIn(self.context["package_name"], self.information.call_args.args[2])
         self.assertEqual(self.target.read_bytes(), self.source.read_bytes())
         self.assertFalse(self.target.with_suffix(".fbx").exists())
         self.registry.scan_files_synchronous.assert_called_once_with([self.target.as_posix()], True)
@@ -217,10 +228,189 @@ class ActionLoadingTests(unittest.TestCase):
         old = b"old animation"
         self.target.write_bytes(old)
         self.assertEqual(len(old), self.source.stat().st_size)
-        self.ui.loadActionFile(str(self.source))
-        self.warning.assert_called_once()
+        with mock.patch.object(self.ui, "_chooseConflictFiles", return_value=False) as choose:
+            self.ui.loadActionFile(str(self.source))
+        choose.assert_called_once()
+        self.warning.assert_not_called()
         self.assertEqual(self.target.read_bytes(), old)
         self.assertIsNone(self.ui._copy_thread)
+
+    def chooser(self, selected=(), include_missing=False, skip_missing=(), button="加载选中项", inspect=None):
+        def execute(dialog):
+            tree = dialog.findChild(QtWidgets.QTreeWidget, "UEConflictTree")
+            rows = {tree.topLevelItem(i).data(0, QtCore.Qt.UserRole): tree.topLevelItem(i)
+                    for i in range(tree.topLevelItemCount())}
+            if inspect:
+                inspect(dialog, rows)
+            for relative, row in rows.items():
+                wanted = (relative in selected or (include_missing
+                    and row.data(0, QtCore.Qt.UserRole + 1) == "new" and relative not in skip_missing))
+                row.setCheckState(0, QtCore.Qt.Checked if wanted else QtCore.Qt.Unchecked)
+            next(widget for widget in dialog.findChildren(QtWidgets.QPushButton)
+                 if widget.text() == button).click()
+            return dialog.result()
+        return execute
+
+    def conflict_target(self):
+        self.target.parent.mkdir(parents=True, exist_ok=True)
+        self.target.write_bytes(b"old animation")
+
+    def publish_dependency(self, name, local=False):
+        relative = "Assets/Characters/BaSiTeV4/" + name
+        source = self.server / "Assets/Characters/BaSiTeV4/UE/Content" / relative
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"server dependency")
+        target = self.content / relative
+        if local:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"local_ dependency")
+        return relative, source, target
+
+    def test_action_conflict_uses_real_shared_dialog_and_selected_overwrite(self):
+        self.conflict_target()
+        relative = self.context["relative"]
+        with mock.patch.object(sceneTools._UEConflictDialog, "exec", self.chooser([relative])), \
+                mock.patch.object(ue_asset_service, "prepare_plan_overwrites",
+                                  wraps=ue_asset_service.prepare_plan_overwrites) as prepare:
+            self.ui.loadActionFile(str(self.source))
+            self.wait_finished()
+        self.assertEqual(self.target.read_bytes(), self.source.read_bytes())
+        self.assertEqual(prepare.call_args.args[0]["overwrite_files"], [relative])
+        self.warning.assert_not_called()
+        self.registry.scan_files_synchronous.assert_called_once()
+
+    def test_shared_keep_all_loads_existing_animation_without_overwrite(self):
+        self.conflict_target()
+        with mock.patch.object(sceneTools._UEConflictDialog, "exec",
+                               self.chooser(button="全部保留并加载")), \
+                mock.patch.object(action_service, "register_import", wraps=action_service.register_import) as register:
+            self.ui.loadActionFile(str(self.source))
+            self.wait_finished()
+        self.assertEqual(self.target.read_bytes(), b"old animation")
+        self.assertIn("保留工程版本 1", register.call_args.args[0]["message"])
+        self.warning.assert_not_called()
+        ue_asset_service.sync_to_content_browser.assert_called_once()
+
+    def test_real_dialog_cancel_copies_nothing_and_skips_overwrite_preparation(self):
+        self.conflict_target()
+        with mock.patch.object(sceneTools._UEConflictDialog, "exec", self.chooser(button="取消")), \
+                mock.patch.object(ue_asset_service, "prepare_plan_overwrites") as prepare, \
+                mock.patch.object(ue_asset_service, "AssetCopyWorker") as worker:
+            self.ui.loadActionFile(str(self.source))
+        prepare.assert_not_called()
+        worker.assert_not_called()
+        self.assertEqual(self.target.read_bytes(), b"old animation")
+        self.warning.assert_not_called()
+
+    def test_prerequisite_dialog_lists_conflicts_and_missing_and_copies_only_choices(self):
+        self.has_mesh = False
+        self.question.return_value = QtWidgets.QMessageBox.Yes
+        mesh = self.publish_mesh()
+        replace, server, replaced = self.publish_dependency("Mat/Replace.uasset", local=True)
+        keep, _, kept = self.publish_dependency("Mat/Keep.uasset", local=True)
+        missing, _, added = self.publish_dependency("Tex/New.uasset")
+        skip, _, skipped = self.publish_dependency("Tex/Skip.uasset")
+        def inspect(dialog, rows):
+            self.assertEqual(len(rows), 6)
+            self.assertEqual(rows[replace].data(0, QtCore.Qt.UserRole + 1), "conflict")
+            self.assertEqual(rows[missing].text(5), "缺失")
+            self.assertIn(self.context["relative"], rows)
+        with mock.patch.object(sceneTools._UEConflictDialog, "exec",
+                               self.chooser([replace], include_missing=True, skip_missing=[skip], inspect=inspect)), \
+                mock.patch.object(action_service, "register_import", wraps=action_service.register_import) as register:
+            self.ui.loadActionFile(str(self.source))
+            self.wait_finished()
+        self.assertEqual(replaced.read_bytes(), server.read_bytes())
+        self.assertEqual(kept.read_bytes(), b"local_ dependency")
+        self.assertTrue(added.exists())
+        self.assertFalse(skipped.exists())
+        self.assertEqual(self.mesh_target.read_bytes(), mesh.read_bytes())
+        self.assertEqual(self.target.read_bytes(), self.source.read_bytes())
+        plan = register.call_args.args[0]
+        self.assertEqual(plan["prerequisite_plan"]["missing_files"], [skip])
+        self.assertEqual(plan["prerequisite_plan"]["different_files"], [keep])
+        self.assertTrue(plan["prerequisite_plan"]["asset_present"])
+        self.assertEqual(plan["prerequisite_plan"]["state"], "conflict")
+        self.warning.assert_not_called()
+
+    def test_cancelling_dirty_overwrite_starts_no_copy(self):
+        self.conflict_target()
+        def cancel(plan):
+            plan["overwrite_cancelled"] = True
+            return ["已取消覆盖，保留资产的未保存修改"]
+        with mock.patch.object(sceneTools._UEConflictDialog, "exec", self.chooser([self.context["relative"]])), \
+                mock.patch.object(ue_asset_service, "prepare_plan_overwrites", side_effect=cancel), \
+                mock.patch.object(ue_asset_service, "AssetCopyWorker") as worker:
+            self.ui.loadActionFile(str(self.source))
+        worker.assert_not_called()
+        self.assertEqual(self.target.read_bytes(), b"old animation")
+        self.warning.assert_not_called()
+
+    def test_unchecked_missing_action_is_skipped_after_selected_prerequisite_copy(self):
+        self.has_mesh = False
+        self.question.return_value = QtWidgets.QMessageBox.Yes
+        self.publish_mesh()
+        _, _, kept = self.publish_dependency("Mat/Keep.uasset", local=True)
+        with mock.patch.object(sceneTools._UEConflictDialog, "exec",
+                               self.chooser(include_missing=True, skip_missing=[self.context["relative"]])), \
+                mock.patch.object(action_service, "register_import", wraps=action_service.register_import) as register:
+            self.ui.loadActionFiles([str(self.source)])
+            self.wait_batch()
+        self.assertTrue(self.mesh_target.exists())
+        self.assertFalse(self.target.exists())
+        self.assertEqual(kept.read_bytes(), b"local_ dependency")
+        self.assertTrue(register.call_args.args[0]["action_skipped"])
+        self.assertEqual(self.ui._action_batch.results[0]["state"], "skipped")
+        self.registry.scan_files_synchronous.assert_not_called()
+        ue_asset_service.sync_to_content_browser.assert_not_called()
+        self.warning.assert_not_called()
+
+    def test_cancelled_conflict_in_batch_continues_to_later_actions(self):
+        paths = self.batch_sources()
+        self.conflict_target()
+        with mock.patch.object(sceneTools._UEConflictDialog, "exec", self.chooser(button="取消")), \
+                mock.patch.object(action_service, "register_import", side_effect=self.register_batch):
+            self.ui.loadActionFiles([str(path) for path in paths])
+            self.wait_batch()
+        self.assertEqual([item["state"] for item in self.ui._action_batch.results],
+                         ["skipped", "succeeded", "succeeded"])
+        self.assertEqual(self.target.read_bytes(), b"old animation")
+        self.warning.assert_not_called()
+
+    def test_normalized_animation_keeps_are_preserved_during_prerequisite_conflict_choice(self):
+        self.legacy_animation()
+        self.ui.loadActionFile(str(self.source))
+        self.wait_finished()
+        normalized = self.target.read_bytes()
+        self.has_mesh = False
+        self.question.return_value = QtWidgets.QMessageBox.Yes
+        self.publish_mesh()
+        relative, server, target = self.publish_dependency("Mat/Replace.uasset", local=True)
+        with mock.patch.object(sceneTools._UEConflictDialog, "exec", self.chooser([relative], include_missing=True)):
+            self.ui.loadActionFile(str(self.source))
+            self.wait_finished()
+        self.assertEqual(self.target.read_bytes(), normalized)
+        self.assertEqual(target.read_bytes(), server.read_bytes())
+        self.animation.rename.assert_called_once()
+        self.warning.assert_not_called()
+
+    def test_selected_action_overwrite_failure_restores_original_and_removes_new_sidecar(self):
+        self.conflict_target()
+        self.source.with_suffix(".uexp").write_bytes(b"new sidecar")
+        original = ue_asset_service._replace_with_retry
+        def fail_action(source, target, *args, **kwargs):
+            if ".cgtools_tmp_" in str(source) and str(target) == self.target.as_posix():
+                raise OSError("disk full")
+            return original(source, target, *args, **kwargs)
+        with mock.patch.object(sceneTools._UEConflictDialog, "exec", self.chooser([self.context["relative"]], include_missing=True)), \
+                mock.patch.object(ue_asset_service, "_replace_with_retry", side_effect=fail_action):
+            self.ui.loadActionFile(str(self.source))
+            self.wait_finished()
+        self.assertEqual(self.target.read_bytes(), b"old animation")
+        self.assertFalse(self.target.with_suffix(".uexp").exists())
+        self.assertEqual(list(self.content.rglob("*.cgtools_tmp_*")), [])
+        self.registry.scan_files_synchronous.assert_not_called()
+        self.warning.assert_called_once()
 
     def test_identical_existing_file_is_registered_without_another_copy(self):
         self.target.parent.mkdir(parents=True)
@@ -229,6 +419,7 @@ class ActionLoadingTests(unittest.TestCase):
             self.ui.loadActionFile(str(self.source))
         copy_worker.assert_not_called()
         self.warning.assert_not_called()
+        self.information.assert_called_once()
         self.registry.scan_files_synchronous.assert_called_once()
 
     def test_missing_skeleton_is_reported_instead_of_claiming_the_animation_loaded(self):
@@ -236,6 +427,7 @@ class ActionLoadingTests(unittest.TestCase):
         self.ui.loadActionFile(str(self.source))
         self.wait_finished()
         self.warning.assert_called_once()
+        self.information.assert_not_called()
         ue_asset_service.sync_to_content_browser.assert_not_called()
 
     def test_copy_failure_does_not_register_or_leave_asset_or_action_files(self):
@@ -311,6 +503,9 @@ class ActionLoadingTests(unittest.TestCase):
         for path in paths:
             self.assertEqual(self.target.with_name(path.name).read_bytes(), path.read_bytes())
         self.warning.assert_not_called()
+        self.information.assert_called_once()
+        self.assertEqual(self.information.call_args.args[1], "批量加载动作")
+        self.assertIn("成功 3，跳过 0，失败 0", self.information.call_args.args[2])
 
     def test_one_conflict_and_one_missing_file_do_not_stop_later_actions(self):
         paths = self.batch_sources()
@@ -319,13 +514,16 @@ class ActionLoadingTests(unittest.TestCase):
         missing = paths[1].with_name('Missing.uasset')
         results = []
         self.ui._action_batch.finished.connect(results.append)
-        with mock.patch.object(action_service, 'register_import', side_effect=self.register_batch):
+        with mock.patch.object(action_service, 'register_import', side_effect=self.register_batch), \
+                mock.patch.object(sceneTools._UEConflictDialog, 'exec', self.chooser(button='取消')):
             self.ui.loadActionFiles([str(paths[0]), str(missing), str(paths[2])])
             self.wait_batch()
-        self.assertEqual([item['state'] for item in results[0]['items']], ['failed', 'failed', 'succeeded'])
+        self.assertEqual([item['state'] for item in results[0]['items']], ['skipped', 'failed', 'succeeded'])
         self.assertEqual(self.target.read_bytes(), b'user edited animation')
         self.assertTrue(self.target.with_name(paths[2].name).is_file())
         self.warning.assert_called_once()
+        self.information.assert_not_called()
+        self.assertIn("【加载失败】", self.warning.call_args.args[2])
         self.assertIn(str(missing).replace('\\', '/'), self.warning.call_args.args[2])
 
     def test_registration_failure_advances_only_after_thread_exit(self):

@@ -40,6 +40,7 @@ from .utils.ue_window_style import (
     unreal_window_icon,
 )
 from .utils.ue_window_minimize import UEWindowMinimizeController
+from .utils.folder_style import folder_icon, style_directory_view
 
 
 class AssetsManagerUI(QtWidgets.QWidget):
@@ -47,7 +48,7 @@ class AssetsManagerUI(QtWidgets.QWidget):
     scriptsPath = os.path.split(os.path.realpath(__file__))[0].replace('\\', '/')
     sm_temp = "{}/ShotManagerTemp".format(os.environ.get('APPDATA'))
     SM_SETTING_JSON = "{}/setting.json".format(sm_temp)
-    VERSION = "4.4.1"
+    VERSION = "4.4.5"
 
     def __init__(self, parent=None):
         super(AssetsManagerUI, self).__init__(parent)
@@ -133,10 +134,10 @@ class AssetsManagerUI(QtWidgets.QWidget):
         self._tab_initialized = set()
         self._tab_build_pending = set()
         self._startup_load_enabled = False
-        self.asset_page = self._createLazyPage(u"正在准备资产工具…")
-        self.blueprint_page = self._createLazyPage(u"正在准备蓝图工具…")
-        self.vfx_page = self._createLazyPage(u"正在准备特效工具…")
-        self.component_page = self._createLazyPage(u"正在准备组件工具…")
+        self.asset_page = self._createLazyPage(u"正在准备资产…", directory_tree=True)
+        self.blueprint_page = self._createLazyPage(u"正在准备蓝图…")
+        self.vfx_page = self._createLazyPage(u"正在准备特效…")
+        self.component_page = self._createLazyPage(u"正在准备组件…")
         self.tabWidget.addTab(self.asset_page, u"资产")
         self.tabWidget.addTab(self.blueprint_page, u"蓝图")
         self.tabWidget.addTab(self.component_page, u"组件")
@@ -180,14 +181,56 @@ class AssetsManagerUI(QtWidgets.QWidget):
         self.tabWidget.setCurrentIndex(tab)
 
     @staticmethod
-    def _createLazyPage(message):
+    def _createLazyPage(message, directory_tree=False):
         page = QtWidgets.QWidget()
+        page.setObjectName("LibraryPreparationPage")
+        page.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        page.setStyleSheet("QWidget#LibraryPreparationPage{background:#1a1a1a;}")
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         label = QtWidgets.QLabel(message)
+        label.setObjectName("LibraryPreparationMessage")
         label.setAlignment(QtCore.Qt.AlignCenter)
-        label.setStyleSheet("color:#9b9b9b; font-size:14px;")
-        layout.addWidget(label)
+        label.setStyleSheet("color:#9b9b9b; font-size:14px; background:#1a1a1a; border:0;")
+        if directory_tree:
+            # Show the directory area before importing any asset modules.
+            # Only the three known roots are drawn; no library discovery here.
+            splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+            splitter.setHandleWidth(5)
+            splitter.setChildrenCollapsible(False)
+            left = QtWidgets.QWidget()
+            left_layout = QtWidgets.QVBoxLayout(left)
+            left_layout.setContentsMargins(0, 0, 0, 0)
+            left_layout.setSpacing(3)
+            heading = QtWidgets.QLabel(u"资产目录")
+            heading.setStyleSheet(
+                "font-weight:bold; color:#d7d7d7; padding:4px 5px; background:#252628;")
+            left_layout.addWidget(heading)
+            tree = QtWidgets.QTreeWidget()
+            tree.setObjectName("AssetPreparationDirectoryTree")
+            tree.setHeaderHidden(True)
+            tree.setMinimumWidth(150)
+            style_directory_view(tree)
+            icon = folder_icon()
+            root = QtWidgets.QTreeWidgetItem(tree, [u"全部目录"])
+            root.setIcon(0, icon)
+            for name in ("Assets", "Scenes"):
+                child = QtWidgets.QTreeWidgetItem(root, [name])
+                child.setIcon(0, icon)
+            root.setExpanded(True)
+            tree.setFocusPolicy(QtCore.Qt.NoFocus)
+            tree.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+            tree.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+            left_layout.addWidget(tree, 1)
+            splitter.addWidget(left)
+            splitter.addWidget(label)
+            splitter.setSizes([185, 850])
+            splitter.setStretchFactor(0, 0)
+            splitter.setStretchFactor(1, 1)
+            layout.addWidget(splitter)
+        else:
+            layout.addWidget(label)
+        page._preparation_label = label
         return page
 
     def beginDeferredLoad(self):
@@ -323,11 +366,13 @@ class AssetsManagerUI(QtWidgets.QWidget):
             while layout.count():
                 old = layout.takeAt(0).widget()
                 if old is not None:
+                    old.hide()
                     old.deleteLater()
             layout.addWidget(widget)
+            page._preparation_label = None
             self._tab_initialized.add(idx)
         except Exception as exc:
-            label = layout.itemAt(0).widget() if layout.count() else None
+            label = page._preparation_label
             if isinstance(label, QtWidgets.QLabel):
                 label.setText(u"工具加载失败：{0}".format(exc))
             raise

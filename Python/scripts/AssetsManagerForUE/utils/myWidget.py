@@ -6,6 +6,7 @@ import os
 import math
 from . import imagesequence
 from .asset_card_thumbnail import load_card_image, supports_surface_icons
+from .folder_style import FOLDER_THUMBNAIL, FOLDER_BACKGROUND, folder_icon, paint_folder
 from ..my_vendor import six
 from PySide6 import QtGui
 from PySide6 import QtCore
@@ -459,6 +460,7 @@ class MainQListWiget(QtWidgets.QListWidget):
         self._isList = False
         self._itemSize = 120
         self._currentItem = None
+        self._loading_label = None
         self._thumbnailViewportItems = {}
         self._assetDragStart = None
         self._assetDragItem = None
@@ -503,6 +505,29 @@ class MainQListWiget(QtWidgets.QListWidget):
         self._scrollTimer.setSingleShot(True)
         self._scrollTimer.timeout.connect(self._updateVisibleItems)
         self.currentItemChanged.connect(lambda *_: self.stateScanPriorityChanged.emit())
+
+    def setLoadingMessage(self, message=""):
+        """Static viewport feedback; no animation, polling or background work."""
+        message = str(message or "")
+        label = self._loading_label
+        if label is None:
+            if not message:
+                return
+            label = QtWidgets.QLabel(self.viewport())
+            label.setObjectName("LibraryLoadingMessage")
+            label.setTextFormat(QtCore.Qt.PlainText)
+            label.setAlignment(QtCore.Qt.AlignCenter)
+            label.setWordWrap(True)
+            label.setContentsMargins(16, 16, 16, 16)
+            label.setFocusPolicy(QtCore.Qt.NoFocus)
+            label.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+            label.setStyleSheet("color:#9b9b9b; font-size:14px; background:transparent; border:0;")
+            self._loading_label = label
+        label.setText(message)
+        label.setGeometry(self.viewport().rect())
+        label.setVisible(bool(message))
+        if message:
+            label.raise_()
 
     def visibleItemRows(self):
         """Probe the viewport grid without walking all off-screen card rectangles."""
@@ -1063,6 +1088,9 @@ class MainQListWiget(QtWidgets.QListWidget):
     def resizeEvent(self, event):
         """窗口尺寸变化：重新计算可见区（换行后可见 item 集合会变）。"""
         super(MainQListWiget, self).resizeEvent(event)
+        label = getattr(self, "_loading_label", None)
+        if label is not None and not label.isHidden():
+            label.setGeometry(self.viewport().rect())
         self._updateListGeometry()
         self._updateVisibleItems()
 
@@ -1117,6 +1145,7 @@ class Item(QtWidgets.QListWidgetItem):
 
         self._data = {}
         self._itemData = {}
+        self._folder_thumbnail = False
         self._isload = False
 
         self._icon = {}
@@ -1301,6 +1330,7 @@ class Item(QtWidgets.QListWidgetItem):
         :rtype: None
         """
         self._itemData = data
+        self._folder_thumbnail = data[7] == FOLDER_THUMBNAIL
         self._ignorePendingThumbnail = self._thumbnailLoading
         self._thumbnailRefreshRequested = False
         self._srcPixmap = None       # 数据变了：作废缓存的原图，让下次绘制按新路径重新加载
@@ -1474,7 +1504,7 @@ class Item(QtWidgets.QListWidgetItem):
         仅当 item 在可视区(_isVisibleInViewport)时才真正排活；worker 开跑前会再判一次可视性，
         被快速滚动划走的任务会立即跳过，把线程让给当前可见区 -> 滚动到的新区域优先加载。
         """
-        if not self.ENABLE_THUMBNAIL_THREAD or self._thumbnailLoading:
+        if self._folder_thumbnail or not self.ENABLE_THUMBNAIL_THREAD or self._thumbnailLoading:
             return
         if not self._isVisibleInViewport:
             return
@@ -1671,6 +1701,8 @@ class Item(QtWidgets.QListWidgetItem):
         返回 self._thumbnailIcon
         :rtype: QtGui.QIcon
         """
+        if self._folder_thumbnail:
+            return folder_icon()
         thumbnailPath = self.thumbnailPath()
 
         if not self._thumbnailIcon:  # 如果没有 self._thumbnailIcon
@@ -1924,6 +1956,26 @@ class Item(QtWidgets.QListWidgetItem):
                 self.paintUEStatus(painter, option)
                 return
 
+            if self._folder_thumbnail:
+                # Flat folder cards avoid the thumbnail worker, checkerboard,
+                # clip paths, shadows and bitmap resampling entirely.
+                card = self.cardRect(option)
+                selected = bool(option.state & QtWidgets.QStyle.State_Selected)
+                hovered = bool(option.state & QtWidgets.QStyle.State_MouseOver)
+                painter.fillRect(card, QtGui.QColor(54, 56, 59) if hovered else QtGui.QColor(47, 48, 50))
+                if selected:
+                    painter.fillRect(QtCore.QRect(card.x(), card.y() + self.itemsWidget().itemSize(),
+                                                  card.width(), self.itemsWidget().textAreaHeight()),
+                                     self.DEFAULT_SELECTED_COLOR)
+                self.paintThumbnailBackground(painter, option)
+                self.paintIcon(painter, option, index)
+                self.paintText(painter, option, index)
+                painter.setPen(QtGui.QPen(QtGui.QColor(15, 145, 255) if selected else QtGui.QColor(44, 46, 49),
+                                         2.0 if selected else 1.0))
+                painter.setBrush(QtCore.Qt.NoBrush)
+                painter.drawRect(card.adjusted(1, 1, -1, -1))
+                return
+
             self.paintBackground(painter, option, index)
             clip_path = QtGui.QPainterPath()
             card = self.cardRect(option)
@@ -2091,6 +2143,9 @@ class Item(QtWidgets.QListWidgetItem):
         if self.itemsWidget().isList():
             return
         rect = self.iconRect(option)
+        if self._folder_thumbnail:
+            painter.fillRect(rect, FOLDER_BACKGROUND)
+            return
         tile = max(6, int(self.itemsWidget().itemSize() / 12.0))
         colors = (QtGui.QColor(27, 28, 30), QtGui.QColor(34, 35, 37))
         painter.setPen(QtCore.Qt.NoPen)
@@ -2218,6 +2273,11 @@ class Item(QtWidgets.QListWidgetItem):
         if self.itemsWidget().isList():
             pass
         else:
+            if self._folder_thumbnail:
+                rect = QtCore.QRectF(self.iconRect(option))
+                paint_folder(painter, rect.adjusted(rect.width() * .10, rect.height() * .13,
+                                                    -rect.width() * .10, -rect.height() * .13))
+                return
             if self.imageSequence() and self.underMouse():
                 # 悬停播放：复用 updateFrame 已解码好的当前帧，避免在绘制里再次从磁盘解码
                 pixmap = self._curFramePixmap
@@ -2386,6 +2446,9 @@ class Item(QtWidgets.QListWidgetItem):
                 if allowed is not None:
                     editable = editable and allowed(data, field_index)
                 text_rect = cell.adjusted(6, 0, -17 if editable else -6, 0)
+                if self._folder_thumbnail and field_index == 1:
+                    paint_folder(painter, QtCore.QRectF(text_rect.left(), text_rect.center().y() - 8, 16, 16))
+                    text_rect.adjust(22, 0, 0, 0)
                 elided = metrics.elidedText(text, QtCore.Qt.ElideRight,
                                             max(0, text_rect.width()))
                 if cell_alignment == "center":
@@ -2602,7 +2665,7 @@ class Item(QtWidgets.QListWidgetItem):
         """
         :type path: str
         """
-        self._imageSequencePath = self.itemData()[7].replace('thumbnail.jpg', 'sequence')
+        self._imageSequencePath = '' if self._folder_thumbnail else self.itemData()[7].replace('thumbnail.jpg', 'sequence')
 
     def imageSequencePath(self):
         """
@@ -2616,6 +2679,8 @@ class Item(QtWidgets.QListWidgetItem):
             self.imageSequence().stop()
 
     def play(self):
+        if self._folder_thumbnail:
+            return
         """Start playing the image sequence movie."""
         # print("Play Animation")
         self.resetImageSequence()

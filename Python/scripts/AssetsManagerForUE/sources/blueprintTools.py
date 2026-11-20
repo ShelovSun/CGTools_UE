@@ -18,6 +18,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..utils import messageBox, myWidget
 from ..utils.source_folder_menu import add_open_source_folder_action
+from ..utils.folder_style import folder_icon, style_directory_view
 from . import ue_asset_service
 
 
@@ -198,7 +199,7 @@ class BlueprintToolsUI(QtWidgets.QWidget):
             "font-weight:bold; color:#d7d7d7; padding:4px 5px; background:#252628;")
         left_layout.addWidget(category_label)
         self.category_list = QtWidgets.QListWidget()
-        self.category_list.setSpacing(3)
+        style_directory_view(self.category_list)
         self.category_list.setMinimumWidth(145)
         left_layout.addWidget(self.category_list, 1)
         splitter.addWidget(left)
@@ -213,7 +214,7 @@ class BlueprintToolsUI(QtWidgets.QWidget):
         self.display_button = self._toolButton("display_list.png", u"表单显示")
         toolbar.addWidget(self.display_button)
         self.size_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.size_slider.setRange(64, 200)
+        self.size_slider.setRange(64, 400)
         self.size_slider.setValue(120)
         self.size_slider.setMaximumWidth(250)
         self.size_slider.setToolTip(u"缩放蓝图卡片")
@@ -238,6 +239,7 @@ class BlueprintToolsUI(QtWidgets.QWidget):
         center_layout.addLayout(toolbar)
 
         self.card_list = myWidget.MainQListWiget()
+        self.card_list.setLoadingMessage(u"正在准备蓝图…")
         self.card_list.setSortingEnabled(False)
         self.card_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.card_list.setListColumns(
@@ -372,11 +374,13 @@ class BlueprintToolsUI(QtWidgets.QWidget):
         self.refresh_button.setEnabled(False)
         self.card_list.clear()
         self.infoMsg("info", u"正在后台扫描服务器蓝图库…")
+        self.card_list.setLoadingMessage(u"正在准备蓝图…")
         try:
             project_content = ue_asset_service.project_content_dir()
         except Exception as exc:
             self.category_list.setEnabled(True)
             self.refresh_button.setEnabled(True)
+            self.card_list.setLoadingMessage(u"蓝图准备失败，请点击刷新重试。")
             self.infoMsg("error", str(exc))
             return
         task = _LibraryScanTask(
@@ -400,7 +404,7 @@ class BlueprintToolsUI(QtWidgets.QWidget):
             item = QtWidgets.QListWidgetItem(category["name"])
             item.setData(QtCore.Qt.UserRole, category["name"])
             item.setToolTip(category["folder"])
-            item.setIcon(QtGui.QIcon("%s/icon/folder.svg" % self.scriptsPath))
+            item.setIcon(folder_icon())
             self.category_list.addItem(item)
             if category["name"] == self._preferred_category:
                 selected_row = row
@@ -412,6 +416,7 @@ class BlueprintToolsUI(QtWidgets.QWidget):
         else:
             self.card_list.clear()
             self.infoMsg("warning", u"蓝图目录中没有分类文件夹")
+        self.card_list.setLoadingMessage()
 
     def _scanFailed(self, generation, error):
         if generation != self._scan_generation:
@@ -421,6 +426,7 @@ class BlueprintToolsUI(QtWidgets.QWidget):
         self.refresh_button.setEnabled(True)
         self.category_list.clear()
         self.card_list.clear()
+        self.card_list.setLoadingMessage(u"蓝图准备失败，请点击刷新重试。")
         self.infoMsg("error", error)
 
     def _categoryChanged(self, current, previous=None):

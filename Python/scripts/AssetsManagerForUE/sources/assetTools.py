@@ -183,6 +183,7 @@ class AssetToolsUI(QtWidgets.QWidget):
         self._action_batch.itemRequested.connect(self._runActionBatchItem)
         self._action_batch.finished.connect(self._onActionBatchFinished)
         self._action_batch_result = None
+        self._action_load_message = ""
         self._action_batch_dispatching = False
         self._action_import_running = False
         self._action_import_result = None
@@ -252,8 +253,7 @@ class AssetToolsUI(QtWidgets.QWidget):
         tool.addWidget(self.displayThumb_bttn)
 
         self.itemSize_Slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.itemSize_Slider.setMinimum(10)
-        self.itemSize_Slider.setMaximum(200)
+        self.itemSize_Slider.setRange(64, 400)
         self.itemSize_Slider.setValue(120)
         self.itemSize_Slider.setMaximumWidth(250)
         self.itemSize_Slider.setToolTip(u"缩放图标")
@@ -1254,6 +1254,8 @@ class AssetToolsUI(QtWidgets.QWidget):
             self.action_wgt.setLoadBusy(self._action_batch.active)
         if self._action_batch.active:
             self._finishActionBatchItem()
+        elif self._action_load_message:
+            self._showActionLoadComplete()
 
     def locateUEAsset(self, item=None):
         item = item or self.main_listWgt.currentItem()
@@ -1281,6 +1283,7 @@ class AssetToolsUI(QtWidgets.QWidget):
         self._status_editor.shutdown()
         self._record_controller.shutdown()
         self._state_closed = True
+        self._action_load_message = ""
         self._action_batch.cancel()
         self._load_check.cancel()
         self._state_requests.clear()
@@ -1458,10 +1461,13 @@ class AssetToolsUI(QtWidgets.QWidget):
                 label, succeeded, len(warnings), len(unsaved), skipped, len(failed))
         self.infoMsg("warning" if failed or warnings or unsaved else "info", summary)
         if failed or warnings or unsaved:
-            labels = {'warning': u'已导入并保存（有警告）', 'unsaved': u'已导入，但未保存', 'failed': u'导入失败'}
+            labels = {'warning': u'已导入并保存（有警告）', 'unsaved': u'已导入，但未保存',
+                      'failed': u'加载失败' if result['operation'] == 'load' else u'导入失败'}
             details = "\n\n".join(u"【{0}】{1}\n{2}".format(labels[item['state']], item["path"], item["message"])
                                    for item in items if item['state'] in labels)
             QtWidgets.QMessageBox.warning(self, label, summary + "\n\n" + details)
+        elif result["operation"] == "load":
+            QtWidgets.QMessageBox.information(self, label, summary)
 
     def loadActionFile(self, action_package=None):
         """加载同名动画包；缺少角色/道具时，经确认一并加载其 UE 发布包。"""
@@ -1486,11 +1492,28 @@ class AssetToolsUI(QtWidgets.QWidget):
                         self._action_batch_result = ("skipped", u"用户取消先加载资产")
                     return
             plan = action_service.build_import_plan(action_package, include_asset=include_asset)
-            if plan.get("state") == "conflict":
-                raise RuntimeError(u"工程内存在同名但内容不同的文件，本次未覆盖：\n{0}".format(
-                    "\n".join(plan.get("different_files", [])[:12])))
+            if plan.get("different_files"):
+                normalized_keeps = set(plan.get("keep_existing_files") or [])
+                if not self._chooseConflictFiles(plan):
+                    if self._action_batch.active:
+                        self._action_batch_result = ("skipped", u"用户取消动作加载文件选择")
+                    return
+                # Our previously normalized animations remain intentional local
+                # copies even when a prerequisite dependency needs a choice.
+                plan["keep_existing_files"] = sorted(
+                    normalized_keeps | set(plan.get("keep_existing_files") or []), key=str.lower)
+            if self._state_closed:
+                return
             if plan.get("state") == "ready":
                 self._onActionCopyFinished(plan)
+                return
+            for warning in ue_asset_service.prepare_plan_overwrites(plan):
+                self.infoMsg("warning", warning)
+            if plan.get("overwrite_cancelled"):
+                if self._action_batch.active:
+                    self._action_batch_result = ("skipped", u"已取消覆盖，未开始加载动作")
+                return
+            if self._state_closed:
                 return
             if self.action_wgt is not None:
                 self.action_wgt.setLoadBusy(True)
@@ -1532,6 +1555,11 @@ class AssetToolsUI(QtWidgets.QWidget):
                     item = self.main_listWgt.item(index)
                     if self._sourceCacheKey(ue_asset_service.asset_root_from_item_data(item.itemData())) == root_key:
                         self._setItemUEPlan(item, prerequisite)
+            if plan.get("action_skipped"):
+                self.infoMsg("warning", plan["message"])
+                if self._action_batch.active:
+                    self._action_batch_result = ("skipped", plan["message"])
+                return
             self.infoMsg("info", plan["message"])
             if self._action_batch.active:
                 self._action_batch_result = ("succeeded", plan["message"])
@@ -1540,8 +1568,18 @@ class AssetToolsUI(QtWidgets.QWidget):
                 QtCore.QTimer.singleShot(250, lambda: (
                     ue_asset_service.sync_to_content_browser(object_path)
                     if not self._state_closed else None))
+            if not self._action_batch.active:
+                self._action_load_message = plan["message"]
+                if self._copy_thread is None:
+                    self._showActionLoadComplete()
         except Exception as exc:
             self._onActionCopyFailed(str(exc))
+
+    def _showActionLoadComplete(self):
+        message = self._action_load_message
+        self._action_load_message = ""
+        if message and not self._state_closed:
+            QtWidgets.QMessageBox.information(self, u"加载动作完成", message)
 
     def _onActionCopyFailed(self, message):
         if not self._state_closed:

@@ -10,188 +10,16 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..utils import messageBox, myWidget
 from ..utils.source_folder_menu import add_open_source_folder_action
-from . import component_service
+from ..utils.folder_style import FOLDER_THUMBNAIL, folder_icon, style_directory_view
+from . import component_service, component_documentation
+from .component_documentation_browser import MarkdownBrowser as _MarkdownBrowser
 
 
 _FLAT = "border-style: flat; background: transparent;"
 _SCAN_POOL = QtCore.QThreadPool()
 _SCAN_POOL.setMaxThreadCount(1)
-
-
-class _MarkdownBrowser(QtWidgets.QTextBrowser):
-    """显示本地 Markdown，并为文档中的本地 GIF 提供逐帧刷新。"""
-
-    def __init__(self, parent=None):
-        super(_MarkdownBrowser, self).__init__(parent)
-        self._movies = []
-        self._image_sizes = {}
-        self._fit_timer = QtCore.QTimer(self)
-        self._fit_timer.setSingleShot(True)
-        self._fit_timer.timeout.connect(self._fitImages)
-        self.setReadOnly(True)
-        self.setOpenLinks(False)
-        self.setOpenExternalLinks(False)
-        self.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self.setStyleSheet(
-            "QTextBrowser{background:#181818; color:#d7d7d7; padding:12px;}"
-            "QScrollBar:vertical{background:#202020; width:12px;}"
-            "QScrollBar::handle:vertical{background:#555; min-height:24px;}"
-        )
-        self.document().setDefaultStyleSheet(
-            "body{color:#d7d7d7; font-family:'Microsoft YaHei UI'; font-size:14px;}"
-            "h1,h2,h3,h4{color:#f0f0f0;}"
-            "a{color:#58a6ff;}"
-            "blockquote{color:#b8b8b8; background:#242424;}"
-            "pre{color:#ddd; background:#242424;}"
-            "code{color:#efb366; background:#242424;}"
-            "table{border-collapse:collapse;}"
-            "th,td{border:1px solid #555; padding:5px;}"
-        )
-        self.anchorClicked.connect(self._openLink)
-
-    def showMarkdown(self, document_path, text):
-        self._stopMovies()
-        self._image_sizes = {}
-        base_folder = os.path.dirname(os.path.abspath(document_path))
-        self.document().setBaseUrl(
-            QtCore.QUrl.fromLocalFile(base_folder + os.path.sep))
-        self.setMarkdown(text)
-        self._prepareImages(base_folder)
-        self.moveCursor(QtGui.QTextCursor.Start)
-        self._fit_timer.start(0)
-
-    def clearMarkdown(self):
-        self._stopMovies()
-        self._image_sizes = {}
-        self.clear()
-
-    def resizeEvent(self, event):
-        super(_MarkdownBrowser, self).resizeEvent(event)
-        self._fit_timer.start(80)
-
-    def _imageFragments(self):
-        fragments = []
-        block = self.document().begin()
-        while block.isValid():
-            iterator = block.begin()
-            while not iterator.atEnd():
-                fragment = iterator.fragment()
-                if fragment.isValid():
-                    char_format = fragment.charFormat()
-                    if char_format.isImageFormat():
-                        image_format = char_format.toImageFormat()
-                        fragments.append((
-                            fragment.position(), fragment.length(),
-                            str(image_format.name()), image_format,
-                        ))
-                iterator += 1
-            block = block.next()
-        return fragments
-
-    @staticmethod
-    def _localImagePath(source, base_folder):
-        source = str(source or "").strip()
-        if not source:
-            return ""
-        url = QtCore.QUrl(source)
-        if url.isLocalFile():
-            return os.path.normpath(url.toLocalFile())
-        normalized = source.replace("/", os.path.sep)
-        if os.path.isabs(normalized):
-            return os.path.normpath(normalized)
-        if url.scheme():
-            return ""
-        try:
-            decoded = QtCore.QUrl.fromPercentEncoding(source.encode("utf-8"))
-        except (TypeError, UnicodeError):
-            decoded = source
-        decoded = str(decoded).split("#", 1)[0].split("?", 1)[0]
-        return os.path.normpath(os.path.join(
-            base_folder, decoded.replace("/", os.path.sep)))
-
-    def _prepareImages(self, base_folder):
-        seen_sources = set()
-        for _position, _length, source, _image_format in self._imageFragments():
-            if not source or source in seen_sources:
-                continue
-            seen_sources.add(source)
-            image_path = self._localImagePath(source, base_folder)
-            if not image_path or not os.path.isfile(image_path):
-                continue
-
-            reader = QtGui.QImageReader(image_path)
-            size = reader.size()
-            if size.isValid():
-                self._image_sizes[source] = QtCore.QSize(size)
-
-            raw_url = QtCore.QUrl(source)
-            resolved_url = self.document().baseUrl().resolved(raw_url)
-            resource_urls = (raw_url, resolved_url)
-            if image_path.lower().endswith(".gif"):
-                self._startGif(image_path, resource_urls)
-                continue
-
-            image = reader.read()
-            if not image.isNull():
-                for resource_url in resource_urls:
-                    self.document().addResource(
-                        QtGui.QTextDocument.ImageResource, resource_url, image)
-
-    def _startGif(self, image_path, resource_urls):
-        movie = QtGui.QMovie(image_path, parent=self)
-        if not movie.isValid():
-            return
-        movie.setCacheMode(QtGui.QMovie.CacheAll)
-        movie.frameChanged.connect(
-            lambda _frame, current=movie, urls=resource_urls:
-            self._updateGifFrame(current, urls))
-        self._movies.append(movie)
-        movie.start()
-
-    def _updateGifFrame(self, movie, resource_urls):
-        if movie not in self._movies:
-            return
-        pixmap = movie.currentPixmap()
-        if pixmap.isNull():
-            return
-        for resource_url in resource_urls:
-            self.document().addResource(
-                QtGui.QTextDocument.ImageResource, resource_url, pixmap)
-        self.document().markContentsDirty(0, self.document().characterCount())
-        self.viewport().update()
-
-    def _stopMovies(self):
-        for movie in self._movies:
-            movie.stop()
-            movie.deleteLater()
-        self._movies = []
-
-    def _fitImages(self):
-        maximum_width = max(160, self.viewport().width() - 36)
-        keep_anchor = QtGui.QTextCursor.KeepAnchor
-        for position, length, source, image_format in self._imageFragments():
-            natural_size = self._image_sizes.get(source)
-            if not natural_size or natural_size.width() <= 0:
-                continue
-            width = min(natural_size.width(), maximum_width)
-            height = int(round(
-                natural_size.height() * float(width) / natural_size.width()))
-            if (int(image_format.width()) == width
-                    and int(image_format.height()) == height):
-                continue
-            image_format.setWidth(width)
-            image_format.setHeight(height)
-            cursor = QtGui.QTextCursor(self.document())
-            cursor.setPosition(position)
-            cursor.setPosition(position + length, keep_anchor)
-            cursor.mergeCharFormat(image_format)
-
-    def _openLink(self, url):
-        if not url.scheme() and not url.path() and url.fragment():
-            self.scrollToAnchor(url.fragment())
-            return
-        target = self.document().baseUrl().resolved(url)
-        QtGui.QDesktopServices.openUrl(target)
+_DOCUMENT_POOL = QtCore.QThreadPool()
+_DOCUMENT_POOL.setMaxThreadCount(1)
 
 
 class _ComponentCardList(myWidget.MainQListWiget):
@@ -235,6 +63,34 @@ class _ComponentScanTask(QtCore.QRunnable):
                 self.signals.failed.emit(self.generation, str(exc))
 
 
+class _DocumentationSignals(QtCore.QObject):
+    completed = QtCore.Signal(int, str, object)
+
+
+class _DocumentationTask(QtCore.QRunnable):
+    def __init__(self, generation, folder):
+        super(_DocumentationTask, self).__init__()
+        self.signals = _DocumentationSignals()
+        self.generation, self.folder = generation, folder
+        self.cancelled = False
+
+    def cancel(self):
+        self.cancelled = True
+
+    def run(self):
+        payload = None
+        try:
+            payload = component_documentation.prepare(self.folder, lambda: self.cancelled)
+        except component_documentation.Cancelled:
+            pass
+        except Exception:
+            payload = dict(status='error', path='',
+                           message=u'暂时无法读取使用说明，请稍后重试。', cost=128)
+        # Always release the active slot; only the latest request may update the UI.
+        self.signals.completed.emit(self.generation, self.folder,
+                                    None if self.cancelled else payload)
+
+
 class ComponentToolsUI(QtWidgets.QWidget):
     """与资产、蓝图页一致的组件分类卡片浏览器。"""
 
@@ -257,8 +113,19 @@ class ComponentToolsUI(QtWidgets.QWidget):
         self._copy_folder = ""
         self._copy_stage_replacement = False
         self._current_document_path = ""
+        self._documentation_open = False
+        self._documentation_shutdown = False
+        self._documentation_generation = 0
+        self._documentation_task = None
+        self._documentation_requested = None
+        self._documentation_pending = False
+        self._documentation_cache = component_documentation.DocumentCache()
+        self._documentation_timer = QtCore.QTimer(self)
+        self._documentation_timer.setSingleShot(True)
+        self._documentation_timer.setInterval(180)
+        self._documentation_timer.timeout.connect(self._beginDocumentation)
         self._fallback_icon = "%s/icon/component.png" % self.scriptsPath
-        self._folder_icon = "%s/icon/floder.png" % self.scriptsPath
+        self._folder_icon = FOLDER_THUMBNAIL
         self._buildUI()
         QtCore.QTimer.singleShot(0, self.refreshLibrary)
 
@@ -283,15 +150,7 @@ class ComponentToolsUI(QtWidgets.QWidget):
         left_layout.addWidget(category_label)
         self.category_list = QtWidgets.QTreeWidget()
         self.category_list.setHeaderHidden(True)
-        self.category_list.setIndentation(16)
-        self.category_list.setIconSize(QtCore.QSize(16, 16))
-        self.category_list.setUniformRowHeights(True)
-        self.category_list.setStyleSheet(
-            "QTreeWidget{background:#1a1a1a; color:#b1b1b1; font-size:13px; border:0;}"
-            "QTreeWidget::item{padding:5px 2px;}"
-            "QTreeWidget::item:selected{background:#343a40; color:#f3f3f3;}"
-            "QTreeWidget::item:hover{background:#303030;}"
-        )
+        style_directory_view(self.category_list)
         self.category_list.setMinimumWidth(145)
         left_layout.addWidget(self.category_list, 1)
         self.content_splitter.addWidget(left)
@@ -309,7 +168,7 @@ class ComponentToolsUI(QtWidgets.QWidget):
         self.display_button = self._toolButton("display_list.png", u"表单显示")
         toolbar.addWidget(self.display_button)
         self.size_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.size_slider.setRange(64, 200)
+        self.size_slider.setRange(64, 400)
         self.size_slider.setValue(120)
         self.size_slider.setMaximumWidth(250)
         self.size_slider.setToolTip(u"缩放组件卡片")
@@ -334,6 +193,7 @@ class ComponentToolsUI(QtWidgets.QWidget):
         center_layout.addLayout(toolbar)
 
         self.card_list = _ComponentCardList()
+        self.card_list.setLoadingMessage(u"正在准备组件…")
         self.card_list.setSortingEnabled(False)
         self.card_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.card_list.setListColumns(
@@ -450,6 +310,8 @@ class ComponentToolsUI(QtWidgets.QWidget):
         if self._operationIsRunning():
             self.infoMsg("warning", u"正在加载组件，完成后才能刷新")
             return
+        self._documentation_cache.clear()
+        self._invalidateDocumentation()
         self._rememberSettings()
         self._scan_generation += 1
         generation = self._scan_generation
@@ -462,12 +324,14 @@ class ComponentToolsUI(QtWidgets.QWidget):
         self.load_button.setEnabled(False)
         self.card_list.clear()
         self.infoMsg("info", u"正在后台扫描服务器组件库…")
+        self.card_list.setLoadingMessage(u"正在准备组件…")
         try:
             plugins_dir = component_service.project_plugins_directory()
         except Exception as exc:
             self.category_list.setEnabled(True)
             self.refresh_button.setEnabled(True)
             self._updateParentButton()
+            self.card_list.setLoadingMessage(u"组件准备失败，请点击刷新重试。")
             self.infoMsg("error", str(exc))
             return
         task = _ComponentScanTask(
@@ -489,7 +353,7 @@ class ComponentToolsUI(QtWidgets.QWidget):
         self._components_by_folder = {}
         self.category_list.blockSignals(True)
         self.category_list.clear()
-        folder_icon = QtGui.QIcon(self._folder_icon)
+        directory_icon = folder_icon()
         component_icon = QtGui.QIcon(self._fallback_icon)
 
         def add_category(category, parent=None):
@@ -500,7 +364,7 @@ class ComponentToolsUI(QtWidgets.QWidget):
             item.setData(0, QtCore.Qt.UserRole, category_path)
             item.setData(0, QtCore.Qt.UserRole + 1, category["folder"])
             item.setToolTip(0, category["folder"])
-            item.setIcon(0, folder_icon)
+            item.setIcon(0, directory_icon)
             if parent is None:
                 self.category_list.addTopLevelItem(item)
             else:
@@ -531,6 +395,7 @@ class ComponentToolsUI(QtWidgets.QWidget):
         self.category_list.setEnabled(True)
         self.refresh_button.setEnabled(True)
         self._navigateToCategory(self._preferred_category or ".")
+        self.card_list.setLoadingMessage()
 
     def _scanFailed(self, generation, error):
         if generation != self._scan_generation:
@@ -547,6 +412,7 @@ class ComponentToolsUI(QtWidgets.QWidget):
         self._components_by_folder = {}
         self.category_list.clear()
         self.card_list.clear()
+        self.card_list.setLoadingMessage(u"组件准备失败，请点击刷新重试。")
         self.infoMsg("error", error)
 
     def _categoryChanged(self, current, previous=None):
@@ -753,6 +619,7 @@ class ComponentToolsUI(QtWidgets.QWidget):
             component is not None
             and self._scan_task is None
             and not self._operationIsRunning())
+        self._scheduleDocumentation(component)
 
     def _operationIsRunning(self):
         return bool(self._copy_thread is not None and self._copy_thread.isRunning())
@@ -805,69 +672,99 @@ class ComponentToolsUI(QtWidgets.QWidget):
             self.infoMsg("warning", u"请先选择一张组件卡片")
             return
 
-        component_folder = str(component.get("folder") or "")
-        try:
-            documents = [
-                os.path.join(component_folder, filename)
-                for filename in os.listdir(component_folder)
-                if (filename.lower().endswith(".md")
-                    and os.path.isfile(os.path.join(component_folder, filename)))
-            ]
-        except OSError as exc:
-            QtWidgets.QMessageBox.warning(
-                self,
-                u"使用说明",
-                u"无法读取组件目录：\n{0}\n\n{1}".format(
-                    component_folder, exc),
-            )
-            return
-
-        if not documents:
-            QtWidgets.QMessageBox.warning(
-                self,
-                u"使用说明",
-                u"该组件还没有使用说明文档，请联系制作者",
-            )
-            return
-
-        document_path = sorted(
-            documents,
-            key=lambda path: os.path.basename(path).lower(),
-        )[0]
-        try:
-            markdown_text = self._readMarkdown(document_path)
-        except (OSError, UnicodeError) as exc:
-            QtWidgets.QMessageBox.warning(
-                self,
-                u"使用说明",
-                u"无法读取使用说明文档：\n{0}\n\n{1}".format(
-                    document_path, exc),
-            )
-            return
-
-        self._current_document_path = document_path
-        self.documentation_title.setText(u"{0} — {1}".format(
-            component.get("name") or os.path.basename(component_folder),
-            os.path.basename(document_path),
-        ))
-        self.documentation_title.setToolTip(document_path)
-        self.documentation_browser.showMarkdown(document_path, markdown_text)
+        was_open = self._documentation_open
+        if was_open and self._documentation_task is None and not self._current_document_path:
+            self._invalidateDocumentation()
+        self._documentation_open = True
         self.documentation_panel.show()
-        QtCore.QTimer.singleShot(0, self._resizeDocumentationPanel)
+        if not was_open:
+            QtCore.QTimer.singleShot(0, self._resizeDocumentationPanel)
+        self._scheduleDocumentation(component, immediate=True)
 
-    @staticmethod
-    def _readMarkdown(document_path):
-        """兼容工具库中常见的 UTF-8 与旧 GB18030 Markdown。"""
-        decoding_error = None
-        for encoding in ("utf-8-sig", "utf-8", "gb18030"):
-            try:
-                with open(document_path, "r", encoding=encoding) as stream:
-                    return stream.read()
-            except UnicodeDecodeError as exc:
-                decoding_error = exc
-        if decoding_error is not None:
-            raise decoding_error
-        raise OSError(u"无法读取文档")
+    def _invalidateDocumentation(self):
+        self._documentation_generation += 1
+        self._documentation_timer.stop()
+        self._documentation_requested = None
+        self._documentation_pending = False
+        if self._documentation_task is not None:
+            self._documentation_task.cancel()
+
+    def _scheduleDocumentation(self, component, immediate=False):
+        if not self._documentation_open or self._documentation_shutdown or not self.isVisible():
+            return
+        key = os.path.normcase(os.path.normpath(str(component['folder']))) if component else ''
+        previous = self._documentation_requested
+        if previous is not None and previous[0] == key:
+            return
+        self._invalidateDocumentation()
+        self._documentation_requested = (key, dict(component)) if component else ('', {})
+        self._current_document_path = ''
+        self.documentation_external_button.setEnabled(False)
+        self.documentation_title.setText(u'{0} — 使用说明'.format(component['name']) if component else u'使用说明')
+        self.documentation_title.setToolTip('')
+        self.documentation_browser.showMessage(u'正在加载使用说明…' if component else u'请选择组件查看使用说明。')
+        if component:
+            if immediate:
+                self._beginDocumentation()
+            else:
+                self._documentation_timer.start()
+
+    @QtCore.Slot()
+    def _beginDocumentation(self):
+        if (not self._documentation_open or self._documentation_shutdown
+                or not self.isVisible() or not self._documentation_requested
+                or not self._documentation_requested[0]):
+            return
+        key, component = self._documentation_requested
+        payload = self._documentation_cache.get(key)
+        if payload is not None:
+            self._documentation_pending = False
+            self._applyDocumentation(payload, component)
+            return
+        if self._documentation_task is not None:
+            self._documentation_pending = True
+            return
+        self._documentation_pending = False
+        task = _DocumentationTask(self._documentation_generation, component['folder'])
+        task.signals.completed.connect(self._documentationFinished)
+        self._documentation_task = task
+        _DOCUMENT_POOL.start(task)
+
+    @QtCore.Slot(int, str, object)
+    def _documentationFinished(self, generation, folder, payload):
+        if self._documentation_task is not None and self._documentation_task.generation == generation:
+            self._documentation_task = None
+        current = self._documentation_requested
+        if (generation == self._documentation_generation and current
+                and current[0] == os.path.normcase(os.path.normpath(folder))
+                and self._documentation_open and not self._documentation_shutdown and self.isVisible()
+                and payload is not None):
+            if payload['status'] in ('ready', 'missing'):
+                self._documentation_cache.put(current[0], payload)
+            self._applyDocumentation(payload, current[1])
+        if self._documentation_pending and not self._documentation_timer.isActive():
+            self._beginDocumentation()
+
+    def _applyDocumentation(self, payload, component):
+        path = payload.get('path') or ''
+        self._current_document_path = path
+        self.documentation_title.setText(u'{0} — {1}'.format(
+            component['name'], os.path.basename(path) if path else u'使用说明'))
+        self.documentation_title.setToolTip(path)
+        self.documentation_external_button.setEnabled(bool(path))
+        if payload['status'] == 'ready':
+            self.documentation_browser.showPrepared(payload)
+        else:
+            self.documentation_browser.showMessage(payload['message'])
+
+    def hideEvent(self, event):
+        self._invalidateDocumentation()
+        super(ComponentToolsUI, self).hideEvent(event)
+
+    def showEvent(self, event):
+        super(ComponentToolsUI, self).showEvent(event)
+        if self._documentation_open:
+            self._scheduleDocumentation(self._componentForItem(self.card_list.currentItem()), immediate=True)
 
     def _resizeDocumentationPanel(self):
         if not self.documentation_panel.isVisible():
@@ -884,8 +781,10 @@ class ComponentToolsUI(QtWidgets.QWidget):
             [left_width, card_width, documentation_width])
 
     def _closeDocumentationPanel(self):
-        if not self.documentation_panel.isVisible():
+        if not self._documentation_open:
             return
+        self._documentation_open = False
+        self._invalidateDocumentation()
         current_sizes = self.content_splitter.sizes()
         left_width = current_sizes[0] if current_sizes else 175
         content_width = sum(current_sizes[1:]) if len(current_sizes) > 1 else 760
@@ -1150,6 +1049,9 @@ class ComponentToolsUI(QtWidgets.QWidget):
         messageBox.show_msg(self.message_icon, icon, self.message_label, str(text))
 
     def shutdownThreads(self):
+        self._documentation_shutdown = True
+        self._invalidateDocumentation()
+        self._documentation_cache.clear()
         if hasattr(self, "documentation_browser"):
             self.documentation_browser.clearMarkdown()
         self._scan_generation += 1

@@ -69,6 +69,7 @@ def build_import_plan(source_file, project_content_dir=None, include_asset=False
             "relative": relative,
             "extension": extension,
             "size": os.path.getsize(candidate),
+            "source_content_root": os.path.dirname(source),
         })
     main_object = context["package_name"] + "." + os.path.basename(relative_stem)
     plan = {
@@ -90,7 +91,9 @@ def build_import_plan(source_file, project_content_dir=None, include_asset=False
             raise RuntimeError(u"服务器 UE 发布包不包含目标资产目录 {0}，无法先加载该资产。".format(context["game_folder"]))
         # The action library is authoritative when the asset's older UE export
         # also contains an animation package at this exact destination.
-        by_target = {os.path.normcase(entry["target"]): entry for entry in prerequisite["files"]}
+        prerequisite_root = prerequisite.get("source_content_root") or prerequisite["source_root"]
+        by_target = {os.path.normcase(entry["target"]): dict(entry, source_content_root=prerequisite_root)
+                     for entry in prerequisite["files"]}
         by_target.update({os.path.normcase(entry["target"]): entry for entry in files})
         plan["files"] = list(by_target.values())
         plan["package_object_paths"] = list(dict.fromkeys(prerequisite["package_object_paths"] + [main_object]))
@@ -198,6 +201,39 @@ def _normalize_animation(plan, animation):
     plan["repair_backup_directory"] = backup_dir
 
 
+def _relative_key(path):
+    return str(path).replace("\\", "/").lower()
+
+
+def _selection_note(plan):
+    counts = [(u"覆盖", "overwritten_files"), (u"保留工程版本", "kept_existing_files"),
+              (u"跳过缺失文件", "skipped_missing_files")]
+    parts = [u"{0} {1}".format(label, len(plan.get(field) or []))
+             for label, field in counts if plan.get(field)]
+    return u"（{0}）".format(u"，".join(parts)) if parts else ""
+
+
+def _skip_registration(plan, reason):
+    plan.update(state="partial", action_skipped=True, main_object_path="",
+                message=reason + _selection_note(plan))
+    return plan
+
+
+def _prerequisite_result(plan, prerequisite):
+    """Reuse the worker's final manifest/state, without another disk scan."""
+    result = dict(prerequisite)
+    keys = {_relative_key(entry["relative"]) for entry in prerequisite["files"]}
+    result["files"] = [entry for entry in plan["files"] if _relative_key(entry["relative"]) in keys]
+    for field in ("missing_files", "different_files", "existing_files"):
+        result[field] = [path for path in plan.get(field) or [] if _relative_key(path) in keys]
+    if "asset_identity_paths" in result:
+        missing = {_relative_key(path) for path in result["missing_files"]}
+        present = {ue_asset_service._object_path_from_relative(entry["relative"]).lower()
+                   for entry in result["files"] if _relative_key(entry["relative"]) not in missing}
+        result["asset_present"] = any(path.lower() in present for path in result["asset_identity_paths"])
+    return result
+
+
 def register_import(plan):
     """Refresh on the UE thread; require a visible, correctly named animation."""
     ue_asset_service.reload_overwritten_packages(plan)
@@ -206,7 +242,7 @@ def register_import(plan):
     context = plan["action_context"]
     prerequisite = plan.get("prerequisite_plan")
     if prerequisite:
-        registration_plan = dict(prerequisite)
+        registration_plan = _prerequisite_result(plan, prerequisite)
         registration_plan["package_object_paths"] = [
             path for path in prerequisite["package_object_paths"]
             if path.rsplit(".", 1)[0].lower() != context["package_name"].lower()]
@@ -214,7 +250,14 @@ def register_import(plan):
         plan["prerequisite_plan"] = prerequisite
         if prerequisite.get("state") == "error":
             raise RuntimeError(prerequisite["message"])
+    skipped = {_relative_key(path) for path in plan.get("skipped_missing_files") or []}
+    if any(_relative_key(entry["relative"]) in skipped for entry in _action_entries(plan)):
+        return _skip_registration(plan, u"所选文件已处理；动作包有缺失文件未勾选，本次未加载动作")
     if not asset_exists(context):
+        asset_prefix = _relative_key(context["game_folder"][len("/Game/"):]) + "/"
+        if any(path.startswith(asset_prefix) and os.path.splitext(path)[1] in ue_asset_service.PRIMARY_EXTENSIONS
+               for path in skipped):
+            return _skip_registration(plan, u"所选文件已处理；资产文件未完整加载，本次未加载动作")
         raise RuntimeError(u"当前工程仍未找到资产 {0}，请先将骨架网格体加载到 {1}。".format(context["asset_name"], context["game_folder"]))
     engine = ue_asset_service.unreal
     registry = engine.AssetRegistryHelpers.get_asset_registry()
@@ -235,6 +278,7 @@ def register_import(plan):
             raise RuntimeError(u"动画尚不能在内容浏览器中显示：{0}".format(object_path))
         if plan.get("repaired_legacy_name"):
             registry.scan_files_synchronous([target_file], True)
-        plan.update(state="ready", main_object_path=object_path, message=u"动作加载完成：{0}".format(object_path))
+        plan.update(state="ready", main_object_path=object_path,
+                    message=u"动作加载完成：{0}{1}".format(object_path, _selection_note(plan)))
         return plan
     raise RuntimeError(u"动画文件已复制，但 UE 未识别为动画序列：{0}".format(target_file))

@@ -16,6 +16,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..utils import messageBox, myWidget
 from ..utils.source_folder_menu import add_open_source_folder_action
+from ..utils.folder_style import FOLDER_THUMBNAIL, folder_icon, style_directory_view
 from . import ue_asset_service
 from .vfx_thumbnail_cache import VfxThumbnailCache
 
@@ -220,7 +221,7 @@ class VfxToolsUI(QtWidgets.QWidget):
         self._thumbnail_timer.timeout.connect(self._requestVisibleThumbnails)
         self._browser_sync_generation = 0
         self._fallback_icon = "%s/icon/Default.png" % self.scriptsPath
-        self._folder_icon = "%s/icon/floder.png" % self.scriptsPath
+        self._folder_icon = FOLDER_THUMBNAIL
         self._effect_icon = _vfx_tree_icon()
         self._buildUI()
         QtCore.QTimer.singleShot(0, self.refreshLibrary)
@@ -245,15 +246,7 @@ class VfxToolsUI(QtWidgets.QWidget):
         left_layout.addWidget(category_label)
         self.category_list = QtWidgets.QTreeWidget()
         self.category_list.setHeaderHidden(True)
-        self.category_list.setIndentation(16)
-        self.category_list.setIconSize(QtCore.QSize(16, 16))
-        self.category_list.setUniformRowHeights(True)
-        self.category_list.setStyleSheet(
-            "QTreeWidget{background:#1a1a1a; color:#b1b1b1; font-size:13px; border:0;}"
-            "QTreeWidget::item{padding:5px 2px;}"
-            "QTreeWidget::item:selected{background:#343a40; color:#f3f3f3;}"
-            "QTreeWidget::item:hover{background:#303030;}"
-        )
+        style_directory_view(self.category_list)
         self.category_list.setMinimumWidth(145)
         left_layout.addWidget(self.category_list, 1)
         splitter.addWidget(left)
@@ -270,7 +263,7 @@ class VfxToolsUI(QtWidgets.QWidget):
         self.display_button = self._toolButton("display_list.png", u"表单显示")
         toolbar.addWidget(self.display_button)
         self.size_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.size_slider.setRange(64, 200)
+        self.size_slider.setRange(64, 400)
         self.size_slider.setValue(120)
         self.size_slider.setMaximumWidth(250)
         self.size_slider.setToolTip(u"缩放特效卡片")
@@ -295,6 +288,7 @@ class VfxToolsUI(QtWidgets.QWidget):
         center_layout.addLayout(toolbar)
 
         self.card_list = _VfxCardList()
+        self.card_list.setLoadingMessage(u"正在准备特效…")
         self.card_list.setSortingEnabled(False)
         self.card_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.card_list.setListColumns(
@@ -390,12 +384,14 @@ class VfxToolsUI(QtWidgets.QWidget):
         self.load_button.setEnabled(False)
         self.card_list.clear()
         self.infoMsg("info", u"正在后台扫描服务器特效库…")
+        self.card_list.setLoadingMessage(u"正在准备特效…")
         try:
             project_content = ue_asset_service.project_content_dir()
         except Exception as exc:
             self.category_list.setEnabled(True)
             self.refresh_button.setEnabled(True)
             self._updateParentButton()
+            self.card_list.setLoadingMessage(u"特效准备失败，请点击刷新重试。")
             self.infoMsg("error", str(exc))
             return
         task = _LibraryScanTask(
@@ -428,6 +424,7 @@ class VfxToolsUI(QtWidgets.QWidget):
         ]
         filtered_count = 0
         if all_assets:
+            self.card_list.setLoadingMessage(u"正在准备特效，识别资源类型…")
             self.infoMsg("info", u"正在识别 Niagara 和 Cascade 特效类型…")
             QtWidgets.QApplication.processEvents()
             if generation != self._scan_generation:
@@ -459,7 +456,7 @@ class VfxToolsUI(QtWidgets.QWidget):
         self._assets_by_source = {}
         self.category_list.blockSignals(True)
         self.category_list.clear()
-        folder_icon = QtGui.QIcon(self._folder_icon)
+        directory_icon = folder_icon()
 
         def add_category(category, parent=None):
             path = category["path"]
@@ -468,7 +465,7 @@ class VfxToolsUI(QtWidgets.QWidget):
             item = QtWidgets.QTreeWidgetItem([category["name"]])
             item.setData(0, QtCore.Qt.UserRole, path)
             item.setToolTip(0, category["folder"])
-            item.setIcon(0, folder_icon)
+            item.setIcon(0, directory_icon)
             if parent is None:
                 self.category_list.addTopLevelItem(item)
             else:
@@ -496,6 +493,7 @@ class VfxToolsUI(QtWidgets.QWidget):
         self.category_list.setEnabled(True)
         self.refresh_button.setEnabled(True)
         self._navigateToCategory(self._preferred_category or ".")
+        self.card_list.setLoadingMessage()
 
     def _scanFailed(self, generation, error):
         if generation != self._scan_generation:
@@ -514,6 +512,7 @@ class VfxToolsUI(QtWidgets.QWidget):
         self.card_list.clear()
         self.parent_button.setEnabled(False)
         self.load_button.setEnabled(False)
+        self.card_list.setLoadingMessage(u"特效准备失败，请点击刷新重试。")
         self.infoMsg("error", error)
 
     def _currentCategory(self):

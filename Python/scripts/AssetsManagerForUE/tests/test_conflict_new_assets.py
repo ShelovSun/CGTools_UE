@@ -134,6 +134,23 @@ class NewFilesDialogTests(unittest.TestCase):
         self.assertEqual(len(self.plan["missing_files"]), 3)
         self.assertEqual(self.plan["skipped_missing_files"], [])
 
+    def test_mixed_asset_and_action_roots_are_queried_separately(self):
+        alternate = str(self.root / "Animations")
+        for entry in self.entries:
+            if entry["relative"].startswith("Mat/M_New"):
+                entry["source_content_root"] = alternate
+        def classes(paths, root):
+            return (["AnimSequence" if root == alternate else "Material"] * len(paths), "")
+        self.external.side_effect = classes
+        def verify(dialog, tree, rows, buttons):
+            self.assertEqual(rows["Mat/M_New.uasset"].text(3), "动画序列")
+            self.assertEqual(rows["Mat/M_New.uexp"].text(3), "动画序列")
+            self.assertEqual(rows["Mat/M_Shared.uasset"].text(3), "材质")
+            buttons["取消"].click()
+        self.run_dialog(verify)
+        self.assertEqual({call.args[1] for call in self.external.call_args_list},
+                         {self.plan["source_content_root"], alternate})
+
     def test_keep_all_clears_conflicts_but_new_files_never_enter_keep_list(self):
         def verify(dialog, tree, rows, buttons):
             buttons["全选"].click()

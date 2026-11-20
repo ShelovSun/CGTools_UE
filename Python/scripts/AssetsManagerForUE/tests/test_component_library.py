@@ -4,6 +4,8 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -82,6 +84,7 @@ class ComponentLibraryTests(unittest.TestCase):
             self.ui.shutdownThreads()
             self.ui.close()
             self.ui.deleteLater()
+        componentTools._DOCUMENT_POOL.waitForDone(3000)
         myWidget.Item.ThreadPool.waitForDone(3000)
         self.app.processEvents()
         QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
@@ -126,6 +129,13 @@ class ComponentLibraryTests(unittest.TestCase):
         QtTest.QTest.mouseClick(self.ui.card_list.viewport(), QtCore.Qt.LeftButton,
                                QtCore.Qt.NoModifier, point)
         self.app.processEvents()
+
+    def wait_for(self, predicate, timeout=4):
+        end = time.monotonic() + timeout
+        while not predicate() and time.monotonic() < end:
+            self.app.processEvents()
+            time.sleep(.003)
+        self.assertTrue(predicate())
 
     def double_click_card(self, name, button=QtCore.Qt.LeftButton):
         item = self.card(name)
@@ -199,8 +209,8 @@ class ComponentLibraryTests(unittest.TestCase):
         self.assertTrue(all(not item.isExpanded() for item in ui._category_items.values()))
         folder = self.card("Team3")
         self.assertEqual(folder.itemData()[7], ui._folder_icon)
-        self.assertTrue(ui._folder_icon.endswith("/icon/floder.png"))
-        self.assertFalse(QtGui.QImage(ui._folder_icon).isNull())
+        self.assertEqual(ui._folder_icon, componentTools.FOLDER_THUMBNAIL)
+        self.assertFalse(componentTools.folder_icon().isNull())
         self.assertEqual(folder.ueState(), "folder")
         ui.card_list.setCurrentItem(folder)
         self.assertFalse(ui.load_button.isEnabled())
@@ -275,7 +285,157 @@ class ComponentLibraryTests(unittest.TestCase):
         ui.card_list.setCurrentItem(plugin)
         ui.openUsageInstructions()
         self.assertTrue(ui.documentation_panel.isVisible())
+        self.wait_for(lambda: bool(ui._current_document_path))
         self.assertIn("Usage", ui.documentation_browser.toPlainText())
+
+    def test_documentation_stays_closed_until_opened_and_follows_selection(self):
+        ui = self.build_ui('Team3')
+        first = self.root / 'Team3/DirectPlugin/README.md'
+        first.write_text('# Direct instructions', encoding='utf-8')
+        with mock.patch.object(componentTools.component_documentation, 'prepare',
+                               wraps=componentTools.component_documentation.prepare) as prepare:
+            self.click_card('DirectPlugin')
+            self.assertFalse(ui.documentation_panel.isVisible())
+            self.assertEqual(prepare.call_count, 0)
+            ui.openUsageInstructions()
+            self.wait_for(lambda: 'Direct instructions' in ui.documentation_browser.toPlainText())
+            ui._navigateToCategory('Team4/其他/OtherPlugin')
+            self.wait_for(lambda: 'OtherPlugin' in ui.documentation_title.text()
+                          and bool(ui._current_document_path))
+            self.assertIn('Usage', ui.documentation_browser.toPlainText())
+            self.assertEqual(prepare.call_count, 2)
+            ui._closeDocumentationPanel()
+            ui._navigateToCategory('Team3/DirectPlugin')
+            QtTest.QTest.qWait(220)
+            self.assertFalse(ui.documentation_panel.isVisible())
+            self.assertEqual(prepare.call_count, 2)
+
+    def test_documentation_slow_source_keeps_ui_responsive_and_latest_wins(self):
+        ui = self.build_ui('Team3/DirectPlugin')
+        original = componentTools.component_documentation.prepare
+        calls, beats, applied = [], [], []
+        main_thread = threading.get_ident()
+        def slow(folder, cancelled):
+            calls.append((folder, threading.get_ident()))
+            if 'DirectPlugin' in folder:
+                # Deliberately unresponsive I/O, including returning a stale payload.
+                time.sleep(.45)
+                return original(folder)
+            return original(folder, cancelled)
+        timer = QtCore.QTimer()
+        timer.setInterval(10)
+        timer.timeout.connect(lambda: beats.append(time.monotonic()))
+        timer.start()
+        apply = ui._applyDocumentation
+        def record(payload, component):
+            applied.append(component['name'])
+            return apply(payload, component)
+        try:
+            with mock.patch.object(componentTools.component_documentation, 'prepare', side_effect=slow), \
+                 mock.patch.object(ui, '_applyDocumentation', side_effect=record):
+                started = time.monotonic()
+                ui.openUsageInstructions()
+                self.assertLess(time.monotonic() - started, .1)
+                self.wait_for(lambda: bool(calls))
+                ui._navigateToCategory('Team3/其他/ExamplePlugin')
+                QtTest.QTest.qWait(35)
+                ui._navigateToCategory('Team4/其他/OtherPlugin')
+                self.wait_for(lambda: 'OtherPlugin' in applied)
+            self.assertEqual(applied, ['OtherPlugin'])
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(all(thread != main_thread for _, thread in calls))
+            self.assertGreater(len(beats), 20)
+            self.assertLess(max(b - a for a, b in zip(beats, beats[1:])), .15)
+        finally:
+            timer.stop()
+
+    def test_documentation_cache_hit_and_same_selection_do_no_more_io(self):
+        ui = self.build_ui('Team3/DirectPlugin')
+        with mock.patch.object(componentTools.component_documentation, 'prepare',
+                               wraps=componentTools.component_documentation.prepare) as prepare:
+            ui.openUsageInstructions()
+            self.wait_for(lambda: bool(ui._current_document_path))
+            for _ in range(5):
+                ui._selectionChanged()
+            ui._navigateToCategory('Team4/其他/OtherPlugin')
+            self.wait_for(lambda: 'OtherPlugin' in ui.documentation_title.text()
+                          and bool(ui._current_document_path))
+            ui._navigateToCategory('Team3/DirectPlugin')
+            self.wait_for(lambda: 'DirectPlugin' in ui.documentation_title.text()
+                          and bool(ui._current_document_path))
+            self.assertEqual(prepare.call_count, 2)
+
+    def test_documentation_folder_and_missing_readme_clear_old_content_without_dialog(self):
+        ui = self.build_ui('Team3/DirectPlugin')
+        (self.root / 'Team4/其他/OtherPlugin/README.md').unlink()
+        with mock.patch.object(QtWidgets.QMessageBox, 'warning') as warning:
+            ui.openUsageInstructions()
+            self.wait_for(lambda: bool(ui._current_document_path))
+            ui._navigateToCategory('Team4/其他/OtherPlugin')
+            self.wait_for(lambda: '暂无' in ui.documentation_browser.toPlainText())
+            self.assertFalse(ui.documentation_external_button.isEnabled())
+            ui._navigateToCategory('Team3')
+            self.assertIn('请选择组件', ui.documentation_browser.toPlainText())
+            self.assertFalse(ui._current_document_path)
+            self.assertEqual(warning.call_count, 0)
+
+    def test_documentation_close_during_read_is_nonblocking_and_result_cannot_reopen(self):
+        ui = self.build_ui('Team3/DirectPlugin')
+        started = threading.Event()
+        original = componentTools.component_documentation.prepare
+        def delayed(folder, cancelled):
+            started.set()
+            time.sleep(.25)
+            return original(folder)
+        with mock.patch.object(componentTools.component_documentation, 'prepare', side_effect=delayed):
+            ui.openUsageInstructions()
+            self.wait_for(started.is_set)
+            begin = time.monotonic()
+            ui._closeDocumentationPanel()
+            self.assertLess(time.monotonic() - begin, .1)
+            self.wait_for(lambda: ui._documentation_task is None)
+        self.assertFalse(ui.documentation_panel.isVisible())
+        self.assertFalse(ui._current_document_path)
+        self.assertEqual(ui.documentation_browser.toPlainText(), '')
+
+    def test_documentation_hide_cancels_then_show_uses_current_selection(self):
+        ui = self.build_ui('Team3/DirectPlugin')
+        ui.openUsageInstructions()
+        self.wait_for(lambda: bool(ui._current_document_path))
+        ui.hide()
+        ui._navigateToCategory('Team4/其他/OtherPlugin')
+        self.assertFalse(ui._documentation_timer.isActive())
+        ui.show()
+        self.wait_for(lambda: 'OtherPlugin' in ui.documentation_title.text()
+                      and bool(ui._current_document_path))
+
+    def test_documentation_read_failure_is_inline_and_switch_recovers(self):
+        ui = self.build_ui('Team3/DirectPlugin')
+        with mock.patch.object(componentTools.component_documentation, 'prepare',
+                               side_effect=OSError('share temporarily unavailable')):
+            ui.openUsageInstructions()
+            self.wait_for(lambda: '暂时无法读取' in ui.documentation_browser.toPlainText())
+        ui.openUsageInstructions()
+        self.wait_for(lambda: bool(ui._current_document_path))
+        ui._navigateToCategory('Team4/其他/OtherPlugin')
+        self.wait_for(lambda: bool(ui._current_document_path))
+        self.assertIn('Usage', ui.documentation_browser.toPlainText())
+
+    def test_documentation_shutdown_during_slow_read_does_not_wait_or_apply(self):
+        ui = self.build_ui('Team3/DirectPlugin')
+        started = threading.Event()
+        def delayed(folder, cancelled):
+            started.set()
+            time.sleep(.25)
+            return dict(status='missing', message='stale', path='', cost=128)
+        with mock.patch.object(componentTools.component_documentation, 'prepare', side_effect=delayed):
+            ui.openUsageInstructions()
+            self.wait_for(started.is_set)
+            begin = time.monotonic()
+            ui.shutdownThreads()
+            self.assertLess(time.monotonic() - begin, .1)
+            self.wait_for(lambda: ui._documentation_task is None)
+        self.assertEqual(ui.documentation_browser.toPlainText(), '')
 
     def test_stale_scan_result_ignored_and_failure_clears_navigation(self):
         ui = self.build_ui("Team3")
@@ -311,7 +471,7 @@ class ComponentLibraryTests(unittest.TestCase):
         self.assertFalse(QtGui.QImage(ui._fallback_icon).isNull())
         self.assertNotEqual(ui._fallback_icon, ui._folder_icon)
         self.assertEqual(ui._category_items["Team3"].icon(0).pixmap(16, 16).toImage(),
-                         QtGui.QIcon(ui._folder_icon).pixmap(16, 16).toImage())
+                         componentTools.folder_icon().pixmap(16, 16).toImage())
         ui._navigateToCategory("Team3/其他")
         self.assertEqual(self.card("ExamplePlugin").itemData()[7],
                          self.components["Team3/其他/ExamplePlugin"]["icon"])
