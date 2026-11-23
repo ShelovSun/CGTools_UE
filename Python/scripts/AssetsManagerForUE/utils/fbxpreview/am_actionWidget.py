@@ -11,6 +11,7 @@
 
 import datetime
 import os
+import threading
 
 from PySide6 import QtCore
 from PySide6 import QtGui
@@ -20,6 +21,89 @@ __all__ = ["AssetActionWidget"]
 
 
 _SORT_VALUE_ROLE = int(QtCore.Qt.UserRole) + 1
+
+
+def _scan_action_files(action_dir, cancelled):
+    """Read metadata from scandir's cached entries, off the GUI thread."""
+    result = dict(exists=False, files=[], error="")
+    if not action_dir:
+        return result
+    pending = [(action_dir, "")]
+    while pending and not cancelled.is_set():
+        directory, prefix = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                if not prefix:
+                    result['exists'] = True
+                for entry in entries:
+                    if cancelled.is_set():
+                        return result
+                    relative = prefix + entry.name
+                    if entry.is_dir():
+                        if not entry.is_symlink():
+                            pending.append((entry.path, relative + "/"))
+                    elif entry.name.lower().endswith('.fbx'):
+                        try:
+                            stat = entry.stat()
+                            mtime, size = float(stat.st_mtime), int(stat.st_size)
+                        except OSError:
+                            mtime = size = None
+                        result['files'].append((relative, entry.path.replace('\\','/'), mtime, size))
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError as exc:
+            if not prefix:
+                result['error'] = str(exc)
+    result['files'].sort(key=lambda row: row[0].lower())
+    return result
+
+
+class _ActionScanSignals(QtCore.QObject):
+    finished = QtCore.Signal(int, int, str, object)
+
+
+class _ActionScanTask(QtCore.QRunnable):
+    def __init__(self, token, generation, directory, cancelled):
+        super().__init__()
+        self.signals = _ActionScanSignals()
+        self.token, self.generation = token, generation
+        self.directory, self.cancelled = directory, cancelled
+
+    def run(self):
+        try:
+            result = _scan_action_files(self.directory, self.cancelled)
+        except Exception as exc:
+            result = dict(exists=False, files=[], error=str(exc))
+        self.signals.finished.emit(self.token, self.generation, self.directory, result)
+
+
+class _ActionScanner(QtCore.QObject):
+    _instance = None
+
+    def __init__(self):
+        super().__init__()
+        self.pool = QtCore.QThreadPool()
+        self.pool.setMaxThreadCount(1)
+        self.jobs = {}
+        self.serial = 0
+
+    @classmethod
+    def instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def request(self, generation, directory, cancelled, callback):
+        self.serial += 1
+        task = _ActionScanTask(self.serial, generation, directory, cancelled)
+        self.jobs[self.serial] = task
+        task.signals.finished.connect(self._finished)
+        task.signals.finished.connect(callback)
+        self.pool.start(task)
+
+    @QtCore.Slot(int, int, str, object)
+    def _finished(self, token, _generation, _directory, _result):
+        self.jobs.pop(token, None)
 
 
 class AssetActionWidget(QtWidgets.QWidget):
@@ -38,7 +122,17 @@ class AssetActionWidget(QtWidgets.QWidget):
         super(AssetActionWidget, self).__init__(parent)
         self._action_dir = ""
         self._load_busy = False
+        self._closed = False
+        self._generation = 0
+        self._cancelled = threading.Event()
+        self._loading = False
+        self._phase = None
+        self._pending_rows = []
         self._build_ui()
+        # One single-shot timer: debounce requests, then yield between UI batches.
+        self._work_timer = QtCore.QTimer(self)
+        self._work_timer.setSingleShot(True)
+        self._work_timer.timeout.connect(self._advance_load)
         self.clear()
 
     # ------------------------------------------------------------------ UI
@@ -114,6 +208,9 @@ class AssetActionWidget(QtWidgets.QWidget):
 
     def clear(self):
         """清空动作列表,显示占位提示。"""
+        if self._closed:
+            return
+        self._cancel_pending()
         self._action_dir = ""
         self._search.blockSignals(True)
         self._search.clear()
@@ -122,9 +219,33 @@ class AssetActionWidget(QtWidgets.QWidget):
         self._list.clear()
         self._add_hint(u"未选择资产")
         self._list.blockSignals(False)
+        self._list.setEnabled(True)
+        self._title.setText(u"动作库：")
+
+    def _cancel_pending(self):
+        self._generation += 1
+        self._cancelled.set()
+        self._work_timer.stop()
+        self._phase = None
+        self._pending_rows = []
+        self._loading = False
+
+    def shutdown(self):
+        if not self._closed:
+            self._closed = True
+            self._cancel_pending()
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)
 
     def setAsset(self, rig_fbx_path):
-        """根据绑定文件路径填充 Animations 下该资产的 Action 动作列表(递归)。"""
+        """Select immediately; discover this asset's actions in a bounded worker."""
+        if self._closed:
+            return
+        self._cancel_pending()
+        self._cancelled = threading.Event()
+        self._title.setText(u"动作库：")
         self._search.blockSignals(True)
         self._search.clear()
         self._search.blockSignals(False)
@@ -134,33 +255,94 @@ class AssetActionWidget(QtWidgets.QWidget):
         action_dir = self._derive_action_dir(rig_fbx_path)
         self._action_dir = action_dir or ""
 
-        fbx_files = self._scan_actions(action_dir)
         # 顶部:回到绑定文件静态预览
         top = QtWidgets.QTreeWidgetItem([u"资产预览", "", ""])
         top.setData(0, QtCore.Qt.UserRole, "")
         self._list.addTopLevelItem(top)
-
-        if not action_dir or not os.path.isdir(action_dir):
+        if not action_dir:
             self._add_hint(u"无 Action 目录")
-        elif not fbx_files:
+        else:
+            self._add_hint(u"正在读取动作…")
+            self._loading = True
+            self._phase = 'scan'
+            self._work_timer.start(150)
+        self._list.setEnabled(not self._loading)
+        self._list.blockSignals(False)
+
+    def _advance_load(self):
+        if self._closed:
+            return
+        if self._phase == 'scan':
+            self._phase = None
+            _ActionScanner.instance().request(self._generation, self._action_dir,
+                                             self._cancelled, self._scan_finished)
+        elif self._phase == 'populate':
+            self._populate_rows()
+
+    @QtCore.Slot(int, int, str, object)
+    def _scan_finished(self, _token, generation, directory, result):
+        if self._closed or generation != self._generation or directory != self._action_dir:
+            return
+        self._list.clear()
+        top = QtWidgets.QTreeWidgetItem([u"资产预览", "", ""])
+        top.setData(0, QtCore.Qt.UserRole, "")
+        self._list.addTopLevelItem(top)
+        if result.get('error'):
+            self._add_hint(u"动作目录读取失败，请重新选择资产重试")
+        elif not result['exists']:
+            self._add_hint(u"无 Action 目录")
+        elif not result['files']:
             self._add_hint(u"该资产无动作 (.fbx)")
         else:
-            for rel, full, mtime, size in fbx_files:
-                it = QtWidgets.QTreeWidgetItem([
-                    rel,
-                    self._format_mtime(mtime),
-                    self._format_size(size),
-                ])
-                it.setData(0, QtCore.Qt.UserRole, full)
-                it.setData(0, _SORT_VALUE_ROLE, rel.lower())
-                it.setData(1, _SORT_VALUE_ROLE, mtime if mtime is not None else -1.0)
-                it.setData(2, _SORT_VALUE_ROLE, size if size is not None else -1)
-                it.setToolTip(0, full)
-                self._list.addTopLevelItem(it)
+            column = self._sort_column
+            def value(row):
+                if column == 0:
+                    return row[0].lower()
+                return row[column+1] if row[column+1] is not None else -1
+            self._pending_rows = sorted(result['files'], key=value,
+                                        reverse=self._sort_order == QtCore.Qt.DescendingOrder)
+            self._row_offset = 0
+            self._phase = 'populate'
+            self._work_timer.start(1)
+            return
+        self._finish_loading()
 
-            self._sort_action_items()
+    def _populate_rows(self):
+        clock = QtCore.QElapsedTimer()
+        clock.start()
+        blocked = self._list.blockSignals(True)
+        self._list.setUpdatesEnabled(False)
+        count = 0
+        keyword = self._search.text().strip().lower()
+        try:
+            while (self._row_offset < len(self._pending_rows) and count < 128
+                   and (count == 0 or clock.elapsed() < 4)):
+                rel, full, mtime, size = self._pending_rows[self._row_offset]
+                item = QtWidgets.QTreeWidgetItem([rel,self._format_mtime(mtime),self._format_size(size)])
+                item.setData(0,QtCore.Qt.UserRole,full)
+                item.setData(0,_SORT_VALUE_ROLE,rel.lower())
+                item.setData(1,_SORT_VALUE_ROLE,mtime if mtime is not None else -1.0)
+                item.setData(2,_SORT_VALUE_ROLE,size if size is not None else -1)
+                item.setToolTip(0,full)
+                self._list.addTopLevelItem(item)
+                item.setHidden(bool(keyword) and keyword not in rel.lower())
+                self._row_offset += 1
+                count += 1
+        finally:
+            self._list.setUpdatesEnabled(True)
+            self._list.blockSignals(blocked)
+        if self._row_offset < len(self._pending_rows):
+            self._title.setText(u"动作库：正在准备 {0}/{1}…".format(self._row_offset,len(self._pending_rows)))
+            self._work_timer.start(1)
+        else:
+            self._finish_loading()
 
-        self._list.blockSignals(False)
+    def _finish_loading(self):
+        self._loading = False
+        self._phase = None
+        self._pending_rows = []
+        self._title.setText(u"动作库：")
+        self._list.setEnabled(True)
 
     # ------------------------------------------------------------------ 内部
     def _derive_action_dir(self, rig_fbx_path):
@@ -178,24 +360,7 @@ class AssetActionWidget(QtWidgets.QWidget):
 
     def _scan_actions(self, action_dir):
         """递归收集 .fbx，返回相对路径、全路径、修改时间戳和字节数。"""
-        if not action_dir or not os.path.isdir(action_dir):
-            return []
-        out = []
-        for cur, _dirs, files in os.walk(action_dir):
-            for fn in files:
-                if fn.lower().endswith(".fbx"):
-                    full = os.path.join(cur, fn).replace("\\", "/")
-                    rel = os.path.relpath(full, action_dir).replace("\\", "/")
-                    try:
-                        stat = os.stat(full)
-                        mtime = float(stat.st_mtime)
-                        size = int(stat.st_size)
-                    except OSError:
-                        mtime = None
-                        size = None
-                    out.append((rel, full, mtime, size))
-        out.sort(key=lambda rf: rf[0].lower())
-        return out
+        return _scan_action_files(action_dir, threading.Event())['files']
 
     @staticmethod
     def _format_mtime(mtime):

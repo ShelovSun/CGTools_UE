@@ -35,6 +35,7 @@ from PySide6 import QtGui
 from PySide6 import QtCore
 from PySide6 import QtWidgets
 from PySide6 import QtOpenGL
+from shiboken6 import delete as _deleteQtObject, isValid as _qtObjectValid
 
 from . import am_fbxMesh as fbxMesh
 from .am_thumbnail_loader import ThumbnailLoader
@@ -60,6 +61,17 @@ _GL_FLOAT = 0x1406
 _STRIDE = 8 * 4  # pos3 + nrm3 + uv2,float32
 _SKIN_STRIDE = 16 * 4  # pos3 + nrm3 + uv2 + boneIdx4 + boneWeight4,float32
 _GRID_STRIDE = 3 * 4  # pos3,float32
+
+_PREVIEW_THREAD_POOL = None
+
+
+def _previewThreadPool():
+    """Process-owned CPU workers must outlive any closing preview window."""
+    global _PREVIEW_THREAD_POOL
+    if _PREVIEW_THREAD_POOL is None:
+        _PREVIEW_THREAD_POOL = QtCore.QThreadPool()
+        _PREVIEW_THREAD_POOL.setMaxThreadCount(2)
+    return _PREVIEW_THREAD_POOL
 
 _GL_MAX_VERTEX_UNIFORM_VECTORS = 0x8DFB
 
@@ -166,6 +178,8 @@ class GLView(QOpenGLWidget):
         self.setFormat(fmt)
 
         self._gl = None
+        self._resource_context = None
+        self._disposed = False
         self._program = None
         self._vbo = None
         self._a_pos = self._a_nrm = self._a_uv = -1
@@ -240,6 +254,8 @@ class GLView(QOpenGLWidget):
 
     # ----------------------------------------------------------- 网格接口
     def setMesh(self, interleaved_bytes, submeshes, images, bbox_min, bbox_max):
+        if self._disposed:
+            return
         self._anim_timer.stop()
         self._is_animated = False
         self._pending_skin_bytes = None
@@ -255,6 +271,8 @@ class GLView(QOpenGLWidget):
     def setAnimatedMesh(self, skin_bytes, submeshes, images, palettes,
                         frame_count, bone_count, fps, bbox_min, bbox_max):
         """设置带动画的蒙皮网格,自动循环播放(frame_count>1 时启动定时器)。"""
+        if self._disposed:
+            return
         self._is_animated = True
         self._pending_skin_bytes = skin_bytes
         self._pending_submeshes = submeshes or []
@@ -275,6 +293,8 @@ class GLView(QOpenGLWidget):
         self.update()
 
     def clearMesh(self):
+        if self._disposed:
+            return
         self._anim_timer.stop()
         self._is_animated = False
         self._pending_result = None
@@ -293,6 +313,8 @@ class GLView(QOpenGLWidget):
     def showResult(self, md, anim, images):
         """收到解析结果:有动画且蒙皮可用则播放动画,否则静态。初始化未完成时暂存,
         待 initializeGL 后决策(此时 _skin_supported/_max_bones 才就绪)。"""
+        if self._disposed:
+            return
         self._pending_result = (md, anim, images)
         self._applyResult()
 
@@ -427,8 +449,11 @@ class GLView(QOpenGLWidget):
 
     # ----------------------------------------------------------- GL 生命周期
     def initializeGL(self):
+        if self._disposed:
+            return
         self._init_failed = False
         try:
+            self._resource_context = self.context()
             self._gl = self.context().functions()
             self._gl.initializeOpenGLFunctions()
 
@@ -550,45 +575,53 @@ class GLView(QOpenGLWidget):
             self._skin_supported = False
             print("[PreviewGL] skin program failed: %r" % (e,))
 
+    def _releaseGLObjects(self):
+        """Delete native objects now, while cleanup controls the current context."""
+        for texture in self._textures.values():
+            if _qtObjectValid(texture):
+                _deleteQtObject(texture)
+        self._textures.clear()
+        for name in ('_vbo', '_skin_vbo', '_grid_vbo',
+                     '_program', '_skin_program', '_grid_program'):
+            resource = getattr(self, name)
+            if resource is not None and _qtObjectValid(resource):
+                _deleteQtObject(resource)
+            setattr(self, name, None)
+
+    @QtCore.Slot()
     def _cleanupGL(self):
-        """GL 上下文销毁前的清理:makeCurrent 后销毁 VBO/纹理,再 doneCurrent。
-        由 context().aboutToBeDestroyed 触发(DirectConnection,同线程同步执行)。
-        """
-        if self._gl is None:
-            return
-        self._anim_timer.stop()
-        self.makeCurrent()
+        """Release before context destruction, including the invalid-context fallback."""
+        if _qtObjectValid(self._anim_timer):
+            self._anim_timer.stop()
+        previous = QtGui.QOpenGLContext.currentContext()
+        previous_surface = previous.surface() if previous is not None else None
+        context = self._resource_context
+        current = False
         try:
-            for t in self._textures.values():
-                try:
-                    t.destroy()
-                except Exception:
-                    pass
-            self._textures = {}
-            if self._vbo is not None:
-                try:
-                    self._vbo.destroy()
-                except Exception:
-                    pass
-                self._vbo = None
-            if self._skin_vbo is not None:
-                try:
-                    self._skin_vbo.destroy()
-                except Exception:
-                    pass
-                self._skin_vbo = None
-            if self._grid_vbo is not None:
-                try:
-                    self._grid_vbo.destroy()
-                except Exception:
-                    pass
-                self._grid_vbo = None
+            if (_qtObjectValid(self) and context is not None
+                    and _qtObjectValid(context) and context.isValid()):
+                self.makeCurrent()
+                current = QtGui.QOpenGLContext.currentContext() == context
+            if not current:
+                # An already destroyed native parent can leave Python wrappers
+                # behind. With no current context Qt skips areSharing(), so a
+                # texture destructor cannot dereference its dead old context.
+                active = QtGui.QOpenGLContext.currentContext()
+                if active is not None:
+                    active.doneCurrent()
+            self._releaseGLObjects()
         finally:
-            self.doneCurrent()
+            if current:
+                self.doneCurrent()
+            if (previous is not None and previous != context
+                    and _qtObjectValid(previous) and previous.isValid()
+                    and previous_surface is not None):
+                previous.makeCurrent(previous_surface)
 
         # 这些对象和状态都属于刚刚销毁的上下文，不能在下一次 initializeGL 后复用。
         # _pending_result 刻意保留：若解析结果在上下文重建期间到达，新上下文可直接应用。
         self._gl_inited = False
+        self._resource_context = None
         self._gl = None
         self._program = None
         self._skin_program = None
@@ -609,12 +642,32 @@ class GLView(QOpenGLWidget):
         self._frame_count = 0
         self._bone_count = 0
 
+    def shutdown(self):
+        """Terminal cleanup, called while the window and its GL surface still exist."""
+        if self._disposed:
+            return
+        self._disposed = True
+        self._pending_result = None
+        self._cleanupGL()
+
+    def __del__(self):
+        # Native parent deletion can bypass Python closeEvent. The fallback in
+        # _cleanupGL also handles wrappers whose native context is already gone.
+        try:
+            self.shutdown()
+        except (AttributeError, RuntimeError, TypeError):
+            pass  # Partially initialized object or interpreter teardown.
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super(GLView, self).closeEvent(event)
+
     def resizeGL(self, w, h):
         if self._gl:
             self._gl.glViewport(0, 0, w, max(1, h))
 
     def paintGL(self):
-        if self._init_failed or not self._program:
+        if self._disposed or self._init_failed or not self._program:
             return
         # PySide2 下 _gl(QOpenGLFunctions) 可能被提前释放,防御性检查
         try:
@@ -948,10 +1001,12 @@ class _ParseSignals(QtCore.QObject):
     failed = QtCore.Signal(str)
 
 
-def _load_images(submeshes):
+def _load_images(submeshes, cancelled=None):
     """worker 线程加载贴图(QImage 非 GUI 对象可在子线程加载;竖直翻转以匹配 GL)。"""
     images = {}
     for sm in submeshes:
+        if cancelled is not None and cancelled.is_set():
+            break
         tp = sm.texture
         if tp and tp not in images:
             img = QtGui.QImage(tp)
@@ -962,22 +1017,29 @@ def _load_images(submeshes):
 
 class _ParseTask(QtCore.QRunnable):
     """缩略图静态预览:只读静态网格(want_anim=False,最快路径)。"""
-    def __init__(self, path, signals):
+    def __init__(self, path, signals, cancelled=None):
         super(_ParseTask, self).__init__()
         self._path = path
         self._signals = signals
+        self._cancelled = cancelled if cancelled is not None else threading.Event()
 
     def run(self):
+        if self._cancelled.is_set():
+            return
         try:
             md, anim = fbxMesh.read(self._path, want_anim=False)
+            if self._cancelled.is_set():
+                return
             axis = getattr(md, "axis_system", None)
             if axis is not None:
                 print("[PreviewGL] FBX axis: %s -> %s" %
                       (self._path, axis.describe()))
-            images = _load_images(md.submeshes)
-            self._signals.done.emit(self._path, md, anim, images)
+            images = _load_images(md.submeshes, self._cancelled)
+            if not self._cancelled.is_set():
+                self._signals.done.emit(self._path, md, anim, images)
         except Exception:
-            self._signals.failed.emit(self._path)
+            if not self._cancelled.is_set():
+                self._signals.failed.emit(self._path)
 
 
 class _CombineSignals(QtCore.QObject):
@@ -987,15 +1049,18 @@ class _CombineSignals(QtCore.QObject):
 
 class _CombineTask(QtCore.QRunnable):
     """动作预览:绑定文件蒙皮(可缓存) + 动作骨骼动画 -> 合成 AnimData。"""
-    def __init__(self, rig_path, action_path, signals, skin_cache, skin_lock):
+    def __init__(self, rig_path, action_path, signals, skin_cache, skin_lock, cancelled=None):
         super(_CombineTask, self).__init__()
         self._rig = rig_path
         self._action = action_path
         self._signals = signals
         self._skin_cache = skin_cache
         self._skin_lock = skin_lock
+        self._cancelled = cancelled if cancelled is not None else threading.Event()
 
     def run(self):
+        if self._cancelled.is_set():
+            return
         try:
             with self._skin_lock:
                 entry = self._skin_cache.get(self._rig)
@@ -1006,6 +1071,8 @@ class _CombineTask(QtCore.QRunnable):
             skin = entry[1] if (entry and entry[0] == mtime) else None
             if skin is None:
                 skin = fbxMesh.read_skin(self._rig)
+                if self._cancelled.is_set():
+                    return
                 print("[PreviewGL] read_skin(%s) = %s" % (self._rig, skin is not None))
                 if skin is not None:
                     with self._skin_lock:
@@ -1014,6 +1081,8 @@ class _CombineTask(QtCore.QRunnable):
                 self._signals.failed.emit(self._rig, self._action)
                 return
             action = fbxMesh.read_action(self._action)
+            if self._cancelled.is_set():
+                return
             print("[PreviewGL] read_action(%s) = %s" % (self._action, action is not None))
             if action is None:
                 self._signals.failed.emit(self._rig, self._action)
@@ -1058,11 +1127,16 @@ class _CombineTask(QtCore.QRunnable):
             # ---- 诊断结束 ----
 
             anim = fbxMesh.combine(skin, action)
+            if self._cancelled.is_set():
+                return
             print("[PreviewGL] combine -> frames=%d bones=%d"
                   % (anim.frame_count, anim.bone_count))
-            images = _load_images(anim.submeshes)
-            self._signals.done.emit(self._rig, self._action, anim, images)
+            images = _load_images(anim.submeshes, self._cancelled)
+            if not self._cancelled.is_set():
+                self._signals.done.emit(self._rig, self._action, anim, images)
         except Exception as e:
+            if self._cancelled.is_set():
+                return
             import traceback
             print("[PreviewGL] _CombineTask exception: %r" % (e,))
             traceback.print_exc()
@@ -1212,6 +1286,8 @@ class PreviewGLWidget(QtWidgets.QWidget):
     def __init__(self, isPlayer=True):
         super(PreviewGLWidget, self).__init__()
 
+        self._closed = False
+        self._cancelled = threading.Event()
         self.isPlayer = isPlayer
         self._preview_mode = "3d"       # 右下角按钮切换 3D FBX / 2D Icon
         self._name = None
@@ -1245,8 +1321,7 @@ class PreviewGLWidget(QtWidgets.QWidget):
 
         self._buildUI()
 
-        self._pool = QtCore.QThreadPool(self)
-        self._pool.setMaxThreadCount(2)
+        self._pool = _previewThreadPool()
         self._signals = _ParseSignals()
         self._signals.done.connect(self._onParsed)
         self._signals.failed.connect(self._onParseFailed)
@@ -1260,6 +1335,28 @@ class PreviewGLWidget(QtWidgets.QWidget):
         self._load_timer.timeout.connect(self._loadPending)
         self._pending_fbx = None
         self._pending_icon = None
+
+    def shutdown(self):
+        """Stop callbacks and release GPU objects before the native window is deleted."""
+        if self._closed:
+            return
+        self._closed = True
+        self._cancelled.set()
+        self._load_timer.stop()
+        self._surface_request_serial += 1
+        self._pending_fbx = self._pending_icon = None
+        self._current_fbx = self._current_action = self._selected_action = None
+        self._thumbnail_loader.clearProtectedPaths(self._thumbnail_protection_key)
+        if self._gl_view is not None:
+            self._gl_view.shutdown()
+        self._cache.clear()
+        self._cache_order.clear()
+        self._anim_cache.clear()
+        self._anim_order.clear()
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super(PreviewGLWidget, self).closeEvent(event)
 
     # ------------------------------------------------------------------ UI
     def _buildUI(self):
@@ -1373,12 +1470,13 @@ class PreviewGLWidget(QtWidgets.QWidget):
         外层控件保存着解析后的 FBX、动作和贴图 CPU 缓存，所以这里只替换很小的
         GLView 子控件。新控件会得到全新上下文；contextReady 后再从缓存提交当前模型。
         """
-        if not _HAS_QOPENGL or self._stack is None:
+        if self._closed or not _HAS_QOPENGL or self._stack is None:
             return False
 
         old_view = self._gl_view
         old_page = self._stack.currentIndex()
         if old_view is not None:
+            old_view.shutdown()
             self._stack.removeWidget(old_view)
             old_view.hide()
             old_view.setParent(None)
@@ -1418,10 +1516,11 @@ class PreviewGLWidget(QtWidgets.QWidget):
 
     def _schedulePreviewOverlayRefresh(self, *_args):
         """等 stacked page 完成层级与布局更新后，再恢复全部悬浮控件。"""
-        QtCore.QTimer.singleShot(0, self._positionPreviewOverlays)
+        if not self._closed:
+            QtCore.QTimer.singleShot(0, self._positionPreviewOverlays)
 
     def _positionPreviewOverlays(self):
-        if not hasattr(self, '_surface_prev_btn'):
+        if self._closed or not hasattr(self, '_surface_prev_btn'):
             return
         stack_w = self._stack.width()
         stack_h = self._stack.height()
@@ -1507,7 +1606,7 @@ class PreviewGLWidget(QtWidgets.QWidget):
 
     def _restoreCurrentPreview(self):
         """从 CPU 缓存重新提交当前模型，供 GL 上下文重建和手动恢复使用。"""
-        if self._gl_view is None or not self._current_fbx:
+        if self._closed or self._gl_view is None or not self._current_fbx:
             return False
 
         if self._current_action:
@@ -1550,6 +1649,8 @@ class PreviewGLWidget(QtWidgets.QWidget):
 
     # ------------------------------------------------- 对外接口(drop-in)
     def setTitle(self, name, zh_name):
+        if self._closed:
+            return
         self._name = str(name) if name is not None else None
         self._base_name = self._name
         self._base_zh_name = str(zh_name) if zh_name is not None else None
@@ -1562,6 +1663,8 @@ class PreviewGLWidget(QtWidgets.QWidget):
 
     def refreshThumbnail(self, path, image):
         """Refresh the current fallback image without reloading the FBX preview."""
+        if self._closed:
+            return
         key = os.path.normcase(os.path.normpath(path or ""))
         current = os.path.normcase(os.path.normpath(self._fallback_icon or ""))
         if key != current or image is None or image.isNull():
@@ -1572,6 +1675,8 @@ class PreviewGLWidget(QtWidgets.QWidget):
             self._applyFallbackPixmap()
 
     def setPreviewPixmap(self, path, _type=None):
+        if self._closed:
+            return
         self._fallback_icon = path or ""
         if self._preview_mode == "2d":
             self._showFallback(self._fallback_icon)
@@ -1605,7 +1710,7 @@ class PreviewGLWidget(QtWidgets.QWidget):
             lambda variants, token=serial: self._onSurfaceVariants(token, variants))
 
     def _onSurfaceVariants(self, serial, variants):
-        if serial != self._surface_request_serial:
+        if self._closed or serial != self._surface_request_serial:
             return
         if len(variants) < 2:
             self._clearSurfaceControls()
@@ -1682,6 +1787,8 @@ class PreviewGLWidget(QtWidgets.QWidget):
         self._updateSurfaceButtonState()
 
     def _onSurfaceButtonThumbnail(self, path, pixmap):
+        if self._closed:
+            return
         for button in self._surface_buttons.get(path, []):
             try:
                 button.setIcon(QtGui.QIcon(pixmap))
@@ -1729,6 +1836,8 @@ class PreviewGLWidget(QtWidgets.QWidget):
         pass  # FBX 预览无序列播放器,空实现保持接口兼容
 
     def clear(self):
+        if self._closed:
+            return
         self._load_timer.stop()
         self._surface_request_serial += 1
         self._pending_fbx = None
@@ -1757,6 +1866,8 @@ class PreviewGLWidget(QtWidgets.QWidget):
     def playAction(self, action_path):
         """把动作文件的骨骼动画套用到当前绑定文件上循环播放。
         action_path 为空/无效 -> 回到绑定文件静态预览。"""
+        if self._closed:
+            return
         norm = action_path.replace("\\", "/") if action_path else ""
         self._selected_action = norm or None
         rig = self._current_fbx
@@ -1778,7 +1889,7 @@ class PreviewGLWidget(QtWidgets.QWidget):
 
         self._showPageForCurrentMode(self._PAGE_LOADING)
         self._pool.start(_CombineTask(rig, norm, self._csignals,
-                                      self._skin_cache, self._skin_lock))
+                                      self._skin_cache, self._skin_lock, self._cancelled))
 
     def _rigStaticMd(self, rig):
         """从静态缓存取 rig 的 MeshData(作动画不支持时的回退);无则 None。"""
@@ -1797,10 +1908,10 @@ class PreviewGLWidget(QtWidgets.QWidget):
             self._showPageForCurrentMode(self._PAGE_GL)
         else:
             self._showPageForCurrentMode(self._PAGE_LOADING)
-            self._pool.start(_ParseTask(rig, self._signals))
+            self._pool.start(_ParseTask(rig, self._signals, self._cancelled))
 
     def _onCombined(self, rig, action, anim, images):
-        if rig != self._current_fbx or action != self._current_action:
+        if self._closed or rig != self._current_fbx or action != self._current_action:
             print("[PreviewGL] _onCombined: stale result, ignored")
             return  # 已切换,丢弃过期结果
         print("[PreviewGL] _onCombined: cache and show animation")
@@ -1810,7 +1921,7 @@ class PreviewGLWidget(QtWidgets.QWidget):
             self._showPageForCurrentMode(self._PAGE_GL)
 
     def _onCombineFailed(self, rig, action):
-        if rig != self._current_fbx or action != self._current_action:
+        if self._closed or rig != self._current_fbx or action != self._current_action:
             print("[PreviewGL] _onCombineFailed: stale result, ignored")
             return
         print("[PreviewGL] _onCombineFailed: fall back to static")
@@ -1838,6 +1949,8 @@ class PreviewGLWidget(QtWidgets.QWidget):
         return "%sFBX/%s.fbx" % (root, name)
 
     def _scheduleLoad(self, fbx, icon):
+        if self._closed:
+            return
         self._pending_fbx = fbx
         self._pending_icon = icon
         self._load_timer.start()
@@ -1846,6 +1959,8 @@ class PreviewGLWidget(QtWidgets.QWidget):
         self.loadFbx(self._pending_fbx, self._pending_icon)
 
     def loadFbx(self, fbx_path, fallback_icon=None):
+        if self._closed:
+            return
         norm = fbx_path.replace("\\", "/") if fbx_path else ""
         self._fallback_icon = fallback_icon or self._fallback_icon
 
@@ -1872,10 +1987,10 @@ class PreviewGLWidget(QtWidgets.QWidget):
             return
 
         self._showPageForCurrentMode(self._PAGE_LOADING)
-        self._pool.start(_ParseTask(norm, self._signals))
+        self._pool.start(_ParseTask(norm, self._signals, self._cancelled))
 
     def _onParsed(self, path, md, anim, images):
-        if path != self._current_fbx:
+        if self._closed or path != self._current_fbx:
             return  # 已切换,丢弃过期结果
         self._cachePut(path, md, anim, images)
         # 用户可能在皮肤 FBX 仍解析时就点击了动作。此时只补齐静态缓存，不让较晚
@@ -1887,12 +2002,14 @@ class PreviewGLWidget(QtWidgets.QWidget):
             self._showPageForCurrentMode(self._PAGE_GL)
 
     def _onParseFailed(self, path):
-        if path != self._current_fbx:
+        if self._closed or path != self._current_fbx:
             return
         self._current_fbx = None
         self._showFallback(self._fallback_icon)
 
     def _onGLFailed(self):
+        if self._closed:
+            return
         self._gl_failed = True
         self._showFallback(self._fallback_icon)
 

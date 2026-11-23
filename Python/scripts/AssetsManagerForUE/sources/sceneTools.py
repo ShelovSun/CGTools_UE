@@ -1809,6 +1809,8 @@ class SceneToolsUI(QtWidgets.QMainWindow):
         self._status_editor.shutdown()
         self._record_controller.shutdown()
         self._state_closed = True
+        if self.preview_wgt is not None:
+            self.preview_wgt.shutdown()
         self._load_check.cancel()
         self._state_requests.clear()
         self._state_generation += 1

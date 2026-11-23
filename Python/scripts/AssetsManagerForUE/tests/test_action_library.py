@@ -3,6 +3,7 @@
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -12,6 +13,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from PySide6 import QtCore, QtWidgets
 from AssetsManagerForUE.utils.fbxpreview.am_actionWidget import AssetActionWidget
+
+
+def wait_for_actions(widget):
+    app = QtWidgets.QApplication.instance()
+    deadline = time.monotonic()+8
+    while widget._loading and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.002)
+    if widget._loading:
+        raise AssertionError('Action scan and incremental rows did not finish')
 
 
 class ActionLibraryTests(unittest.TestCase):
@@ -35,6 +46,7 @@ class ActionLibraryTests(unittest.TestCase):
         self.addCleanup(self.widget.close)
 
     def action_items(self):
+        wait_for_actions(self.widget)
         return [
             item for index in range(self.widget._list.topLevelItemCount())
             if (item := self.widget._list.topLevelItem(index)).data(0, QtCore.Qt.UserRole)

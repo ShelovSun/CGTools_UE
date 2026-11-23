@@ -1283,6 +1283,10 @@ class AssetToolsUI(QtWidgets.QWidget):
         self._status_editor.shutdown()
         self._record_controller.shutdown()
         self._state_closed = True
+        if self.preview_wgt is not None:
+            self.preview_wgt.shutdown()
+        if self.action_wgt is not None:
+            self.action_wgt.shutdown()
         self._action_load_message = ""
         self._action_batch.cancel()
         self._load_check.cancel()

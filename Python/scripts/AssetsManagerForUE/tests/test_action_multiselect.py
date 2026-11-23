@@ -10,6 +10,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from PySide6 import QtCore, QtTest, QtWidgets
 from AssetsManagerForUE.utils.fbxpreview.am_actionWidget import AssetActionWidget
+from test_action_library import wait_for_actions
 
 
 class ActionMultiselectTests(unittest.TestCase):
@@ -30,6 +31,7 @@ class ActionMultiselectTests(unittest.TestCase):
             os.utime(path, (1700000000 + index, 1700000000 + index))
         self.widget = AssetActionWidget()
         self.widget.setAsset(str(self.root/'GOF/Assets/Characters/Hero/FBX/Hero.fbx'))
+        wait_for_actions(self.widget)
         self.widget.resize(650, 320)
         self.widget.show()
         self.app.processEvents()
