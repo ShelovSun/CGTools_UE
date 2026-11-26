@@ -18,13 +18,13 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..utils import messageBox, myWidget
 from ..utils.source_folder_menu import add_open_source_folder_action
-from ..utils.folder_style import folder_icon, style_directory_view
+from ..utils.folder_style import FOLDER_THUMBNAIL, folder_icon, style_directory_view
 from . import ue_asset_service
 
 
 BLUEPRINT_CONTENT_CANDIDATES = (
-    r"Y:\MCCTools\src\UE574\BlueprintFun\Content",
-    r"\\fznas.diandian.info\AC\MCCTools\src\UE574\BlueprintFun\Content",
+    r"Y:\MCCTools\src\UE574\BlueprintFun",
+    r"\\fznas.diandian.info\AC\MCCTools\src\UE574\BlueprintFun",
 )
 BLUEPRINT_LIBRARY_RELATIVE = os.path.join("Assets", "Blueprints")
 _FLAT = "border-style: flat; background: transparent;"
@@ -75,82 +75,110 @@ class _LibraryScanTask(QtCore.QRunnable):
 
     def run(self):
         try:
-            content_root = ""
+            root = ""
             for candidate in self.candidates:
                 if self.cancelled:
                     return
                 try:
                     if os.path.isdir(candidate):
-                        content_root = os.path.abspath(os.path.normpath(candidate))
+                        root = os.path.abspath(os.path.normpath(candidate))
                         break
                 except OSError:
                     continue
-            if not content_root:
+            if not root:
                 raise RuntimeError(
                     u"无法访问蓝图库：{0}".format(self.candidates[0]))
 
-            library_root = os.path.join(content_root, BLUEPRINT_LIBRARY_RELATIVE)
-            if not os.path.isdir(library_root):
-                raise RuntimeError(u"没有找到蓝图目录：{0}".format(library_root))
-
-            categories = []
-            category_names = sorted(
-                (name for name in os.listdir(library_root)
-                 if os.path.isdir(os.path.join(library_root, name))),
-                key=str.lower,
-            )
-            for category_name in category_names:
+            # One bounded project-group discovery, in the existing scan worker.
+            # Keep the old layout readable as TA until the project is moved.
+            if os.path.basename(root).lower() == "content":
+                root = os.path.dirname(root)
+            projects = []
+            with os.scandir(root) as entries:
+                folders = sorted((entry.name for entry in entries
+                                  if entry.is_dir(follow_symlinks=False)), key=str.lower)
+            for name in folders:
                 if self.cancelled:
                     return
-                category_folder = os.path.join(library_root, category_name)
-                plan = ue_asset_service.build_folder_import_plan(
-                    category_folder, content_root, self.project_content_dir)
-                assets = []
-                # 卡片区只显示分类根目录中的资源，与 ExtContentBrowser 选中该目录时
-                # 的资产视图一致。build_folder_import_plan 仍会递归收集整个分类，
-                # 因而 EditSet/Input/Joystick 等子目录虽然不被摊平成当前卡片，加载时
-                # 仍会随分类一起复制，蓝图引用不会缺失。
-                for filename in sorted(os.listdir(category_folder), key=str.lower):
-                    if self.cancelled:
-                        return
-                    source_file = os.path.abspath(os.path.join(category_folder, filename))
-                    if (not os.path.isfile(source_file)
-                            or os.path.splitext(filename)[1].lower() != ".uasset"):
-                        continue
-                    relative = os.path.relpath(source_file, content_root)
-                    object_path = ue_asset_service.object_path_for_source_file(
-                        source_file, content_root)
-                    try:
-                        modified = int(os.path.getmtime(source_file))
-                    except OSError:
-                        modified = 0
-                    thumbnail, no_thumbnail = _thumbnail_paths(source_file)
-                    assets.append({
-                        "name": os.path.splitext(filename)[0],
-                        "source_file": source_file,
-                        "relative": _forward(relative),
-                        "object_path": object_path,
-                        "modified": modified,
-                        "thumbnail": thumbnail,
-                        "no_thumbnail": no_thumbnail,
-                    })
-                assets.sort(key=lambda value: (
-                    value["relative"].lower(), value["name"].lower()))
-                categories.append({
-                    "name": category_name,
-                    "folder": category_folder,
-                    "content_root": content_root,
-                    "plan": plan,
-                    "assets": assets,
-                })
-
+                content = os.path.join(root, name, "Content")
+                if os.path.isdir(os.path.join(content, BLUEPRINT_LIBRARY_RELATIVE)):
+                    projects.append((name, content))
+            legacy = os.path.join(root, "Content")
+            if (not any(name.lower() == "ta" for name, _ in projects)
+                    and os.path.isdir(os.path.join(legacy, BLUEPRINT_LIBRARY_RELATIVE))):
+                projects.append(("TA", legacy))
+            groups, categories = [], []
+            for group_name, content_root in sorted(projects, key=lambda value: value[0].lower()):
+                group_categories = self._scanProject(group_name, content_root)
+                if self.cancelled:
+                    return
+                categories.extend(group_categories)
+                groups.append({"name": group_name, "path": group_name,
+                               "folder": os.path.dirname(content_root),
+                               "categories": group_categories})
             self.signals.loaded.emit(self.generation, {
-                "content_root": content_root,
-                "library_root": library_root,
-                "categories": categories,
+                "root": root, "groups": groups, "categories": categories,
             })
         except Exception as exc:
-            self.signals.failed.emit(self.generation, str(exc))
+            if not self.cancelled:
+                self.signals.failed.emit(self.generation, str(exc))
+
+    def _scanProject(self, group_name, content_root):
+        library_root = os.path.join(content_root, BLUEPRINT_LIBRARY_RELATIVE)
+        categories = []
+        category_names = sorted(
+            (name for name in os.listdir(library_root)
+             if os.path.isdir(os.path.join(library_root, name))),
+            key=str.lower,
+        )
+        for category_name in category_names:
+            if self.cancelled:
+                return
+            category_folder = os.path.join(library_root, category_name)
+            plan = ue_asset_service.build_folder_import_plan(
+                category_folder, content_root, self.project_content_dir)
+            assets = []
+            # 卡片区只显示分类根目录中的资源，与 ExtContentBrowser 选中该目录时
+            # 的资产视图一致。build_folder_import_plan 仍会递归收集整个分类，
+            # 因而 EditSet/Input/Joystick 等子目录虽然不被摊平成当前卡片，加载时
+            # 仍会随分类一起复制，蓝图引用不会缺失。
+            for filename in sorted(os.listdir(category_folder), key=str.lower):
+                if self.cancelled:
+                    return
+                source_file = os.path.abspath(os.path.join(category_folder, filename))
+                if (not os.path.isfile(source_file)
+                        or os.path.splitext(filename)[1].lower() != ".uasset"):
+                    continue
+                relative = os.path.relpath(source_file, content_root)
+                object_path = ue_asset_service.object_path_for_source_file(
+                    source_file, content_root)
+                try:
+                    modified = int(os.path.getmtime(source_file))
+                except OSError:
+                    modified = 0
+                thumbnail, no_thumbnail = _thumbnail_paths(source_file)
+                assets.append({
+                    "name": os.path.splitext(filename)[0],
+                    "source_file": source_file,
+                    "relative": _forward(relative),
+                    "object_path": object_path,
+                    "modified": modified,
+                    "thumbnail": thumbnail,
+                    "no_thumbnail": no_thumbnail,
+                })
+            assets.sort(key=lambda value: (
+                value["relative"].lower(), value["name"].lower()))
+            categories.append({
+                "name": category_name,
+                "path": group_name + "/" + category_name,
+                "group": group_name,
+                "folder": category_folder,
+                "content_root": content_root,
+                "plan": plan,
+                "assets": assets,
+            })
+
+        return categories
 
 
 class BlueprintToolsUI(QtWidgets.QWidget):
@@ -166,6 +194,8 @@ class BlueprintToolsUI(QtWidgets.QWidget):
         self._scan_task = None
         self._library_payload = {}
         self._categories = {}
+        self._category_items = {}
+        self._folders = {}
         self._copy_thread = None
         self._copy_worker = None
         self._copy_category = ""
@@ -198,7 +228,8 @@ class BlueprintToolsUI(QtWidgets.QWidget):
         category_label.setStyleSheet(
             "font-weight:bold; color:#d7d7d7; padding:4px 5px; background:#252628;")
         left_layout.addWidget(category_label)
-        self.category_list = QtWidgets.QListWidget()
+        self.category_list = QtWidgets.QTreeWidget()
+        self.category_list.setHeaderHidden(True)
         style_directory_view(self.category_list)
         self.category_list.setMinimumWidth(145)
         left_layout.addWidget(self.category_list, 1)
@@ -293,6 +324,7 @@ class BlueprintToolsUI(QtWidgets.QWidget):
         self.search_edit.textChanged.connect(self._searchTextChanged)
         self.card_list.customContextMenuRequested.connect(self._showContextMenu)
         self.card_list.itemSelectionChanged.connect(self._selectionChanged)
+        self.card_list.itemDoubleClicked.connect(self._enterFolder)
         self.card_list.assetDropRequested.connect(self._placeBlueprint)
         self.card_list.setAssetDragResolver(
             lambda item: ue_asset_service.resolve_local_drag_asset(
@@ -396,25 +428,41 @@ class BlueprintToolsUI(QtWidgets.QWidget):
         self._scan_task = None
         self._library_payload = payload or {}
         categories = self._library_payload.get("categories") or []
-        self._categories = {value["name"]: value for value in categories}
+        self._categories = {value.get("path", value["name"]): value for value in categories}
+        self._category_items = {}
+        self._folders = {}
         self.category_list.blockSignals(True)
         self.category_list.clear()
-        selected_row = 0
-        for row, category in enumerate(categories):
-            item = QtWidgets.QListWidgetItem(category["name"])
-            item.setData(QtCore.Qt.UserRole, category["name"])
-            item.setToolTip(category["folder"])
-            item.setIcon(folder_icon())
-            self.category_list.addItem(item)
-            if category["name"] == self._preferred_category:
-                selected_row = row
+        root = QtWidgets.QTreeWidgetItem([u"蓝图库"])
+        root.setData(0, QtCore.Qt.UserRole, ".")
+        root.setIcon(0, folder_icon())
+        self.category_list.addTopLevelItem(root)
+        self._category_items["."] = root
+        groups = self._library_payload.get("groups") or []
+        self._folders["."] = groups
+        for group in groups:
+            group_item = QtWidgets.QTreeWidgetItem(root, [group["name"]])
+            group_item.setData(0, QtCore.Qt.UserRole, group["path"])
+            group_item.setToolTip(0, group["folder"])
+            group_item.setIcon(0, folder_icon())
+            self._category_items[group["path"]] = group_item
+            self._folders[group["path"]] = group["categories"]
+            for category in group["categories"]:
+                key = category["path"]
+                item = QtWidgets.QTreeWidgetItem(group_item, [category["name"]])
+                item.setData(0, QtCore.Qt.UserRole, key)
+                item.setToolTip(0, category["folder"])
+                item.setIcon(0, folder_icon())
+                self._category_items[key] = item
+        self.category_list.collapseAll()
         self.category_list.blockSignals(False)
         self.category_list.setEnabled(True)
         self.refresh_button.setEnabled(True)
-        if categories:
-            self.category_list.setCurrentRow(selected_row)
-        else:
-            self.card_list.clear()
+        preferred = self._preferred_category
+        if preferred not in self._category_items and "TA/" + preferred in self._category_items:
+            preferred = "TA/" + preferred
+        self._navigateToCategory(preferred or ".")
+        if not categories:
             self.infoMsg("warning", u"蓝图目录中没有分类文件夹")
         self.card_list.setLoadingMessage()
 
@@ -425,6 +473,9 @@ class BlueprintToolsUI(QtWidgets.QWidget):
         self.category_list.setEnabled(True)
         self.refresh_button.setEnabled(True)
         self.category_list.clear()
+        self._categories = {}
+        self._category_items = {}
+        self._folders = {}
         self.card_list.clear()
         self.card_list.setLoadingMessage(u"蓝图准备失败，请点击刷新重试。")
         self.infoMsg("error", error)
@@ -434,7 +485,10 @@ class BlueprintToolsUI(QtWidgets.QWidget):
         if current is None:
             self.card_list.clear()
             return
-        self._preferred_category = str(current.data(QtCore.Qt.UserRole) or current.text())
+        self._preferred_category = str(current.data(0, QtCore.Qt.UserRole) or ".")
+        self.search_edit.blockSignals(True)
+        self.search_edit.clear()
+        self.search_edit.blockSignals(False)
         self._rememberSettings()
         self._rebuildCards()
 
@@ -442,7 +496,22 @@ class BlueprintToolsUI(QtWidgets.QWidget):
         item = self.category_list.currentItem()
         if item is None:
             return ""
-        return str(item.data(QtCore.Qt.UserRole) or item.text())
+        return str(item.data(0, QtCore.Qt.UserRole) or ".")
+
+    def _navigateToCategory(self, key):
+        item = self._category_items.get(key) or self._category_items.get(".")
+        if item is None:
+            return
+        parent = item.parent()
+        while parent is not None:
+            parent.setExpanded(True)
+            parent = parent.parent()
+        self.category_list.setCurrentItem(item)
+        self.category_list.scrollToItem(item)
+
+    def _enterFolder(self, item):
+        if item is not None and item.ueState() == "folder" and not self._operationIsRunning():
+            self._navigateToCategory(str(item.itemData()[10]))
 
     def _rebuildCards(self):
         category_name = self._currentCategory()
@@ -450,6 +519,24 @@ class BlueprintToolsUI(QtWidgets.QWidget):
         self.card_list.clear()
         self.blueprint_list_header.setVisible(self.isList)
         if not category:
+            self._thumbnail_generation += 1
+            self._thumbnail_queue = []
+            entries = [entry for entry in self._folders.get(category_name, [])
+                       if self.search_edit.text().strip().lower() in entry["name"].lower()]
+            rows = [(0, entry["name"], category_name, "", "", "", "", FOLDER_THUMBNAIL,
+                     entry["folder"], category_name, entry["path"]) for entry in entries]
+            self.card_list.setItems(rows)
+            self.card_list.setIsList(self.isList)
+            self.card_list.setItemSize(self.size_slider.value())
+            self.card_list.addItems("")
+            self.card_list.setMode()
+            for index in range(self.card_list.count()):
+                item = self.card_list.item(index)
+                item.setDragEnabled(False)
+                item.setUEState("folder", u"双击进入文件夹")
+            self._selectionChanged()
+            self.infoMsg("info", u"{0}：{1} 个文件夹".format(
+                u"蓝图库" if category_name == "." else category_name, len(rows)))
             return
         keyword = self.search_edit.text().strip().lower()
         rows = []
@@ -517,6 +604,7 @@ class BlueprintToolsUI(QtWidgets.QWidget):
     def _selectionChanged(self):
         self.load_button.setEnabled(
             self.card_list.currentItem() is not None
+            and self.card_list.currentItem().ueState() != "folder"
             and not self._operationIsRunning())
 
     def _operationIsRunning(self):
@@ -590,6 +678,10 @@ class BlueprintToolsUI(QtWidgets.QWidget):
             return
         self.card_list.setCurrentItem(item)
         menu = QtWidgets.QMenu(self)
+        if item.ueState() == "folder":
+            add_open_source_folder_action(menu, str(item.itemData()[8]))
+            menu.exec_(self.card_list.viewport().mapToGlobal(point))
+            return
         add_open_source_folder_action(menu, os.path.dirname(str(item.itemData()[8])))
         menu.addSeparator()
         load_action = QtGui.QAction(u"加载蓝图", self)
@@ -625,6 +717,8 @@ class BlueprintToolsUI(QtWidgets.QWidget):
         item = item or self.card_list.currentItem()
         if item is None:
             self.infoMsg("warning", u"请先选择一张蓝图卡片")
+            return
+        if item.ueState() == "folder":
             return
         if self._operationIsRunning():
             self.infoMsg("warning", u"已有蓝图分类正在加载，请等待完成")
